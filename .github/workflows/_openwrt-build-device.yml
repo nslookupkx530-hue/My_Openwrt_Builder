@@ -102,6 +102,22 @@ jobs:
           mkdir -p dl
 
 
+      - name: Update feeds
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${{ github.workspace }}/src"
+          ./scripts/feeds update -a
+
+
+      - name: Install feeds
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${{ github.workspace }}/src"
+          ./scripts/feeds install -a -f
+
+
       - name: Prepare Base Configuration
         env:
           SOURCE_TYPE: ${{ github.event.inputs.source_type }}
