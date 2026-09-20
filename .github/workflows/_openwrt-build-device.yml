@@ -4,13 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       source_type:
-        description: 'Source Type (openwrt or immortalwrt)'
+        description: 'Source Type'
         required: true
         default: 'immortalwrt'
-      devices:
-        description: 'Target Devices (comma-separated)'
+        type: choice
+        options:
+          - openwrt
+          - immortalwrt
+      target_device:
+        description: 'Target Device'
         required: true
-        default: 'x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, Tenda-BE12PRO'
+        default: 'x86'
+        type: choice
+        options:
+          - x86
+          - AXT-1800
+          - GL-MT3600BE
+          - Cudy-TR3000-256MB
+          - Tenda-BE12PRO
       custom_packages:
         description: 'Optional: list of extra packages'
         required: false
@@ -18,14 +29,12 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.device }} (${{ matrix.source_type }})
+    name: Build ${{ github.event.inputs.target_device }} (${{ github.event.inputs.source_type }})
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
+      # 这里的矩阵现在只针对源进行并行（每个设备同时跑两个源）
       matrix:
-        # 在这里配置你的设备与源的对应关系
-        # 如果只想编译特定设备，可以把不需要的删掉
-        device: [x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, Tenda-BE12PRO]
         source_type: [openwrt, immortalwrt]
     
     # 如果你想控制特定设备只用特定的源，可以取消下面这一段逻辑，
