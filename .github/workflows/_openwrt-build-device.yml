@@ -159,11 +159,12 @@ jobs:
 
       - name: Finalize Configuration
         run: |
-          set -uo pipefail
-          cd "${{ github.workspace }}/src"
+          # 确保在 src 目录下执行
+          cd src
           # 重新执行一次 defconfig 是为了确保 inject_plugins.sh 注入的配置 
           # 被构建系统正确解析并补全依赖，这是修改 .config 后的标准操作
-          make defconfig V=s
+          # 使用 FORCE=1 是为了在 GitHub Actions 环境下忽略主机环境不匹配的警告
+          make defconfig FORCE=1
 
 
       - name: Build firmware
