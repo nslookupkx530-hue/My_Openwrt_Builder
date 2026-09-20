@@ -1,0 +1,222 @@
+name: OpenWrt Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_type:
+        description: 'Source Type (openwrt or immortalwrt)'
+        required: true
+        default: 'immortalwrt'
+      custom_packages:
+        description: 'Optional: list of extra packages'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build ${{ matrix.device }} (${{ matrix.source_type }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 在这里配置你的设备与源的对应关系
+        # 如果只想编译特定设备，可以把不需要的删掉
+        device: [x86, gl-ax1800, gl-mt3600be, Cudy-TR3000-256MB, tenda-be12]
+        source_type: [openwrt, immortalwrt]
+    
+    # 如果你想控制特定设备只用特定的源，可以取消下面这一段逻辑，
+    # 或者通过更复杂的 matrix 定义。这里默认是全排列。
+    # 如果只想跑特定的，建议在 matrix 里写死。
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # 确保获取到所有子模块（如果你的源码里有子模块的话）
+          submodules: recursive
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 python3-pip libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gawk freirels libssl-dev openssl-dev texinfo bison flex libffi-dev \
+            build-essential libreadline-dev libsqlite3-dev lethe-dev libxt_dev \
+            awk autoconf automake libtool python3-mako gcc-multilib \
+            libcap-dev libcap-dev-static libgd-dev libjpeg-dev libpng-dev \
+            libcurl4-gnutls-dev libxml2-dev libxslt-dev
+          # 注意：实际编译 OpenWrt 需要很多依赖，建议根据你的源码要求补充
+
+
+      - name: Clone Source Repository
+        run: |
+          if [ "${{ matrix.source_type }}" = "immortalwrt" ]; then
+            git clone https://github.com/ImmortalWrt/immortalwrt.git src
+          else
+            git clone https://github.com/openwrt/openwrt.git src
+          fi
+          cd src
+          git submodule update --init --recursive
+
+
+      - name: Clean build environment
+        # 清理编译环境
+        run: |
+          set -euxo pipefail
+          rm -rf src/staging_dir src/build_dir src/tmp
+          mkdir -p src/dl
+
+
+      - name: Prepare Base Configuration
+        env:
+          SOURCE_TYPE: ${{ matrix.source_type }}
+          TARGET_DEVICE: ${{ matrix.device }}
+        run: |
+          # 进入 src 目录确保 .config 生成在正确位置
+          cd src
+          # 执行获取 .buildinfo 并转换为 .config 的脚本
+          # 该脚本会自动根据 SOURCE_TYPE 抓取对应源的最新稳定版配置
+          bash ../shell/prepare_base_config.sh
+          
+          # 确认 .config 是否生成成功
+          if [ ! -f .config ]; then
+            echo "Error: .config file was not generated!"
+            exit 1
+          fi
+
+          echo "=============================================================="
+          echo ">>> FINAL .config CONTENT (Source: ${SOURCE_TYPE}, Device: ${TARGET_DEVICE})"
+          echo "=============================================================="
+          cat .config
+          echo "=============================================================="
+
+
+      - name: Load third-party config
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CONFIG_PATH="Third-Party/third-party.config"
+          
+          if [ ! -f "${CONFIG_PATH}" ]; then
+            echo "Missing third-party config at ${CONFIG_PATH}"
+            exit 1
+          fi
+          
+          source "${CONFIG_PATH}"
+          echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES:-}" >> "$GITHUB_ENV"
+          echo "=========================================="
+          echo "Third-party CUSTOM_PACKAGES:"
+          echo "${CUSTOM_PACKAGES:-}"
+          echo "=========================================="
+
+
+      - name: Inject Plugins
+        run: |
+          # 执行插件注入脚本
+          # 它会根据 configs/plugins.cfg 修改 .config 中的用户态软件
+          bash ../shell/inject_plugins.sh
+
+
+      - name: Prepare Third-Party APKs
+        env:
+          SOURCE_DIR: ./
+          CUSTOM_PACKAGES: "${{ env.CUSTOM_PACKAGES }}"
+        run: |
+          # 这里的 SOURCE_DIR 指向当前 src 目录，确保脚本能找到正确的路径
+          # 如果你在 GitHub Actions 界面手动输入了插件列表，它会从环境变量获取
+          cd src
+          bash ../shell/apk-prepare-packages.sh
+
+
+      - name: Finalize Configuration
+        run: |
+          # 重新执行一次 defconfig 是为了确保 inject_plugins.sh 注入的配置 
+          # 被构建系统正确解析并补全依赖，这是修改 .config 后的标准操作
+          make defconfig
+
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # 注意：这里路径改为 src，对应你之前的 Clone 步骤
+          cd "${{ github.workspace }}/src"
+
+          # 使用所有可用核心进行并行编译
+          # 如果在 GitHub Actions 上遇到内存不足（OOM）导致崩溃，
+          # 可以将 -j$(nproc) 修改为 -j2 或 -j4
+          export MAKEFLAGS="-j$(nproc)"
+          export HOSTCFLAGS="-Wno-error"
+          export HOSTCXXFLAGS="-Wno-error"
+          export HOSTLDFLAGS=""
+
+          echo "========================================"
+          echo ">>> 开始 OpenWrt 编译"
+          echo ">>> CPU: $(nproc)"
+          echo "========================================"
+
+          # 暂时关闭错误立即退出，以便后续分析日志
+          set +e
+          # V=s 显示所有编译细节，2>&1 将标准错误也定向到标准输出，| tee 同时输出到控制台和 build.log
+          make V=s 2>&1 | tee build.log
+          BUILD_RC=${PIPESTATUS[0]}
+          # 恢复错误立即退出
+          set -e
+
+          echo ""
+          echo "========================================"
+          echo ">>> OpenWrt 构建结果"
+          echo "========================================"
+          echo "make exit code: ${BUILD_RC}"
+
+          if [ "${BUILD_RC}" -ne 0 ]; then
+            echo ""
+            echo "========== FAILED PACKAGE =========="
+            # 提取具体的软件包失败信息
+            grep -E "ERROR: package/|failed to build" build.log | tail -30 || true
+
+            echo ""
+            echo "========== MAKE ERRORS =========="
+            # 提取 make 的报错信息
+            grep -E "make\[[0-9]+\]: \*\*\*" build.log | tail -50 || true
+
+            echo ""
+            echo "========== COMPILER FATAL ERRORS =========="
+            # 提取编译器致命错误
+            grep -E "fatal error:|error:" build.log | tail -50 || true
+
+            echo ""
+            echo "========== LAST 200 LINES =========="
+            # 输出最后 200 行，通常包含最后的崩溃位置
+            tail -200 build.log
+
+            # 确保 GitHub Actions 状态为失败
+            exit "${BUILD_RC}"
+          fi
+
+          echo ""
+          echo "========================================"
+          echo ">>> OpenWrt 编译成功"
+          echo "========================================"
+
+
+      - name: Upload Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.device }}-${{ matrix.source_type }}
+          # 路径统一为 src/bin/*
+          path: src/bin/*
+ 
+          
+      - name: Create Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          # 自动生成名称：设备名-日期-RunID
+          # 例如: x86-2025-05-20-35429357989
+          tag_name: ${{ matrix.device }}-${{ github.event.date }}-${{ github.run_number }}
+          files: src/bin/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}     
