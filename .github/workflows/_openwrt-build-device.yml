@@ -7,6 +7,10 @@ on:
         description: 'Source Type (openwrt or immortalwrt)'
         required: true
         default: 'immortalwrt'
+      devices:
+        description: 'Target Devices (comma-separated)'
+        required: true
+        default: 'x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, Tenda-BE12PRO'
       custom_packages:
         description: 'Optional: list of extra packages'
         required: false
