@@ -50,33 +50,35 @@ else
     BASE_URL="https://downloads.openwrt.org/releases"
 fi
 
-# --- 3. 设备与 Target 路径映射 ---
-# 注意：为了保证内核哈希一致，这里映射到官方的通用 target。
-# 对于 GL.iNet 等设备，使用对应的 SoC 基础配置即可。
+# --- 3. 设备与 Target 路径映射 (核心：确保内核哈希一致) ---
+# 根据你提供的处理器规格进行精确映射
 case "$TARGET_DEVICE" in
     "x86"|"x86_64")
         DEVICE_PATH="targets/x86/64"
         ;;
     "AXT-1800")
-        # 高通 IPQ60xx 系列
+        # 高通 IPQ6000/6018 系列
         DEVICE_PATH="targets/qualcommax/ipq60xx"
         ;;
-    "GL-MT3600BE"|"Cudy-TR3000-256MB")
-        # 联发科 Filogic 系列
+    "GL-MT3600BE")
+        # 联发科 Filogic 系列 (MT7987A)
+        DEVICE_PATH="targets/mediatek/filogic"
+        ;;
+    "Cudy-TR3000-256MB")
+        # 联发科 Filogic 系列 (MT7981B)
         DEVICE_PATH="targets/mediatek/filogic"
         ;;
     "Tenda-BE12PRO")
-        # 联发科 Filogic 系列 (MT7988A/B)
+        # 联发科 Filogic 系列 (MT7988A)
         DEVICE_PATH="targets/mediatek/filogic"
         ;;
     *)
         echo "Error: Unknown device $TARGET_DEVICE"
-        echo "Please check the mapping in the script."
         exit 1
         ;;
 esac
 
-echo "Mapped Device Path: ${DEVICE_PATH}"
+echo "Mapped Device Path: $DEVICE_PATH"
 
 # --- 4. 构造最终 URL ---
 # 官方通常的路径结构是: BASE_URL/targets/xxx/xxx/xxx/config.buildinfo
@@ -86,10 +88,10 @@ FINAL_URL="${BASE_URL}/${DEVICE_PATH}/config.buildinfo"
 
 echo "Fetching config from: ${FINAL_URL}"
 
-# --- 5. 执行下载 ---
 # 使用 -L 跟随重定向，-s 静默模式，-o 输出到临时文件
 if curl -L -s "${FINAL_URL}" -o "tmp_config.buildinfo"; then
     echo "Download successful."
+    # 覆盖当前的 .config
     mv "tmp_config.buildinfo" ".config"
     echo "Created .config from official source."
 else
@@ -99,8 +101,10 @@ else
     exit 1
 fi
 
-# --- 6. 执行 make defconfig ---
-echo "Running make defconfig to complement the configuration..."
-# 使用 -j1 确保 defconfig 在单线程下运行，避免某些构建系统下的竞态问题
-make defconfig
-echo "make defconfig completed successfully."
+# --- 5. 执行 make defconfig ---
+# 使用 FORCE=1 是为了在 GitHub Actions 环境下绕过某些环境依赖检查（如特定的 host 库缺失）
+# 这一步会根据官方 buildinfo 自动补全所有基础依赖
+echo "Running make defconfig with FORCE=1..."
+make defconfig FORCE=1
+
+echo "Configuration preparation completed successfully."
