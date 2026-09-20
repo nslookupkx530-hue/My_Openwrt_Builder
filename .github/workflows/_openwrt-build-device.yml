@@ -125,8 +125,10 @@ jobs:
             echo "Missing third-party config at ${CONFIG_PATH}"
             exit 1
           fi
-          
+
+          # 加载配置
           source "${CONFIG_PATH}"
+          
           # 将从配置文件中读取到的 CUSTOM_PACKAGES 写入到 GitHub Environment 变量中
           echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES:-}" >> "$GITHUB_ENV"
           echo "=========================================="
@@ -139,7 +141,7 @@ jobs:
         run: |
           # 执行插件注入脚本
           # 它会根据 configs/plugins.cfg 修改 .config 中的用户态软件
-          bash ../shell/inject_plugins.sh
+          bash ./shell/inject_plugins.sh
 
 
       - name: Prepare Third-Party APKs
