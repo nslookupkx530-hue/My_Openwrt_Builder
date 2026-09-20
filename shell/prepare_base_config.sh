@@ -15,7 +15,7 @@
 set -euxo pipefail
 
 # --- 1. 参数处理 ---
-SOURCE_TYPE="${1:-openwrt}"    # 默认 openwrt
+SOURCE_TYPE="${1:-immortalwrt}"    # 默认 immortalwrt
 TARGET_DEVICE="${2:-x86}"      # 默认 x86 (对应 x86_64)
 
 # --- 2. 自动获取版本号 ---
@@ -23,11 +23,11 @@ TARGET_DEVICE="${2:-x86}"      # 默认 x86 (对应 x86_64)
 if [ -z "$VERSION" ]; then
     echo "--- Detecting latest stable version ---"
     if [ "$SOURCE_TYPE" = "openwrt" ]; then
-        # 从 openwrt release 页面抓取最新的版本号 (例如 23.05.2)
-        VERSION=$(curl -s https://downloads.openwrt.org/releases/ | grep -oE '2[0-9]\.[0-9]{2}\.[0-9]{1,2}' | sort -nr | head -n1)
-    else
         # 从 immortalwrt release 页面抓取
         VERSION=$(curl -s https://downloads.immortalwrt.org/releases/ | grep -oE '2[0-9]\.[0-9]{2}\.[0-9]{1,2}' | sort -nr | head -n1)
+    else
+        # 从 openwrt release 页面抓取最新的版本号 (例如 23.05.2)
+        VERSION=$(curl -s https://downloads.openwrt.org/releases/ | grep -oE '2[0-9]\.[0-9]{2}\.[0-9]{1,2}' | sort -nr | head -n1)
     fi
     
     if [ -z "$VERSION" ]; then
