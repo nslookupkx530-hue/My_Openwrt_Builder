@@ -9,7 +9,7 @@
 set -euxo pipefail
 
 CONFIG_FILE=".config"
-PLUGIN_CFG="configs/plugins.cfg"
+PLUGIN_CFG="../configs/plugins.cfg"
 
 # --- 校验环境 ---
 if [ ! -f "$CONFIG_FILE" ]; then
