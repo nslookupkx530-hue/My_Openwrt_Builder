@@ -43,12 +43,32 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git python3 python3-pip libncurses5-dev libncursesw5-dev \
-            zlib1g-dev gawk freirels libssl-dev openssl-dev texinfo bison flex libffi-dev \
-            build-essential libreadline-dev libsqlite3-dev lethe-dev libxt_dev \
-            awk autoconf automake libtool python3-mako gcc-multilib \
-            libcap-dev libcap-dev-static libgd-dev libjpeg-dev libpng-dev \
-            libcurl4-gnutls-dev libxml2-dev libxslt-dev
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gawk \
+            gcc \
+            g++ \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            zstd \
+            curl \
+            dos2unix \
+            qemu-utils \
+            libxml2-dev \
+            libxslt-dev \
+            libcurl4-gnutls-dev \
+            libgd-dev \
+            libjpeg-dev \
+            libpng-dev
           # 注意：实际编译 OpenWrt 需要很多依赖，建议根据你的源码要求补充
 
 
