@@ -147,7 +147,7 @@ jobs:
         run: |
           set -euxo pipefail
           # 由于当前在 src 目录，使用 ../ 访问根目录下的 Third-Party 文件夹
-          CONFIG_PATH="../Third-Party/third-party.config"
+          CONFIG_PATH="./Third-Party/third-party.config"
           
           if [ ! -f "${CONFIG_PATH}" ]; then
             echo "Missing third-party config at ${CONFIG_PATH}"
