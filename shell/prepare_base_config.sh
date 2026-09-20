@@ -17,9 +17,9 @@ set -euxo pipefail
 # --- 配置变量 ---
 # 允许通过环境变量传入：SOURCE_TYPE (openwrt|immortalwrt), TARGET_DEVICE
 # TARGET_DEVICE 对应用户要求的：x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, Tenda-BE12PRO
-SOURCE_TYPE="${1:-immortalwrt}"    # 默认 immortalwrt
+SOURCE_TYPE="${SOURCE_TYPE:-immortalwrt}"    # 默认 immortalwrt
 TARGET_DEVICE="${TARGET_DEVICE:-x86}"      # 默认 x86 (对应 x86_64)
-VERSION="${VERSION}"
+VERSION=""
 
 echo "Starting configuration preparation..."
 echo "Source Type: $SOURCE_TYPE"
