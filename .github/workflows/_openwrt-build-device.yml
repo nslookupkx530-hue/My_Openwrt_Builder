@@ -119,7 +119,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          CONFIG_PATH="../Third-Party/third-party.config"
+          CONFIG_PATH="./Third-Party/third-party.config"
           
           if [ ! -f "${CONFIG_PATH}" ]; then
             echo "Missing third-party config at ${CONFIG_PATH}"
@@ -127,6 +127,7 @@ jobs:
           fi
           
           source "${CONFIG_PATH}"
+          # 将从配置文件中读取到的 CUSTOM_PACKAGES 写入到 GitHub Environment 变量中
           echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES:-}" >> "$GITHUB_ENV"
           echo "=========================================="
           echo "Third-party CUSTOM_PACKAGES:"
