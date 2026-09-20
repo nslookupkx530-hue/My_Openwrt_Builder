@@ -58,39 +58,49 @@ case "$TARGET_DEVICE" in
         DEVICE_PATH="targets/x86/64/generic"
         ;;
     "AXT-1800")
-        # 高通 IPQ60xx
-        DEVICE_PATH="targets/quecell/ipq60xx"
+        # 高通 IPQ60xx 系列
+        DEVICE_PATH="targets/qualcomm/ipq60xx"
         ;;
-    "GL-MT3600BE"|"Cudy-TR3000-256MB"|"Tenda-BE12PRO")
-        # 联发科 Filogic 系列 (MT7987A, MT7981B, MT7988A/B)
+    "GL-MT3600BE"|"Cudy-TR3000-256MB")
+        # 联发科 Filogic 系列
+        DEVICE_PATH="targets/mediatek/filogic"
+        ;;
+    "Tenda-BE12PRO")
+        # 联发科 Filogic 系列 (MT7988A/B)
         DEVICE_PATH="targets/mediatek/filogic"
         ;;
     *)
-        echo "Error: Unknown device $TARGET_DEVICE. Please check the mapping in prepare_base_config.sh."
+        echo "Error: Unknown device $TARGET_DEVICE"
+        echo "Please check the mapping in the script."
         exit 1
         ;;
 esac
 
-# --- 4. 构造最终下载地址 ---
-# 最终路径格式: https://xxx.org/releases/[VERSION]/[DEVICE_PATH]/config.buildinfo
-FINAL_URL="${BASE_URL}/${VERSION}/${DEVICE_PATH}/config.buildinfo"
+echo "Mapped Device Path: ${DEVICE_PATH}"
 
-echo "--- Fetching config from: ${FINAL_URL} ---"
+# --- 4. 构造最终 URL ---
+# 官方通常的路径结构是: BASE_URL/targets/xxx/xxx/xxx/config.buildinfo
+# 对于 x86，路径是 targets/x86/64/generic
+# 对于其他，路径是 targets/mediatek/filogic 等
+FINAL_URL="${BASE_URL}/${DEVICE_PATH}/config.buildinfo"
 
-# --- 5. 下载并转换 ---
-# 下载到临时文件，防止直接覆盖导致失败
+echo "Fetching config from: ${FINAL_URL}"
+
+# --- 5. 执行下载 ---
+# 使用 -L 跟随重定向，-s 静默模式，-o 输出到临时文件
 if curl -L -s "${FINAL_URL}" -o "tmp_config.buildinfo"; then
+    echo "Download successful."
     mv "tmp_config.buildinfo" ".config"
-    echo "Successfully created .config from $SOURCE_TYPE $VERSION"
+    echo "Created .config from official source."
 else
-    echo "Error: Failed to download config.buildinfo."
+    echo "Error: Failed to download config.buildinfo from ${FINAL_URL}"
+    # 检查一下是否是 404，可能是路径变动
+    echo "Hint: Please verify the device path in the script."
     exit 1
 fi
 
-# --- 6. 补全配置 ---
-echo "--- Running make defconfig ---"
-# 使用官方的 buildinfo 作为基础，make defconfig 会根据当前源码环境补全所有必要选项
-# 这一步非常重要，它能保证 .config 文件是“合规”的，包含所有基础库
+# --- 6. 执行 make defconfig ---
+echo "Running make defconfig to complement the configuration..."
+# 使用 -j1 确保 defconfig 在单线程下运行，避免某些构建系统下的竞态问题
 make defconfig
-
-echo "--- Configuration preparation complete ---"
+echo "make defconfig completed successfully."
