@@ -55,11 +55,11 @@ fi
 # 对于 GL.iNet 等设备，使用对应的 SoC 基础配置即可。
 case "$TARGET_DEVICE" in
     "x86"|"x86_64")
-        DEVICE_PATH="targets/x86/64/generic"
+        DEVICE_PATH="targets/x86/64"
         ;;
     "AXT-1800")
         # 高通 IPQ60xx 系列
-        DEVICE_PATH="targets/qualcomm/ipq60xx"
+        DEVICE_PATH="targets/qualcommax/ipq60xx"
         ;;
     "GL-MT3600BE"|"Cudy-TR3000-256MB")
         # 联发科 Filogic 系列
