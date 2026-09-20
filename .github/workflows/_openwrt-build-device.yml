@@ -21,7 +21,7 @@ jobs:
       matrix:
         # 在这里配置你的设备与源的对应关系
         # 如果只想编译特定设备，可以把不需要的删掉
-        device: [x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, JDC-AX6600, Tenda-BE12PRO]
+        device: [x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, Tenda-BE12PRO]
         source_type: [openwrt, immortalwrt]
     
     # 如果你想控制特定设备只用特定的源，可以取消下面这一段逻辑，
