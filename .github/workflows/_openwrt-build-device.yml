@@ -31,15 +31,6 @@ jobs:
   build:
     name: Build ${{ github.event.inputs.target_device }} (${{ github.event.inputs.source_type }})
     runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      # 这里的矩阵现在只针对源进行并行（每个设备同时跑两个源）
-      matrix:
-        source_type: [openwrt, immortalwrt]
-    
-    # 如果你想控制特定设备只用特定的源，可以取消下面这一段逻辑，
-    # 或者通过更复杂的 matrix 定义。这里默认是全排列。
-    # 如果只想跑特定的，建议在 matrix 里写死。
 
     steps:
       - name: Checkout code
@@ -63,7 +54,7 @@ jobs:
 
       - name: Clone Source Repository
         run: |
-          if [ "${{ matrix.source_type }}" = "immortalwrt" ]; then
+          if [ "${{ github.event.inputs.source_type }}" = "immortalwrt" ]; then
             git clone https://github.com/ImmortalWrt/immortalwrt.git src
           else
             git clone https://github.com/openwrt/openwrt.git src
@@ -82,8 +73,8 @@ jobs:
 
       - name: Prepare Base Configuration
         env:
-          SOURCE_TYPE: ${{ matrix.source_type }}
-          TARGET_DEVICE: ${{ matrix.device }}
+          SOURCE_TYPE: ${{ github.event.inputs.source_type }}
+          TARGET_DEVICE: ${{ github.event.inputs.target_device }}
         run: |
           # 进入 src 目录确保 .config 生成在正确位置
           cd src
@@ -108,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          CONFIG_PATH="Third-Party/third-party.config"
+          CONFIG_PATH="../Third-Party/third-party.config"
           
           if [ ! -f "${CONFIG_PATH}" ]; then
             echo "Missing third-party config at ${CONFIG_PATH}"
@@ -218,7 +209,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.device }}-${{ matrix.source_type }}
+          name: ${{ github.event.inputs.target_device }}-${{ github.event.inputs.source_type }}
           # 路径统一为 src/bin/*
           path: src/bin/*
  
@@ -229,7 +220,7 @@ jobs:
         with:
           # 自动生成名称：设备名-日期-RunID
           # 例如: x86-2025-05-20-35429357989
-          tag_name: ${{ matrix.device }}-${{ github.event.date }}-${{ github.run_number }}
+          tag_name: ${{ github.event.inputs.target_device }}-${{ github.event.date }}-${{ github.run_number }}
           files: src/bin/*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}     
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
