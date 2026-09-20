@@ -51,18 +51,13 @@ case "$TARGET_DEVICE" in
     "x86"|"x86_64")
         DEVICE_PATH="targets/x86/64/generic"
         ;;
-    "gl-ax1800")
+    "AXT-1800")
         # 高通 IPQ60xx 平台
         DEVICE_PATH="targets/quennvi/ipq6000"
         ;;
-    "gl-mt3600be"|"Cudy-TR3000-256MB"|"tenda-be12")
+    "GL-MT3600BE"|"Cudy-TR3000-256MB"|"Tenda-BE12PRO")
         # 均属于 MediaTek Filogic 系列 (mt7987/mt7988/mt7981)
         DEVICE_PATH="targets/mediatek/filogic"
-        ;;
-    "gl-mt5000")
-        # MT5000 逻辑在后续脚本中单独处理，这里作为占位或跳过
-        echo "Warning: GL-MT5000 requires special handling, skipping auto-fetch."
-        exit 0
         ;;
     *)
         echo "Error: Unknown device $TARGET_DEVICE"
