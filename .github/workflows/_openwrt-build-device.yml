@@ -139,9 +139,11 @@ jobs:
 
       - name: Inject Plugins
         run: |
+          # 进入 src 目录并执行插件注入脚本
+          cd src
           # 执行插件注入脚本
           # 它会根据 configs/plugins.cfg 修改 .config 中的用户态软件
-          bash ./shell/inject_plugins.sh
+          bash ../shell/inject_plugins.sh
 
 
       - name: Prepare Third-Party APKs
