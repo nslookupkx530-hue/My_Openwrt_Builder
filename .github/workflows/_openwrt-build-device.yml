@@ -93,11 +93,13 @@ jobs:
 
 
       - name: Clean build environment
-        # 清理编译环境
+        # 清理编译环境，确保每次构建都是干净的
         run: |
           set -euxo pipefail
-          rm -rf src/staging_dir src/build_dir src/tmp
-          mkdir -p src/dl
+          cd "${{ github.workspace }}/src"
+          # 删除之前的构建目录，保留 dl 目录
+          rm -rf staging_dir build_dir tmp
+          mkdir -p dl
 
 
       - name: Prepare Base Configuration
@@ -106,7 +108,7 @@ jobs:
           TARGET_DEVICE: ${{ github.event.inputs.target_device }}
         run: |
           # 进入 src 目录确保 .config 生成在正确位置
-          cd src
+          cd "${{ github.workspace }}/src"
           # 执行获取 .buildinfo 并转换为 .config 的脚本
           # 该脚本会自动根据 SOURCE_TYPE 抓取对应源的最新稳定版配置
           bash ../shell/prepare_base_config.sh
@@ -128,7 +130,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          CONFIG_PATH="./Third-Party/third-party.config"
+          # 由于当前在 src 目录，使用 ../ 访问根目录下的 Third-Party 文件夹
+          CONFIG_PATH="../Third-Party/third-party.config"
           
           if [ ! -f "${CONFIG_PATH}" ]; then
             echo "Missing third-party config at ${CONFIG_PATH}"
@@ -138,7 +141,7 @@ jobs:
           # 加载配置
           source "${CONFIG_PATH}"
           
-          # 将从配置文件中读取到的 CUSTOM_PACKAGES 写入到 GitHub Environment 变量中
+          # 将脚本中导出的 CUSTOM_PACKAGES 注入到 GitHub Actions 的环境变量中
           echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES:-}" >> "$GITHUB_ENV"
           echo "=========================================="
           echo "Third-party CUSTOM_PACKAGES:"
@@ -149,8 +152,8 @@ jobs:
       - name: Inject Plugins
         run: |
           # 进入 src 目录并执行插件注入脚本
-          cd src
-          # 脚本内部会处理 configs/plugins.cfg
+          cd "${{ github.workspace }}/src"
+          # 确保在 src 目录下运行，以便脚本能正确读取 ../configs/plugins.cfg
           bash ../shell/inject_plugins.sh
 
 
