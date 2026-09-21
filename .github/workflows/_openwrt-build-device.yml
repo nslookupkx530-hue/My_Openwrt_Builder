@@ -88,6 +88,15 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a -f
 
+
+      - name: Prepare build download
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${{ github.workspace }}/src"
+          make download -j$(nproc)
+
+
       # --- 核心逻辑开始 ---
 
       - name: Prepare Base Configuration
@@ -346,6 +355,17 @@ jobs:
           echo "========================================"
           echo ">>> OpenWrt 编译成功"
           echo "========================================"
+
+
+      - name: Upload build log
+        if: failure() # 只在构建失败时上传
+        uses: actions/upload-artifact@v4
+        with:
+          # 使用 run_id 确保日志名称唯一，方便回溯
+          name: ${{ inputs.device }}-build-log-${{ github.run_id }}
+          # 这里的路径必须与 Build firmware 步骤中的 tee 指令一致
+          path: src/build.log
+          if-no-files-found: ignore
 
 
       - name: Upload Artifacts
