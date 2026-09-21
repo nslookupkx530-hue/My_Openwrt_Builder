@@ -58,16 +58,19 @@ if [ ! -f "$MAPPING_FILE" ]; then
     exit 1
 fi
 
-# 从映射文件中获取对应的 DEVICE_PATH
-# 使用 grep 获取行，然后用 cut 分割出等号后面的内容
-DEVICE_PATH=$(grep "^${TARGET_DEVICE}=" "$MAPPING_FILE" | cut -d'=' -f2)
-
+# 改进的提取逻辑：
+# 1. 使用 tr 删除可能存在的 Windows 换行符 (\r)
+# 2. 使用 sed 去除每行开头的空格
+# 3. 使用 grep 匹配包含设备名的行
+# 4. 使用 cut 获取等号后的内容并去除多余空格
+DEVICE_PATH=$(tr -d '\r' < "$MAPPING_FILE" | sed 's/^[[:space:]]*//' | grep "^${TARGET_DEVICE}=" | head -n1 | cut -d'=' -f2 | tr -d '[:space:]')
 if [ -z "$DEVICE_PATH" ]; then
-    echo "Error: Unknown device '$TARGET_DEVICE'. Please add it to $MAPPING_FILE."
+    echo "Error: Unknown device '$TARGET_DEVICE'. Please ensure it is correctly defined in $MAPPING_FILE."
+    echo "Current MAPPING_FILE content:"
+    cat "$MAPPING_FILE" # 在报错时打印出文件内容，方便排查问题
     exit 1
 fi
-
-echo "Mapped Device Path from config: ${DEVICE_PATH}"
+echo "Mapped Device Path: ${DEVICE_PATH}"
 
 # --- 4. 构造最终 URL ---
 # 官方通常的路径结构是: BASE_URL/targets/xxx/xxx/xxx/config.buildinfo
