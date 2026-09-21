@@ -89,14 +89,6 @@ jobs:
           ./scripts/feeds install -a -f
 
 
-      - name: Prepare build download
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${{ github.workspace }}/src"
-          make download -j$(nproc)
-
-
       # --- 核心逻辑开始 ---
 
       - name: Prepare Base Configuration
@@ -291,6 +283,14 @@ jobs:
           # 在所有插件注入和 APK 处理完成后，最后运行一次 defconfig 确保依赖完整对齐
           # 使用 FORCE=1 是为了在 GitHub Actions 环境下忽略主机环境不匹配的警告
           make defconfig FORCE=1
+
+
+      - name: Prepare build download
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${{ github.workspace }}/src"
+          make download -j$(nproc)
 
 
       - name: Build firmware
