@@ -291,7 +291,7 @@ jobs:
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
           # 将下载过程也重定向到日志文件，方便排查网络或路径问题
-          make download -j$(nproc)
+          make download -j$(nproc) 2>&1 | tee build_download.log
 
 
       - name: Build firmware
@@ -362,8 +362,6 @@ jobs:
         if: failure() # 只在构建失败时上传
         uses: actions/upload-artifact@v4
         with:
-          # 使用 run_id 确保日志名称唯一，方便回溯
-          name: ${{ inputs.device }}-build-log-${{ github.run_id }}
           # 使用更通用的名称，包含所有可能生成的日志
           name: ${{ inputs.device }}-logs-${{ github.run_id }}
           # 同时上传构建日志和下载日志（如果存在的话）
