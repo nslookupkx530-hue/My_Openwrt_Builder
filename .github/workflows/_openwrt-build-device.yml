@@ -165,29 +165,24 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # 统一使用变量定义路径
-          SOURCE_DIR="${{ github.workspace }}/src"
-          # 注意：这里必须使用 inputs.target_device，这是您在 YAML 定义的名称
+          # 这里的 WORKSPACE 是项目根目录
+          WORKSPACE="${{ github.workspace }}"
+          SOURCE_DIR="${WORKSPACE}/src"
           TARGET=${{ github.event.inputs.target_device }}
-          FILE_DIR="${{ github.workspace }}/files/${TARGET}"
-          if [ -z "${TARGET}" ]; then
-            echo "ERROR: Target device variable is empty! Please check your GitHub Actions input."
-            exit 1
-          fi
+          
+          # 【修正点】：files 文件夹在根目录下，而不是 src 下面
+          FILE_DIR="${WORKSPACE}/files/${TARGET}"
           if [ -d "${FILE_DIR}" ]; then
             echo ">>> Applying custom files for device: ${TARGET}"
             
-            # 使用 cp -a 保持文件属性、权限和符号链接
+            # 将文件复制到源码目录下的 files 文件夹中 (OpenWRT 构建时会读取这里)
             cp -af "${FILE_DIR}/." "${SOURCE_DIR}/files/"
-            # 确保 uci-defaults 脚本可执行
             if [ -d "${SOURCE_DIR}/files/etc/uci-defaults" ]; then
               chmod 755 "${SOURCE_DIR}/files/etc/uci-defaults/"*
               echo "SUCCESS: uci-defaults permissions fixed."
             fi
-            echo "Applied files preview (first 20):"
-            find "${SOURCE_DIR}/files" -type f | head -n 20
           else
-            echo "ERROR: Custom files directory not found at ${FILE_DIR}"
+            echo "ERROR: Custom files for device '${TARGET}' not found in ${FILE_DIR}"
             exit 1
           fi
 
@@ -196,18 +191,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
-          SOURCE_DIR="${{ github.workspace }}/src"
+          WORKSPACE="${{ github.workspace }}"
+          SOURCE_DIR="${WORKSPACE}/src"
           TARGET=${{ github.event.inputs.target_device }}
-          
+          # 【修正点】：同样指向根目录下的 files 文件夹
+          DEVICE_FILE_PATH="${WORKSPACE}/files/${TARGET}"
           echo ">>> Verifying files for device: ${TARGET}"
-          
-          # 构造当前设备的文件夹路径
-          DEVICE_FILE_PATH="${SOURCE_DIR}/files/${TARGET}"
-          
           if [ -d "${DEVICE_FILE_PATH}" ]; then
             echo "SUCCESS: Device directory found. Listing contents:"
-            # 只列出该设备目录下的文件
             find "${DEVICE_FILE_PATH}" -type f | sort
           else
             echo "ERROR: Custom files for device '${TARGET}' not found in ${DEVICE_FILE_PATH}!"
