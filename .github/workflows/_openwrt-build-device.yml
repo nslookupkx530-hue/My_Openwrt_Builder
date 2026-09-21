@@ -161,31 +161,34 @@ jobs:
           echo "=========================================="
           
 
-      - name: Apply Device Files
+      - name: Apply device files
         shell: bash
         run: |
           set -euxo pipefail
-
-          # 统一使用 src 作为源码目录变量
+          # 统一使用变量定义路径
           SOURCE_DIR="${{ github.workspace }}/src"
-          FILE_DIR="${{ github.workspace }}/files/${{ inputs.device }}"
-
+          # 注意：这里必须使用 inputs.target_device，这是您在 YAML 定义的名称
+          TARGET=${{ github.event.inputs.target_device }}
+          FILE_DIR="${{ github.workspace }}/files/${TARGET}"
+          if [ -z "${TARGET}" ]; then
+            echo "ERROR: Target device variable is empty! Please check your GitHub Actions input."
+            exit 1
+          fi
           if [ -d "${FILE_DIR}" ]; then
-            echo ">>> Applying custom files for device: ${{ inputs.device}}"
+            echo ">>> Applying custom files for device: ${TARGET}"
             
             # 使用 cp -a 保持文件属性、权限和符号链接
             cp -af "${FILE_DIR}/." "${SOURCE_DIR}/files/"
-
-            # 确保 uci-defaults 脚本可执行 (OpenWRT 系统核心要求)
+            # 确保 uci-defaults 脚本可执行
             if [ -d "${SOURCE_DIR}/files/etc/uci-defaults" ]; then
               chmod 755 "${SOURCE_DIR}/files/etc/uci-defaults/"*
               echo "SUCCESS: uci-defaults permissions fixed."
             fi
-
             echo "Applied files preview (first 20):"
             find "${SOURCE_DIR}/files" -type f | head -n 20
           else
-            echo "INFO: No custom files found for device ${{ inputs.device}} at ${FILE_DIR}"
+            echo "ERROR: Custom files directory not found at ${FILE_DIR}"
+            exit 1
           fi
 
 
@@ -194,14 +197,21 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # 使用统一的变量定义路径，确保与后续步骤一致
           SOURCE_DIR="${{ github.workspace }}/src"
-
-          if [ -d "${SOURCE_DIR}/files" ]; then
-            echo ">>> Custom files directory found. Listing contents:"
-            find "${SOURCE_DIR}/files" -type f | sort
+          TARGET=${{ github.event.inputs.target_device }}
+          
+          echo ">>> Verifying files for device: ${TARGET}"
+          
+          # 构造当前设备的文件夹路径
+          DEVICE_FILE_PATH="${SOURCE_DIR}/files/${TARGET}"
+          
+          if [ -d "${DEVICE_FILE_PATH}" ]; then
+            echo "SUCCESS: Device directory found. Listing contents:"
+            # 只列出该设备目录下的文件
+            find "${DEVICE_FILE_PATH}" -type f | sort
           else
-            echo "WARNING: No custom files directory found in ${SOURCE_DIR}/files"
+            echo "ERROR: Custom files for device '${TARGET}' not found in ${DEVICE_FILE_PATH}!"
+            exit 1
           fi
 
 
