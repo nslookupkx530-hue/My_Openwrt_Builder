@@ -290,7 +290,8 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
-          make download -j$(nproc)
+          # 将下载过程也重定向到日志文件，方便排查网络或路径问题
+          make download -j$(nproc) 2>&1 | tee build_download.log
 
 
       - name: Build firmware
@@ -363,8 +364,12 @@ jobs:
         with:
           # 使用 run_id 确保日志名称唯一，方便回溯
           name: ${{ inputs.device }}-build-log-${{ github.run_id }}
-          # 这里的路径必须与 Build firmware 步骤中的 tee 指令一致
-          path: src/build.log
+          # 使用更通用的名称，包含所有可能生成的日志
+          name: ${{ inputs.device }}-logs-${{ github.run_id }}
+          # 同时上传构建日志和下载日志（如果存在的话）
+          path: |
+            src/build.log
+            src/build_download.log
           if-no-files-found: ignore
 
 
