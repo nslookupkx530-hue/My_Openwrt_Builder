@@ -2,8 +2,9 @@
 
 # ==============================================================================
 # 脚本名称: inject_plugins.sh
-# 描述: 根据 configs/plugins.cfg 动态修改 .config 文件，开启/关闭用户态插件。
-#       确保在开启插件时不改变内核哈希（仅修改 CONFIG_PACKAGE_xxx）。
+# 描述: 
+#   根据 configs/plugins.cfg 动态修改 .config 文件，开启/关闭用户态插件。
+#   优化点：采用幂等性处理逻辑，确保配置项的唯一性和确定性，助力哈希对齐。
 # ==============================================================================
 
 set -euxo pipefail
@@ -22,11 +23,10 @@ if [ ! -f "$PLUGIN_CFG" ]; then
     exit 0
 fi
 
-echo "Starting plugin injection..."
+echo "Starting deterministic plugin injection..."
 
 # --- 定义注入规则 ---
 # 格式: "变量名|CONFIG_选项"
-# 注意：这里只包含用户态应用，不包含 kmod-xxx 或核心驱动
 plugins=(
     "ENABLE_ARGON|CONFIG_PACKAGE_luci-app-argon"
     "ENABLE_DISKMAN|CONFIG_PACKAGE_luci-app-diskman"
@@ -47,18 +47,29 @@ for entry in "${plugins[@]}"; do
     enable_val=$(grep "^${var_name}" "$PLUGIN_CFG" | cut -d'=' -f2 | tr -d ' ')
     
     if [ "$enable_val" = "1" ]; then
-        # 如果配置不存在，直接追加，则改为 y
-        if ! grep -q "^${config_opt}=y" "$CONFIG_FILE"; then
-            echo "Injecting: ${config_opt}=y"
+        # --- 目标：确保配置项为 y ---
+        if grep -q "^${config_opt}=y" "$CONFIG_FILE"; then
+            echo "Status: ${config_opt} is already enabled."
+        elif grep -q "^${config_opt}" "$CONFIG_FILE"; then
+            # 如果存在但不是 y（可能是 n），则替换为 y
+            sed -i "s/^${config_opt}=.*/${config_opt}=y/" "$CONFIG_FILE"
+            echo "Action: Updating ${config_opt} to enabled (y)."
+        else
+            # 如果完全不存在，则追加到文件末尾
             echo "${config_opt}=y" >> "$CONFIG_FILE"
+            echo "Action: Appending ${config_opt} as enabled (y)."
         fi
     else
-        # 如果配置存在且为 y，则改为 n
+        # --- 目标：确保配置项为 n 或不存在 ---
         if grep -q "^${config_opt}=y" "$CONFIG_FILE"; then
-            echo "Disabling: ${config_opt}=n"
+            # 如果是 y，则替换为 n
             sed -i "s/^${config_opt}=y/${config_opt}=n/" "$CONFIG_FILE"
+            echo "Action: Updating ${config_opt} to disabled (n)."
+        elif grep -q "^${config_opt}" "$CONFIG_FILE"; then
+            # 如果已经是 n，则不做处理
+            echo "Status: ${config_opt} is already disabled."
         fi
     fi
 done
 
-echo "Plugin injection completed."
+echo "Plugin injection completed successfully."
