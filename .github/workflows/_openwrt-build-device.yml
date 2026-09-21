@@ -222,63 +222,82 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           echo ">>> Preparing third-party APK files and startup service"
+
           # 定义基础路径
           WORKSPACE="${{ github.workspace }}"
           OPENWRT_DIR="${WORKSPACE}/src"
           REPO_FILES_DIR="${WORKSPACE}/files"
           APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
           FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
+
           echo ">>> OPENWRT_DIR: ${OPENWRT_DIR}"
           echo ">>> REPO_FILES_DIR: ${REPO_FILES_DIR}"
           echo ">>> APK_SOURCE_DIR: ${APK_SOURCE_DIR}"
           echo ">>> FIRMWARE_FILES_DIR: ${FIRMWARE_FILES_DIR}"
-          # 创建固件文件目录结构 (确保目标文件夹存在)
+
+          # 创建固件文件目录结构
           mkdir -p \
             "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
             "${FIRMWARE_FILES_DIR}/etc/third-party" \
             "${FIRMWARE_FILES_DIR}/etc/init.d"        
+
           # 检查 APK 输出目录是否存在
           if [ ! -d "${APK_SOURCE_DIR}" ]; then
             echo "ERROR: APK source directory does not exist:"
             echo "       ${APK_SOURCE_DIR}"
             exit 1
           fi
+
           # 检查是否成功生成 APK
           APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
+
           if [ "${APK_COUNT}" -eq 0 ]; then
             echo "ERROR: No third-party APK files found in:"
             echo "       ${APK_SOURCE_DIR}"
             exit 1
           fi
+
           echo ">>> Found ${APK_COUNT} third-party APK package(s)"
-          # 复制 APK 到固件目录 (src/files/... )
+
+          # 复制 APK 到固件目录
           find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' \
             -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
-          # --- 【核心修正：直接指向您提供的真实路径】 ---
-          # 您说脚本在 files/etc/init.d 和 files/etc/third-party 下
-          SOURCE_INIT="${REPO_FILES_DIR}/etc/init.d/apk-install"
-          SOURCE_INSTALLER="${REPO_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
-          echo "Source Init: ${SOURCE_INIT}"
-          echo "Source Installer: ${SOURCE_INSTALLER}"
-          if [ ! -f "${SOURCE_INIT}" ]; then
-            echo "ERROR: Init script not found at ${SOURCE_INIT}"
+
+          # --- 【核心修正：使用通配符匹配，忽略目录名中的空格】 ---
+          echo ">>> Searching for installer scripts using wildcard matching..."
+          
+          # 使用 * 匹配可能包含空格的路径
+          SOURCE_INIT=$(find "${REPO_FILES_DIR}" -type f -name "*apk-install" | head -n1)
+          SOURCE_INSTALLER=$(find "${REPO_FILES_DIR}" -type f -name "*install_third_party_apk.sh" | head -n1)
+
+          if [ -z "$SOURCE_INIT" ]; then
+            echo "ERROR: Could not find 'apk-install' script in ${REPO_FILES_DIR}"
             exit 1
           fi
-          if [ ! -f "${SOURCE_INSTALLER}" ]; then
-            echo "ERROR: Installer script not found at ${SOURCE_INSTALLER}"
+
+          if [ -z "$SOURCE_INSTALLER" ]; then
+            echo "ERROR: Could not find 'install_third_party_apk.sh' in ${REPO_FILES_DIR}"
             exit 1
           fi
+
+          echo "Found Init Service at: ${SOURCE_INIT}"
+          echo "Found Installer script at: ${SOURCE_INSTALLER}"
+
           # 复制并赋予执行权限 (0755) 到对应的目标位置
           install -m 0755 "${SOURCE_INIT}" "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
           install -m 0755 "${SOURCE_INSTALLER}" "${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+
           # 最终验证
           test -x "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
           test -x "${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+
           if [ -e "${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-third-party-apk" ]; then
             echo "ERROR: Obsolete uci-defaults installer still exists."
             exit 1
           fi
+
           echo "Third-party APK integration completed successfully."
 
 
