@@ -115,36 +115,37 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cd "${{ github.workspace }}/src"
+          # 明确定义基础目录变量，避免在不同步骤中产生歧义
+          WORKSPACE="${{ github.workspace }}"
+          SOURCE_DIR="${WORKSPACE}/src"
           
-          # 加载 third-party.config 并将其导出的变量注入到环境变量中
-          CONFIG_PATH="./Third-Party/third-party.config"
+          cd "${SOURCE_DIR}"
+
           echo "=========================================="
           echo "STEP 1: Loading third-party.config"
           echo "=========================================="
-          if [ ! -f "${CONFIG_PATH}" ]; then
-            # 加载配置并导出变量到当前 Shell 环境
-            source "${CONFIG_PATH}"
-            
-            # 确保变量存在且非空（如果为空则设为空字符串）
-            export CUSTOM_PACKAGES="${CUSTOM_PACKAGES:-}"
+          
+          # 使用相对于 Workspace 的绝对路径来定位配置文件
+          CONFIG_PATH="${WORKSPACE}/Third-Party/third-party.config"
 
-            echo "SUCCESS: third-party.config loaded."
+          if [ -f "$CONFIG_PATH" ]; then
+            source "$CONFIG_PATH"
+            export CUSTOM_PACKAGES="${CUSTOM_PACKAGES:-}"
+            echo "SUCCESS: $CONFIG_PATH loaded."
             echo "FINAL CUSTOM_PACKAGES: $CUSTOM_PACKAGES"
-            
-            # 将结果写入 GITHUB_ENV 供后续步骤使用            
             echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES:-}" >> "$GITHUB_ENV"
           else
-            echo "ERROR: third-party.config not found at ./Third-Party/third-party.config"
+            echo "ERROR: Configuration file not found at ${CONFIG_PATH}"
+            exit 1
           fi
 
           echo ""
           echo "=========================================="
           echo "STEP 2: Injecting Plugins via inject_plugins.sh"
           echo "=========================================="
-          # 这里脚本内部已经带有 set -x 和各种 echo 输出，
-          # 它会详细打印每一个配置项的修改动作（Injecting/Updating/Status）
+          # 因为我们已经 cd 到 src 了，所以脚本里的 ../shell/inject_plugins.sh 是正确的
           bash ../shell/inject_plugins.sh
+
           echo ""
           echo "=========================================="
           echo "STEP 3: Final Verification"
