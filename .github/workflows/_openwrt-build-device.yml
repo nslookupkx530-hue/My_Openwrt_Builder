@@ -159,6 +159,50 @@ jobs:
           echo "=========================================="
           
 
+      - name: Apply Device Files
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # 统一使用 src 作为源码目录变量
+          SOURCE_DIR="${{ github.workspace }}/src"
+          FILE_DIR="${{ github.workspace }}/files/${{ inputs.device }}"
+
+          if [ -d "${FILE_DIR}" ]; then
+            echo ">>> Applying custom files for device: ${{ inputs.device}}"
+            
+            # 使用 cp -a 保持文件属性、权限和符号链接
+            cp -af "${FILE_DIR}/." "${SOURCE_DIR}/files/"
+
+            # 确保 uci-defaults 脚本可执行 (OpenWRT 系统核心要求)
+            if [ -d "${SOURCE_DIR}/files/etc/uci-defaults" ]; then
+              chmod 755 "${SOURCE_DIR}/files/etc/uci-defaults/"*
+              echo "SUCCESS: uci-defaults permissions fixed."
+            fi
+
+            echo "Applied files preview (first 20):"
+            find "${SOURCE_DIR}/files" -type f | head -n 20
+          else
+            echo "INFO: No custom files found for device ${{ inputs.device}} at ${FILE_DIR}"
+          fi
+
+
+      - name: Check custom files
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # 使用统一的变量定义路径，确保与后续步骤一致
+          SOURCE_DIR="${{ github.workspace }}/src"
+
+          if [ -d "${SOURCE_DIR}/files" ]; then
+            echo ">>> Custom files directory found. Listing contents:"
+            find "${SOURCE_DIR}/files" -type f | sort
+          else
+            echo "WARNING: No custom files directory found in ${SOURCE_DIR}/files"
+          fi
+
+
       - name: Prepare Third-Party APKs (External Injection)
         run: |
           set -euxo pipefail
