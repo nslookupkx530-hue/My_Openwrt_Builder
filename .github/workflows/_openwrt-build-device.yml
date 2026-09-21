@@ -14,10 +14,10 @@ on:
       target_device:
         description: 'Target Device'
         required: true
-        default: 'x86'
+        default: 'x86_64'
         type: choice
         options:
-          - x86
+          - x86_64
           - AXT-1800
           - GL-MT3600BE
           - Cudy-TR3000-256MB
