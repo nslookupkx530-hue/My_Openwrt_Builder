@@ -14,12 +14,15 @@
 # ============================================================
 
 set -euxo pipefail
+# --- 基础变量修复 ---
+# 如果环境变量 SOURCE_DIR 为空，则自动获取当前目录作为基准路径
+# 使用 ${VARIABLE:-default} 语法确保即使变量未定义也不会报错
+SOURCE_DIR="${SOURCE_DIR:-$(pwd)}"
 
-# --- 基础变量 ---
 CUSTOM_PACKAGES="${CUSTOM_PACKAGES:-}"
-BASE_DIR="${SOURCE_DIR:-$(pwd)}/extra-packages"
-OUTPUT_DIR="${SOURCE_DIR:-$(pwd)}/packages"
-REPO="https://github.com/wukongdaily/apk.git"
+BASE_DIR="${SOURCE_DIR}/extra-packages"
+OUTPUT_DIR="${SOURCE_DIR}/packages"
+REPO="https://github.com/nslookupkx530-hue/apk.git"
 
 echo "=========================================="
 echo " Prepare third-party APK packages"
