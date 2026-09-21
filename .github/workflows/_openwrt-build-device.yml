@@ -194,14 +194,18 @@ jobs:
           WORKSPACE="${{ github.workspace }}"
           SOURCE_DIR="${WORKSPACE}/src"
           TARGET=${{ github.event.inputs.target_device }}
-          # 【修正点】：同样指向根目录下的 files 文件夹
-          DEVICE_FILE_PATH="${WORKSPACE}/files/${TARGET}"
-          echo ">>> Verifying files for device: ${TARGET}"
-          if [ -d "${DEVICE_FILE_PATH}" ]; then
-            echo "SUCCESS: Device directory found. Listing contents:"
-            find "${DEVICE_FILE_PATH}" -type f | sort
+          # 定义我们要核查的目标文件路径
+          # 注意：根据您的目录结构，它应该位于 src/files/etc/uci-defaults/ 目录下
+          CHECK_PATH="${SOURCE_DIR}/files/etc/uci-defaults/99-custom-network"
+          echo ">>> Verifying inclusion of '99-custom-network' for device: ${TARGET}"
+          if [ -f "$CHECK_PATH" ]; then
+            echo "SUCCESS: 99-custom-network has been successfully included in the build."
+            # 可选：打印出文件的内容，确保它是我们想要的那个文件（例如检查 IP 地址）
+            echo "--- File Content Preview ---"
+            cat "$CHECK_PATH"
           else
-            echo "ERROR: Custom files for device '${TARGET}' not found in ${DEVICE_FILE_PATH}!"
+            echo "ERROR: 99-custom-network was NOT found in ${CHECK_PATH}!"
+            echo "Please check if the file exists in your project's files/${TARGET}/etc/uci-defaults/"
             exit 1
           fi
 
