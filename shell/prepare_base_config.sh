@@ -51,34 +51,23 @@ else
 fi
 
 # --- 3. 设备与 Target 路径映射 (核心：确保内核哈希一致) ---
-# 根据你提供的处理器规格进行精确映射
-case "$TARGET_DEVICE" in
-    "x86"|"x86_64")
-        DEVICE_PATH="targets/x86/64"
-        ;;
-    "AXT-1800")
-        # 高通 IPQ6000/6018 系列
-        DEVICE_PATH="targets/qualcommax/ipq60xx"
-        ;;
-    "GL-MT3600BE")
-        # 联发科 Filogic 系列 (MT7987A)
-        DEVICE_PATH="targets/mediatek/filogic"
-        ;;
-    "Cudy-TR3000-256MB")
-        # 联发科 Filogic 系列 (MT7981B)
-        DEVICE_PATH="targets/mediatek/filogic"
-        ;;
-    "Tenda-BE12PRO")
-        # 联发科 Filogic 系列 (MT7988A)
-        DEVICE_PATH="targets/mediatek/filogic"
-        ;;
-    *)
-        echo "Error: Unknown device $TARGET_DEVICE"
-        exit 1
-        ;;
-esac
+MAPPING_FILE="../configs/device_mapping.conf"
 
-echo "Mapped Device Path: $DEVICE_PATH"
+if [ ! -f "$MAPPING_FILE" ]; then
+    echo "Error: Mapping file $MAPPING_FILE not found!"
+    exit 1
+fi
+
+# 从映射文件中获取对应的 DEVICE_PATH
+# 使用 grep 获取行，然后用 cut 分割出等号后面的内容
+DEVICE_PATH=$(grep "^${TARGET_DEVICE}=" "$MAPPING_FILE" | cut -d'=' -f2)
+
+if [ -z "$DEVICE_PATH" ]; then
+    echo "Error: Unknown device '$TARGET_DEVICE'. Please add it to $MAPPING_FILE."
+    exit 1
+fi
+
+echo "Mapped Device Path from config: ${DEVICE_PATH}"
 
 # --- 4. 构造最终 URL ---
 # 官方通常的路径结构是: BASE_URL/targets/xxx/xxx/xxx/config.buildinfo
