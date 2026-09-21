@@ -291,7 +291,7 @@ jobs:
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
           # 将下载过程也重定向到日志文件，方便排查网络或路径问题
-          make download -j$(nproc) 2>&1 | tee build_download.log
+          make download -j$(nproc)
 
 
       - name: Build firmware
