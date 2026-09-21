@@ -167,6 +167,70 @@ jobs:
           bash ../shell/apk-prepare-packages.sh
 
 
+      - name: Install and Verify Third-Party APKs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo ">>> Preparing third-party APK files and startup service"
+          # 当前工作目录是 src (OpenWrt 源码根目录)
+          OPENWRT_DIR="${{ github.workspace }}/src"
+          # 仓库根目录中的 files 目录 (在项目根目录)
+          REPO_FILES_DIR="${{ github.workspace }}/files"
+          # apk-prepare-packages.sh 生成的 APK 目录 (在 src/packages)
+          APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
+          # 固件最终使用的 files 目录 (在 src/files)
+          FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
+          echo ">>> OPENWRT_DIR: ${OPENWRT_DIR}"
+          echo ">>> REPO_FILES_DIR: ${REPO_FILES_DIR}"
+          echo ">>> APK_SOURCE_DIR: ${APK_SOURCE_DIR}"
+          echo ">>> FIRMWARE_FILES_DIR: ${FIRMWARE_FILES_DIR}"
+          # 创建固件文件目录结构
+          mkdir -p \
+            "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
+            "${FIRMWARE_FILES_DIR}/etc/third-party" \
+            "${FIRMWARE_FILES_DIR}/etc/init.d"        
+          # 检查 APK 输出目录是否存在
+          if [ ! -d "${APK_SOURCE_DIR}" ]; then
+            echo "ERROR: APK source directory does not exist:"
+            echo "       ${APK_SOURCE_DIR}"
+            exit 1
+          fi
+          # 检查是否成功生成 APK
+          APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          if [ "${APK_COUNT}" -eq 0 ]; then
+            echo "ERROR: No third-party APK files found in:"
+            echo "       ${APK_SOURCE_DIR}"
+            exit 1
+          fi
+          echo ">>> Found ${APK_COUNT} third-party APK package(s)"
+          # 复制 APK 到固件目录 (src/files/... )
+          find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' \
+            -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
+          # 检查并复制安装脚本和 init 服务
+          INSTALLER_SCRIPT="${REPO_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+          INIT_SERVICE="${REPO_FILES_DIR}/etc/init.d/apk-install"
+          if [ ! -f "${INSTALLER_SCRIPT}" ]; then
+            echo "ERROR: Installer script not found at ${INSTALLER_SCRIPT}"
+            exit 1
+          fi
+          if [ ! -f "${INIT_SERVICE}" ]; then
+            echo "ERROR: Init script not found at ${INIT_SERVICE}"
+            exit 1
+          fi
+          # 执行安装：复制并赋予执行权限 (0755)
+          install -m 0755 "${INSTALLER_SCRIPT}" "${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+          install -m 0755 "${INIT_SERVICE}" "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
+          # 最终验证逻辑
+          echo ">>> Verifying integration..."
+          test -x "${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+          test -x "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
+          if [ -e "${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-third-party-apk" ]; then
+            echo "ERROR: Obsolete uci-defaults installer still exists."
+            exit 1
+          fi
+          echo "Third-party APK integration completed successfully."
+
+
       - name: Finalize Configuration (Dependency Resolution)
         run: |
           set -euxo pipefail
