@@ -10,66 +10,81 @@
 set -euxo pipefail
 
 CONFIG_FILE=".config"
+# 开关文件在 configs/ 根目录（不是 configs/<SOURCE_TYPE>/ 下）
 PLUGIN_CFG="../configs/plugins.cfg"
+STRICT_SYMBOL_CHECK="${STRICT_SYMBOL_CHECK:-0}"
 
-# --- 校验环境 ---
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: .config file not found! Please run prepare_base_config.sh first."
-    exit 1
-fi
+[ -f "$CONFIG_FILE" ] || { echo "ERROR: 找不到 .config，请先运行 prepare_base_config.sh"; exit 1; }
+[ -f "$PLUGIN_CFG" ]  || { echo "ERROR: 找不到 ${PLUGIN_CFG}"; exit 1; }   # 硬失败，不再静默跳过
 
-if [ ! -f "$PLUGIN_CFG" ]; then
-    echo "Warning: $PLUGIN_CFG not found, skipping plugin injection."
-    exit 0
-fi
-
-echo "Starting deterministic plugin injection..."
-
-# --- 定义注入规则 ---
-# 格式: "变量名|CONFIG_选项"
+# 开关 → 选项 映射表
+# [核对] 标记的选项名我持怀疑态度，symbol_exists() 会在日志里报出来
 plugins=(
-    "ENABLE_ARGON|CONFIG_PACKAGE_luci-app-argon"
+    "ENABLE_ARGON|CONFIG_PACKAGE_luci-theme-argon"          # [核对] 原为 luci-app-argon
     "ENABLE_DISKMAN|CONFIG_PACKAGE_luci-app-diskman"
-    "ENABLE_IRQBALANCE|CONFIG_irqbalance"
+    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_irqbalance"           # [核对] 原为 CONFIG_irqbalance
     "ENABLE_FILEBROWSER_GO|CONFIG_PACKAGE_luci-app-filebrowser-go"
-    "ENABLE_SQM|CONFIG_PACKAGE_sqm"
+    "ENABLE_SQM|CONFIG_PACKAGE_sqm-scripts"                 # [核对] 原为 CONFIG_PACKAGE_sqm
     "ENABLE_TTYD|CONFIG_PACKAGE_luci-app-ttyd"
     "ENABLE_AUTOREBOOT|CONFIG_PACKAGE_luci-app-autoreboot"
     "ENABLE_DOCKER|CONFIG_PACKAGE_docker"
 )
 
-# --- 执行注入 ---
+get_switch() {   # 取最后一次定义，忽略注释与空格
+    sed -e 's/#.*//' -e 's/[[:space:]]//g' "$PLUGIN_CFG" \
+        | grep -E "^$1=" | sed -n '$p' | cut -d= -f2
+}
+
+symbol_exists() {
+    local sym="${1#CONFIG_}"
+    ls tmp/.config-*.in >/dev/null 2>&1 || return 0
+    grep -qE "^[[:space:]]*config ${sym}$" tmp/.config-*.in 2>/dev/null
+}
+
+set_opt() {   # $1=选项名 $2=y|n
+    sed -i "/^$1=/d; /^# $1 is not set$/d" "$CONFIG_FILE"
+    case "$2" in
+        y) echo "$1=y" >> "$CONFIG_FILE" ;;
+        n) echo "# $1 is not set" >> "$CONFIG_FILE" ;;
+    esac
+}
+
+mkdir -p tmp
+: > tmp/injected-plugins.txt
+
+TOTAL=0; ENABLED=0; UNKNOWN=""
 for entry in "${plugins[@]}"; do
-    # 解析变量名和对应的配置项
     IFS="|" read -r var_name config_opt <<< "$entry"
-    
-    # 从 plugins.cfg 获取开关状态 (例如 ENABLE_ARGON=1)
-    enable_val=$(grep "^${var_name}" "$PLUGIN_CFG" | cut -d'=' -f2 | tr -d ' ')
-    
+    enable_val="$(get_switch "$var_name" || true)"
+    TOTAL=$((TOTAL + 1))
+
+    if [ -z "$enable_val" ]; then
+        echo "WARNING: ${PLUGIN_CFG} 中没有 ${var_name}，按禁用处理"
+    elif [ "$enable_val" != "0" ] && [ "$enable_val" != "1" ]; then
+        echo "ERROR: ${var_name}=${enable_val} 非法（只允许 0 或 1）"; exit 1
+    fi
+
     if [ "$enable_val" = "1" ]; then
-        # --- 目标：确保配置项为 y ---
-        if grep -q "^${config_opt}=y" "$CONFIG_FILE"; then
-            echo "Status: ${config_opt} is already enabled."
-        elif grep -q "^${config_opt}" "$CONFIG_FILE"; then
-            # 如果存在但不是 y（可能是 n），则替换为 y
-            sed -i "s/^${config_opt}=.*/${config_opt}=y/" "$CONFIG_FILE"
-            echo "Action: Updating ${config_opt} to enabled (y)."
-        else
-            # 如果完全不存在，则追加到文件末尾
-            echo "${config_opt}=y" >> "$CONFIG_FILE"
-            echo "Action: Appending ${config_opt} as enabled (y)."
+        if ! symbol_exists "$config_opt"; then
+            echo "WARNING: ${config_opt} 在当前源码中不存在，注入无效（请核对选项名）"
+            UNKNOWN="$UNKNOWN ${config_opt}"
+            [ "$STRICT_SYMBOL_CHECK" = "1" ] && exit 1
         fi
+        set_opt "$config_opt" y
+        echo "$config_opt" >> tmp/injected-plugins.txt
+        ENABLED=$((ENABLED + 1))
     else
-        # --- 目标：确保配置项为 n 或不存在 ---
-        if grep -q "^${config_opt}=y" "$CONFIG_FILE"; then
-            # 如果是 y，则替换为 n
-            sed -i "s/^${config_opt}=y/${config_opt}=n/" "$CONFIG_FILE"
-            echo "Action: Updating ${config_opt} to disabled (n)."
-        elif grep -q "^${config_opt}" "$CONFIG_FILE"; then
-            # 如果已经是 n，则不做处理
-            echo "Status: ${config_opt} is already disabled."
-        fi
+        set_opt "$config_opt" n
     fi
 done
 
-echo "Plugin injection completed successfully."
+# 反向校验：cfg 里有、映射表里没有的开关
+MAPPED_NAMES="$(printf '%s\n' "${plugins[@]}" | cut -d'|' -f1)"
+for v in $(sed -e 's/#.*//' "$PLUGIN_CFG" \
+           | grep -oE '^[[:space:]]*ENABLE_[A-Z0-9_]+' | tr -d '[:space:]'); do
+    echo "$MAPPED_NAMES" | grep -qx "$v" || \
+        echo "WARNING: ${v} 在 ${PLUGIN_CFG} 中定义，但脚本映射表里没有，将被忽略"
+done
+
+echo "Plugin injection done: ${ENABLED}/${TOTAL} enabled"
+[ -z "$UNKNOWN" ] || echo "WARNING: 以下选项在源码中不存在:${UNKNOWN}"
