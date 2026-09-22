@@ -63,6 +63,21 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Syntax check shell scripts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FAIL=0
+          for f in shell/*.sh; do
+            if bash -n "$f"; then echo "OK   $f"; else echo "FAIL $f"; FAIL=1; fi
+          done
+          for f in Third-Party/third-party.config files/etc/third-party/install_third_party_apk.sh \
+                   files/etc/init.d/apk-install files/*/etc/uci-defaults/99-custom-network; do
+            [ -f "$f" ] || continue
+            if bash -n "$f" 2>/dev/null || sh -n "$f" 2>/dev/null; then echo "OK   $f"; else echo "FAIL $f"; FAIL=1; fi
+          done
+          [ "$FAIL" = "0" ] || { echo "存在语法错误，请先修复"; exit 1; }
+
       - name: Cache OpenWrt downloads (dl)
         uses: actions/cache@v4
         with:
