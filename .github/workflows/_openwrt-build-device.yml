@@ -80,12 +80,22 @@ jobs:
           mkdir -p dl
 
 
-      - name: Update & Install feeds
+      - name: Update & Install feeds (彻底清算并对齐依赖)
         shell: bash
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
+          # 1. 强行删除旧的 feeds 缓存符号链接，防止死锁
+          rm -rf ./feeds
+    
+          # 2. 重新拉取所有官方/天灵的最完整第三方包仓库
           ./scripts/feeds update -a
+    
+          # 3. 核心：强制建立全局依赖索引，把 bmx7, babeld, librespeed-common 等主程序全部装进编译树
+          ./scripts/feeds install -a
+    
+          # 4. 再次执行清算，让编译系统重新扫描并对齐所有 package 的 Makefile
+          ./scripts/feeds update -i
           ./scripts/feeds install -a -f
 
 
