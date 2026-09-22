@@ -85,18 +85,26 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
-          # 1. 强行删除旧的 feeds 缓存符号链接，防止死锁
-          rm -rf ./feeds
-    
-          # 2. 重新拉取所有官方/天灵的最完整第三方包仓库
-          ./scripts/feeds update -a
-    
-          # 3. 核心：强制建立全局依赖索引，把 bmx7, babeld, librespeed-common 等主程序全部装进编译树
+          
+          # 1. 彻底清理旧的 feeds 缓存、临时文件及软链接，确保白纸一张
+          rm -rf ./feeds ./data/feeds-*.tmp ./package/feeds
+          
+          # 2. 核心：从远程拉取完整的最新软件包索引（加入 3 次重试机制，防止 GitHub 网络波动）
+          for i in {1..3}; do ./scripts/feeds update -a && break || sleep 5; done
+          
+          # 3. 核心：将所有包建立软链接并装入编译树
           ./scripts/feeds install -a
-    
-          # 4. 再次执行清算，让编译系统重新扫描并对齐所有 package 的 Makefile
-          ./scripts/feeds update -i
-          ./scripts/feeds install -a -f
+
+          # 4. 强行物理切除已知失效、冷门且引发 WARNING 的死依赖（让日志彻底干净）
+          rm -rf package/feeds/luci/luci-app-bmx7 \
+                 package/feeds/luci/luci-app-babeld \
+                 package/feeds/luci/luci-app-librespeed \
+                 package/feeds/packages/bmx7-dnsupdate \
+                 package/feeds/packages/prometheus-node-exporter-lua \
+                 package/boot/arm-trusted-firmware-microchipsw
+
+          # 5. 【关键】用一条标准命令强行刷新，补全漏网之鱼，不要加 update -i！
+          ./scripts/feeds install -a
 
 
       # --- 核心逻辑开始 ---
