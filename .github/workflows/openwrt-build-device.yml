@@ -218,26 +218,61 @@ jobs:
           set -euxo pipefail
           OPENWRT_DIR="${WORKSPACE}/src"
           FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
+          REPO_FILES_DIR="${WORKSPACE}/files"
           APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
 
-          APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' 2>/dev/null | wc -l)"
-          [ "${APK_COUNT}" -gt 0 ] || { echo "ERROR: ${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
-          echo ">>> 找到 ${APK_COUNT} 个第三方 apk"
+          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/init.d" \
+                   "${FIRMWARE_FILES_DIR}/etc/rc.d"
 
-          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" "${FIRMWARE_FILES_DIR}/etc/rc.d"
+          # ---- 1) 拷入第三方 apk ----
+          APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          [ "${APK_COUNT}" -gt 0 ] || { echo "ERROR: ${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
           find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' \
             -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
+          echo ">>> 已拷入 ${APK_COUNT} 个第三方 apk"
 
-          test -f "${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh" || {
-            echo "ERROR: 缺少 etc/third-party/install_third_party_apk.sh"; exit 1; }
+          # ---- 2) 兼容旧目录名 ithird-party（如果公共 overlay 已经拷过）----
+          if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ]; then
+            cp -af "${FIRMWARE_FILES_DIR}/etc/ithird-party/." "${FIRMWARE_FILES_DIR}/etc/third-party/"
+            rm -rf "${FIRMWARE_FILES_DIR}/etc/ithird-party"
+            echo ">>> etc/ithird-party → etc/third-party 已合并"
+          fi
 
-          # 【关键】rcS 只执行 /etc/rc.d/S*，必须显式启用这个首启服务
+          # ---- 3) 兜底：脚本不在位就直接从仓库里找出来安装（不依赖上一步）----
+          SRC_INIT="$(find "${REPO_FILES_DIR}" -type f -name 'apk-install' -print -quit 2>/dev/null || true)"
+          SRC_INSTALLER="$(find "${REPO_FILES_DIR}" -type f -name 'install_third_party_apk.sh' -print -quit 2>/dev/null || true)"
+
+          DST_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
+          DST_INSTALLER="${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+
+          if [ ! -f "${DST_INIT}" ]; then
+            [ -n "${SRC_INIT}" ] || { echo "ERROR: 在 ${REPO_FILES_DIR} 里找不到 apk-install"; exit 1; }
+            install -m 0755 "${SRC_INIT}" "${DST_INIT}"
+            echo ">>> 兜底安装 init: ${SRC_INIT} → ${DST_INIT}"
+          fi
+          if [ ! -f "${DST_INSTALLER}" ]; then
+            [ -n "${SRC_INSTALLER}" ] || { echo "ERROR: 在 ${REPO_FILES_DIR} 里找不到 install_third_party_apk.sh"; exit 1; }
+            install -m 0755 "${SRC_INSTALLER}" "${DST_INSTALLER}"
+            echo ">>> 兜底安装 installer: ${SRC_INSTALLER} → ${DST_INSTALLER}"
+          fi
+
+          chmod 0755 "${DST_INIT}" "${DST_INSTALLER}"
+
+          # ---- 4) 【关键】让首启服务真正被执行（rcS 只跑 /etc/rc.d/S*）----
           ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
           test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
-
-          echo ">>> overlay 中的第三方 APK:"
-          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f | sort
           echo ">>> 首启服务已启用: /etc/rc.d/S99apk-install"
+
+          # ---- 5) 结果自检 ----
+          echo ">>> overlay 结构:"
+          find "${FIRMWARE_FILES_DIR}" -maxdepth 4 | sort
+          echo ">>> 待安装 apk:"
+          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' \
+            -exec ls -lh {} \;
+          echo ">>> init 服务链接:"
+          ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
 
       - name: Finalize Configuration (defconfig + 校验注入存活)
         shell: bash
