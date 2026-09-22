@@ -4,112 +4,182 @@
 # 脚本名称: prepare_base_config.sh
 # 描述: 
 #   1. 自动识别并下载官方/ImmortalWrt 的最新稳定版 config.buildinfo
-#   2. 将其转换为 .config 文件
+#   2. 用 configs/device_mapping.conf 解析 target 路径与 profile
 #   3. 执行 make defconfig 确保基础依赖完整
 # 
 # 使用方法: 
-#   source ./shell/prepare_base_config.sh [openwrt|immortalwrt] [device_name]
-#   或者直接执行: sh ./shell/prepare_base_config.sh openwrt x86
+#   bash ../shell/prepare_base_config.sh [source_type] [device]
+#   bash ../shell/prepare_base_config.sh --list-profiles <device>   # 列出候选 profile
+#
+# 环境变量：SOURCE_TYPE / TARGET_DEVICE / VERSION（留空=自动抓最新 release）
 # ==============================================================================
 
 set -euxo pipefail
 
-# --- 配置变量 ---
+LIST_PROFILES=0
+if [ "${1:-}" = "--list-profiles" ]; then LIST_PROFILES=1; shift; fi
+
 # 允许通过环境变量传入：SOURCE_TYPE (openwrt|immortalwrt), TARGET_DEVICE
-# TARGET_DEVICE 对应用户要求的：x86, AXT-1800, GL-MT3600BE, Cudy-TR3000-256MB, Tenda-BE12PRO
-SOURCE_TYPE="${SOURCE_TYPE:-immortalwrt}"    # 默认 immortalwrt
-TARGET_DEVICE="${TARGET_DEVICE:-x86}"      # 默认 x86 (对应 x86_64)
-VERSION=""
+SOURCE_TYPE="${1:-${SOURCE_TYPE:-immortalwrt}}"    # 默认 immortalwrt
+TARGET_DEVICE="${2:-${TARGET_DEVICE:-x86}}"      # 默认 x86 (对应 x86/64)
+VERSION="${VERSION:-}"      #对应版本号
 
-echo "Starting configuration preparation..."
-echo "Source Type: $SOURCE_TYPE"
-echo "Target Device: $TARGET_DEVICE"
+echo ">>> source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION:-<auto>} list_profiles=${LIST_PROFILES}"
 
-# --- 1. 自动获取版本号 ---
+# --- 环境自检 ---
+[ -f ./Makefile ] && [ -d ./scripts ] || {
+    echo "ERROR: 当前目录不是 buildroot（$(pwd)），请 cd 到 src/ 后执行"; exit 1; }
+[ -d ./feeds ] || echo "WARNING: ./feeds 不存在，feeds 可能尚未安装"
+
+
+# --- 1. 自动获取版本号与配置基础 URL ---
+case "$SOURCE_TYPE" in
+    immortalwrt) BASE_URL="https://downloads.immortalwrt.org/releases" ;;
+    openwrt)     BASE_URL="https://downloads.openwrt.org/releases" ;;
+    *) echo "ERROR: 不支持的 SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
+esac
+
 if [ -z "$VERSION" ]; then
-    echo "Attempting to fetch the latest stable version..."
-    if [ "$SOURCE_TYPE" = "immortalwrt" ]; then
-        # 从 immortalwrt release 页面抓取最新的 25.x.x 或 23.x.x 版本号
-        VERSION=$(curl -s https://downloads.immortalwrt.org/releases/ | grep -oE '2[0-9]\.[0-9]{2}\.[0-9]{1,2}' | sort -nr | head -n1)
-    else
-        # 从 openwrt release 页面抓取最新的版本号
-        VERSION=$(curl -s https://downloads.openwrt.org/releases/ | grep -oE '2[0-9]\.[0-9]{2}\.[0-9]{1,2}' | sort -nr | head -n1)
-    fi
-    
-    if [ -z "$VERSION" ]; then
-        echo "Error: Could not automatically detect the version. Please set VERSION environment variable."
-        exit 1
-    fi
-    echo "Detected Version: $VERSION"
+    echo ">>> 未指定 VERSION，从 ${BASE_URL}/ 自动识别（建议显式锁定以便复现）"
+    VERSION="$(curl -fsSL --retry 3 --connect-timeout 20 "${BASE_URL}/" \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true)"
+    [ -n "$VERSION" ] || { echo "ERROR: 无法识别版本，请显式传入 VERSION"; exit 1; }
 fi
+echo ">>> VERSION=${VERSION}"
 
-# --- 2. 配置基础 URL ---
-if [ "$SOURCE_TYPE" = "immortalwrt" ]; then
-    BASE_URL="https://downloads.immortalwrt.org/releases"
-else
-    BASE_URL="https://downloads.openwrt.org/releases"
-fi
-
-# --- 3. 设备与 Target 路径映射 (核心：确保内核哈希一致) ---
+# --- 2. 设备与 Target 路径映射 (核心：确保内核哈希一致) ---
 MAPPING_FILE="../configs/device_mapping.conf"
 
-if [ ! -f "$MAPPING_FILE" ]; then
-    echo "Error: Mapping file $MAPPING_FILE not found!"
-    exit 1
-fi
+[ -f "$MAPPING_FILE" ] || {
+    echo "ERROR: 找不到映射文件 ${MAPPING_FILE}（当前目录：$(pwd)）"; exit 1; }
 
 # 改进的提取逻辑：
 # 1. 使用 tr 删除可能存在的 Windows 换行符 (\r)
 # 2. 使用 sed 去除每行开头的空格
 # 3. 使用 grep 匹配包含设备名的行
 # 4. 使用 cut 获取等号后的内容并去除多余空格
-DEVICE_PATH=$(tr -d '\r' < "$MAPPING_FILE" | sed 's/^[[:space:]]*//' | grep "^${TARGET_DEVICE}=" | head -n1 | cut -d'=' -f2 | tr -d '[:space:]')
-if [ -z "$DEVICE_PATH" ]; then
-    echo "Error: Unknown device '$TARGET_DEVICE'. Please ensure it is correctly defined in $MAPPING_FILE."
-    echo "Current MAPPING_FILE content:"
-    cat "$MAPPING_FILE" # 在报错时打印出文件内容，方便排查问题
+DEVICE_LINE="$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$MAPPING_FILE" \
+    | grep -E "^${TARGET_DEVICE}=" | sed -n '$p' || true)"
+    
+if [ -z "$DEVICE_LINE" ]; then
+    echo "ERROR: 设备 '${TARGET_DEVICE}' 未在 ${MAPPING_FILE} 中定义。可用设备："
+    sed -e 's/#.*//' "$MAPPING_FILE" | sed '/^[[:space:]]*$/d' | cut -d= -f1
     exit 1
 fi
-echo "Mapped Device Path: ${DEVICE_PATH}"
 
-# --- 4. 构造最终 URL ---
+case "$DEVICE_LINE" in
+    *"|"*)
+        DEVICE_PATH="${DEVICE_LINE#*=}"
+        DEVICE_PATH="${DEVICE_PATH%%|*}"
+        PROFILE="${DEVICE_LINE#*|}"
+        ;;
+    *)
+        DEVICE_PATH="${DEVICE_LINE#*=}"
+        PROFILE=""
+        ;;
+esac
+
+DEVICE_PATH="$(printf '%s' "$DEVICE_PATH" | tr -d '[:space:]')"
+# ⚠ profile 只去首尾空格，中间空格要保留（显示名形式需要）
+PROFILE="$(printf '%s' "$PROFILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+[ -n "$DEVICE_PATH" ] || { echo "ERROR: ${TARGET_DEVICE} 的 target 路径为空"; exit 1; }
+echo ">>> target path=${DEVICE_PATH} profile=${PROFILE:-<未指定>}"
+
+BOARD="$(printf '%s' "$DEVICE_PATH" | cut -d/ -f2)"
+SUBTARGET="$(printf '%s' "$DEVICE_PATH" | cut -d/ -f3)"
+[ -n "$BOARD" ] && [ -n "$SUBTARGET" ] || {
+    echo "ERROR: 无法从 '${DEVICE_PATH}' 解析 board/subtarget"; exit 1; }
+
+# --- 3. 构造最终 URL ---
 # 官方通常的路径结构是: BASE_URL/targets/xxx/xxx/xxx/config.buildinfo
 # 对于 x86，路径是 targets/x86/64/generic
-# 对于其他，路径是 targets/mediatek/filogic 等
 # 路径结构：BASE_URL/VERSION/DEVICE_PATH/config.buildinfo
 FINAL_URL="${BASE_URL}/${VERSION}/${DEVICE_PATH}/config.buildinfo"
 
-echo "Constructed FINAL_URL: ${FINAL_URL}"
+echo ">>> 下载 ${FINAL_URL}"
 
 # 使用 -L 跟随重定向，-s 静默模式，-o 输出到临时文件
-if curl -L -s "${FINAL_URL}" -o "tmp_config.buildinfo"; then
-    echo "Download successful."
-    # 覆盖当前的 .config
-    mv "tmp_config.buildinfo" ".config"
-    echo "Created .config from official source."
-else
-    echo "Error: Failed to download config.buildinfo from ${FINAL_URL}"
-    # 打印出 URL 以便排查是否路径错误
-    exit 1
+curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 -o tmp_config.buildinfo "$FINAL_URL" || {
+    echo "ERROR: 下载失败（HTTP 错误或网络问题）: ${FINAL_URL}"; exit 1; }
+grep -q '^CONFIG_TARGET_' tmp_config.buildinfo || {
+    echo "ERROR: 下载内容不是 config.buildinfo，前 5 行："; sed -n '1,5p' tmp_config.buildinfo; exit 1; }
+
+mv -f tmp_config.buildinfo .config
+echo ">>> 已用官方 buildinfo 覆盖 .config"
+
+# --- 3.5列出配置文件 ---
+if [ "$LIST_PROFILES" = "1" ]; then
+    make defconfig
+    echo "=============================================================="
+    echo ">>> 候选 profile（symbol 形式，复制其一填进 device_mapping.conf 第二段）"
+    grep -oE '^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y' .config \
+        | sed 's/^CONFIG_TARGET_[A-Za-z0-9_]*_DEVICE_//; s/=y$//' | sort -u || true
+    echo ">>> 候选 profile（string 形式，若本源码使用）"
+    grep -E '^CONFIG_TARGET_PROFILE=' .config || echo "  (无)"
+    echo "=============================================================="
+    exit 0
+fi
+
+# --- 4. 重建配置文件 ---
+PROFILE_STYLE=""
+if [ -n "$PROFILE" ]; then
+    case "$PROFILE" in
+        *" "*)
+            PROFILE_STYLE="string"
+            echo ">>> 按显示名写入 profile: \"${PROFILE}\""
+            sed -i '/^CONFIG_TARGET_PROFILE=/d' .config
+            printf 'CONFIG_TARGET_PROFILE="%s"\n' "$PROFILE" >> .config
+            ;;
+        *)
+            PROFILE_STYLE="symbol"
+            PSYM="CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_${PROFILE}"
+            echo ">>> 按符号写入 profile: ${PSYM}"
+            sed -i "/^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=y$/d" .config
+            sed -i "/^# CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]* is not set$/d" .config
+            for s in CONFIG_TARGET_ALL_PROFILES CONFIG_TARGET_MULTI_PROFILE; do
+                grep -q "^${s}=" .config && sed -i "s/^${s}=.*/${s}=n/" .config || true
+            done
+            echo "${PSYM}=y" >> .config
+            ;;
+    esac
 fi
 
 # --- 5. 执行 make defconfig ---
-    # --- 执行 make defconfig ---
     # 这一步非常关键：
     # 1. 使用 FORCE=1 是为了跳过 GitHub Actions 环境中可能存在的 host 架构不匹配检查
     # 2. 它会根据我们下载的 .buildinfo 自动补全所有基础依赖、架构相关的内核配置和工具链
-    echo "Running make defconfig with FORCE=1 to complement the configuration..."
-    make defconfig FORCE=1
-    
-    if [ $? -eq 0 ]; then
-        echo "make defconfig completed successfully."
+    echo ">>> make defconfig"
+    make defconfig
+
+# --- 6. 执行校验 ---    
+grep -q "^CONFIG_TARGET_${BOARD}_${SUBTARGET}=y" .config || {
+    echo "ERROR: 目标 ${BOARD}/${SUBTARGET} 不在当前源码中 →"
+    echo "       源码分支与下载的 buildinfo 版本(${VERSION})不一致，请锁定同一版本"
+    exit 1; }
+
+if [ -n "$PROFILE" ]; then
+    PROFILE_OK=0
+    if [ "$PROFILE_STYLE" = "string" ]; then
+        grep -Fq "CONFIG_TARGET_PROFILE=\"${PROFILE}\"" .config && PROFILE_OK=1 || true
     else
-        echo "Error: make defconfig failed."
+        grep -qE "^${PSYM}=y$" .config && PROFILE_OK=1 || true
+    fi
+    if [ "$PROFILE_OK" != "1" ]; then
+        echo "ERROR: profile '${PROFILE}' 未被 defconfig 保留 → 本源码不认这个值"
+        echo ">>> 本源码可用的 profile（复制其一填进 device_mapping.conf 第二段）："
+        grep -oE '^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y' .config \
+            | sed 's/^CONFIG_TARGET_[A-Za-z0-9_]*_DEVICE_//; s/=y$//' | sort -u | sed -n '1,40p' || true
+        grep -E '^CONFIG_TARGET_PROFILE=' .config || true
         exit 1
     fi
+    echo ">>> profile 校验通过: ${PROFILE}"
+fi
 
-    echo "=============================================================="
-    echo ">>> FINAL .config CONTENT (Source: ${SOURCE_TYPE}, Device: ${TARGET_DEVICE})"
-    echo "=============================================================="
-    cat .config
-    echo "=============================================================="
+echo "=============================================================="
+echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION})"
+grep -E "^CONFIG_TARGET_${BOARD}_${SUBTARGET}(_DEVICE_[A-Za-z0-9_.-]+)?=y$" .config || true
+grep -E '^CONFIG_TARGET_PROFILE=' .config || true
+echo ">>> 已启用 device 选项数: $(grep -cE "^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]+=y$" .config || true)"
+echo ">>> 已启用包数量: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
+echo "=============================================================="
