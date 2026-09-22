@@ -43,10 +43,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  WORKSPACE: ${{ github.workspace }}
   SOURCE_TYPE: ${{ github.event.inputs.source_type }}
   TARGET_DEVICE: ${{ github.event.inputs.target_device }}
   SOURCE_REF: ${{ github.event.inputs.source_ref }}
-  VERSION: ${{ github.event.inputs.version }}
+  INPUT_VERSION: ${{ github.event.inputs.version }} 
   CUSTOM_PACKAGE_EXTRA: ${{ github.event.inputs.custom_packages }}
 
 jobs:
@@ -86,6 +87,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # ↓ 兜底：即使 env 里没定义也不会因 set -u 报错
+          SOURCE_REF="${SOURCE_REF:-}"
+          INPUT_VERSION="${INPUT_VERSION:-}"
+
           case "${SOURCE_TYPE}" in
             immortalwrt) SRC_URL="https://github.com/ImmortalWrt/immortalwrt.git"
                          SITE="https://downloads.immortalwrt.org" ;;
@@ -143,8 +148,8 @@ jobs:
           echo ">>> 当前分支: $(git -C src rev-parse --abbrev-ref HEAD)"
 
           if [ -n "${VERSION}" ]; then
-              echo "VERSION=${VERSION}" >> "$GITHUB_ENV"      # ← 传给 prepare_base_config.sh
-              echo ">>> 已导出 VERSION=${VERSION}（基线将使用 releases/${VERSION}/ 的 buildinfo）"
+              echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+              echo ">>> 已导出 VERSION=${VERSION}（基线将用 releases/${VERSION}/ 的 buildinfo）"
           else
               echo "::warning::无法推导版本号，prepare_base_config 会自行取最新稳定版，可能与源码 ref 不配套"
           fi
