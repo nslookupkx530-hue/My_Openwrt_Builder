@@ -67,7 +67,7 @@ DEVICE_PATH="$(printf '%s' "$DEVICE_PATH" | tr -d '[:space:]')"
 PROFILE="$(printf '%s' "$PROFILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
 [ -n "$DEVICE_PATH" ] || { echo "ERROR: ${TARGET_DEVICE} 的 target 路径为空"; exit 1; }
-echo ">>> target path=${DEVICE_PATH} profile=${PROFILE:-<未指定>}"
+echo ">>> target path=${DEVICE_PATH} profile=${PROFILE:-<未指定，将编出该 target 全套镜像>}"
 
 BOARD="$(printf '%s' "$DEVICE_PATH" | cut -d/ -f2)"
 SUBTARGET="$(printf '%s' "$DEVICE_PATH" | cut -d/ -f3)"
@@ -81,8 +81,7 @@ download_buildinfo() {
 
 CHANNEL=""
 if [ "$VERSION" = "snapshot" ]; then
-    CHANNEL="snapshot"
-    VERSION=""
+    CHANNEL="snapshot"; VERSION=""
     FINAL_URL="${SITE}/snapshots/${DEVICE_PATH}/config.buildinfo"
     echo ">>> 模式: 开发快照(snapshot) → ${FINAL_URL}"
     echo "    ⚠ 使用 snapshot 时源码必须是默认分支，否则符号会错配"
@@ -116,51 +115,87 @@ grep -q '^CONFIG_TARGET_' tmp_config.buildinfo || {
 mv -f tmp_config.buildinfo .config
 echo ">>> 已用 buildinfo 覆盖 .config（channel=${CHANNEL} version=${VERSION:-snapshot}）"
 
-# --- 3.5列出配置文件 ---
+# --- 4. 执行 make defconfig ---
+echo ">>> make defconfig（第 1 次：生成元数据 + 规范化）"
+make defconfig
+
+# ================================================================
+#  device 选项解析（不猜符号名）
+# ================================================================
+device_symbols() {   # 打印 "符号<TAB>菜单显示名"
+    ls tmp/.config-target.in >/dev/null 2>&1 || return 0
+    awk '
+        /^[[:space:]]*config[[:space:]]+/ { s=$2; next }
+        /^[[:space:]]*bool[[:space:]]+"/ {
+            t=$0; sub(/^[^"]*"/,"",t); sub(/".*$/,"",t)
+            if (s ~ /_DEVICE_/) printf "%s\t%s\n", s, t
+        }
+    ' tmp/.config-target.in
+}
+
+profile_key() {   # 符号 → 键（填进映射文件的那个值）
+    printf '%s' "$1" | sed -E 's/^TARGET_DEVICE_//; s/^TARGET_//; s/^[A-Za-z0-9_]+_DEVICE_//'
+}
+
+resolve_profile() {   # $1=board $2=subtarget $3=取值 → 打印完整选项名（CONFIG_...）
+    local b="$1" sg="$2" p="$3" cand hit
+    for cand in "TARGET_DEVICE_${b}_${sg}_DEVICE_${p}" "TARGET_${b}_${sg}_DEVICE_${p}"; do
+        if device_symbols | cut -f1 | grep -qx "${cand}"; then
+            echo "CONFIG_${cand}"; return 0
+        fi
+    done
+    hit="$(device_symbols | awk -F'\t' -v w="$p" 'tolower($2)==tolower(w){print $1; exit}')"
+    if [ -z "$hit" ]; then
+        hit="$(device_symbols | awk -F'\t' -v w="$p" 'index(tolower($2),tolower(w))>0{print $1; exit}')"
+    fi
+    [ -n "$hit" ] && { echo "CONFIG_${hit}"; return 0; }
+    return 1
+}
+
+show_profiles() {   # 列出本 target 可选项：键 + 显示名
+    device_symbols | while IFS="$(printf '\t')" read -r sym prompt; do
+        printf '  key=%-45s %s\n' "$(profile_key "${sym}")" "${prompt}"
+    done | sort -u
+
+# --- 4.5列出配置文件 ---
 if [ "$LIST_PROFILES" = "1" ]; then
-    make defconfig
     echo "=============================================================="
-    echo ">>> 候选 profile（symbol 形式，复制其一填进 configs/device_mapping.conf 第二段）"
-    grep -oE '^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y' .config \
-        | sed 's/^CONFIG_TARGET_[A-Za-z0-9_]*_DEVICE_//; s/=y$//' | sort -u || true
-    echo ">>> 候选 profile（string 形式，若本源码使用）"
-    grep -E '^CONFIG_TARGET_PROFILE=' .config || echo "  (无)"
+    echo ">>> 本 target（${BOARD}/${SUBTARGET}）可选的 device 选项"
+    echo ">>> 把 key 或显示名填进 configs/device_mapping.conf 第二段，两种写法都支持"
+    show_profiles
     echo "=============================================================="
     exit 0
 fi
 
-# --- 4. 重建配置文件 ---
-PROFILE_STYLE=""
+# --- 5. 重建配置文件 ---
+PROFILE_SYMBOL=""
 if [ -n "$PROFILE" ]; then
-    case "$PROFILE" in
-        *" "*)
-            PROFILE_STYLE="string"
-            echo ">>> 按显示名写入 profile: \"${PROFILE}\""
-            sed -i '/^CONFIG_TARGET_PROFILE=/d' .config
-            printf 'CONFIG_TARGET_PROFILE="%s"\n' "$PROFILE" >> .config
-            ;;
-        *)
-            PROFILE_STYLE="symbol"
-            PSYM="CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_${PROFILE}"
-            echo ">>> 按符号写入 profile: ${PSYM}"
-            sed -i "/^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=y$/d" .config
-            sed -i "/^# CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]* is not set$/d" .config
-            for s in CONFIG_TARGET_ALL_PROFILES CONFIG_TARGET_MULTI_PROFILE; do
-                grep -q "^${s}=" .config && sed -i "s/^${s}=.*/${s}=n/" .config || true
-            done
-            echo "${PSYM}=y" >> .config
-            ;;
-    esac
+    echo ">>> 解析 profile: '${PROFILE}'"
+    PROFILE_SYMBOL="$(resolve_profile "${BOARD}" "${SUBTARGET}" "${PROFILE}" || true)"
+    if [ -z "${PROFILE_SYMBOL}" ]; then
+        echo "ERROR: 当前源码里找不到与 '${PROFILE}' 匹配的 device 选项"
+        echo ">>> 可选项（把 key 或显示名填进 configs/device_mapping.conf 第二段）："
+        show_profiles
+        exit 1
+    fi
+    echo ">>> 命中选项: ${PROFILE_SYMBOL}"
+
+    # 清掉同 target 下其它 device 选项（两种历史命名都清）
+    sed -i "/^CONFIG_TARGET_DEVICE_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=/d" .config
+    sed -i "/^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=/d" .config
+    for s in CONFIG_TARGET_ALL_PROFILES CONFIG_TARGET_MULTI_PROFILE; do
+        grep -q "^${s}=" .config && sed -i "s/^${s}=.*/${s}=n/" .config || true
+    done
+    echo "${PROFILE_SYMBOL}=y" >> .config
 fi
 
-# --- 5. 执行 make defconfig ---
+# --- 6. 再次执行 make defconfig ---
     # 这一步非常关键：
     # 1. 使用 FORCE=1 是为了跳过 GitHub Actions 环境中可能存在的 host 架构不匹配检查
-    # 2. 它会根据我们下载的 .buildinfo 自动补全所有基础依赖、架构相关的内核配置和工具链
-echo ">>> make defconfig"
+echo ">>> make defconfig（第 2 次：应用 profile + 补依赖）"
 make defconfig
 
-# --- 6. 执行校验 ---    
+# --- 7. 执行校验 ---    
 grep -q "^CONFIG_TARGET_${BOARD}_${SUBTARGET}=y" .config || {
     echo "ERROR: 目标 ${BOARD}/${SUBTARGET} 不在当前源码中 →"
     echo "       源码分支与 buildinfo(${CHANNEL}${VERSION:+/${VERSION}}) 不配套，"
@@ -168,27 +203,17 @@ grep -q "^CONFIG_TARGET_${BOARD}_${SUBTARGET}=y" .config || {
     exit 1; }
 
 if [ -n "$PROFILE" ]; then
-    PROFILE_OK=0
-    if [ "$PROFILE_STYLE" = "string" ]; then
-        grep -Fq "CONFIG_TARGET_PROFILE=\"${PROFILE}\"" .config && PROFILE_OK=1 || true
-    else
-        grep -qE "^${PSYM}=y$" .config && PROFILE_OK=1 || true
-    fi
-    if [ "$PROFILE_OK" != "1" ]; then
-        echo "ERROR: profile '${PROFILE}' 未被 defconfig 保留 → 本源码不认这个值"
-        echo ">>> 本源码可用的 profile（复制其一填进 configs/device_mapping.conf 第二段）："
-        grep -oE '^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y' .config \
-            | sed 's/^CONFIG_TARGET_[A-Za-z0-9_]*_DEVICE_//; s/=y$//' | sort -u | sed -n '1,40p' || true
-        grep -E '^CONFIG_TARGET_PROFILE=' .config || true
-        exit 1
-    fi
-    echo ">>> profile 校验通过: ${PROFILE}"
+    grep -q "^${PROFILE_SYMBOL}=y" .config || {
+        echo "ERROR: ${PROFILE_SYMBOL} 未被 defconfig 保留"
+        echo ">>> 可选项："; show_profiles
+        exit 1; }
+    echo ">>> profile 校验通过: ${PROFILE_SYMBOL}"
 fi
 
+DEV_ON="$(grep -cE "^CONFIG_TARGET_DEVICE_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=y$" .config || true)"
 echo "=============================================================="
 echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} channel=${CHANNEL} version=${VERSION:-snapshot})"
 grep -E "^CONFIG_TARGET_${BOARD}_${SUBTARGET}(_DEVICE_[A-Za-z0-9_.-]+)?=y$" .config || true
-grep -E '^CONFIG_TARGET_PROFILE=' .config || true
-echo ">>> 已启用 device 选项数: $(grep -cE "^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]+=y$" .config || true)"
+echo ">>> 已启用 device 选项数: ${DEV_ON:-0}  (期望 1；>1 说明没收窄干净，请把日志发我)"
 echo ">>> 已启用包数量: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
 echo "=============================================================="
