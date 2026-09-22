@@ -23,7 +23,7 @@ on:
           - Cudy-TR3000-256MB
           - Tenda-BE12PRO
       source_ref:
-        description: '源码分支或 tag（留空=默认分支）'
+        description: '【可选】源码分支或 tag，留空=默认分支(跟随最新)'
         required: false
         default: ''
       version:
@@ -61,6 +61,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ -n "${VERSION}" ] && [ -z "${SOURCE_REF}" ]; then
+            echo "::warning::指定了 version=${VERSION} 但 source_ref 为空：源码是最新默认分支，"
+            echo "::warning::而基线来自 release ${VERSION}，两者可能对不上。建议同时填 source_ref。"
+          fi
+          echo ">>> mode: source_ref=${SOURCE_REF:-<default/latest>}  version=${VERSION:-<snapshot>}"
 
       - name: Cache OpenWrt downloads (dl)
         uses: actions/cache@v4
@@ -262,6 +272,27 @@ jobs:
             exit 1; }
           echo ">>> 插件注入校验通过"
 
+      - name: Generate build info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          {
+            echo "## 构建信息"
+            echo ""
+            echo '```'
+            echo "device      : ${TARGET_DEVICE}"
+            echo "source_type : ${SOURCE_TYPE}"
+            echo "source_ref  : ${SOURCE_REF:-<default branch / latest>}"
+            echo "channel     : ${VERSION:-snapshot}"
+            echo "src_commit  : $(git -C "${WORKSPACE}/src" rev-parse HEAD)"
+            echo "src_date    : $(git -C "${WORKSPACE}/src" log -1 --format=%cd --date=iso)"
+            echo "build_time  : $(date -u '+%F %T UTC')"
+            echo "run_id      : ${{ github.run_id }}"
+            echo "config_md5  : $(md5sum "${WORKSPACE}/src/.config" | cut -d' ' -f1)"
+            echo '```'
+          } | tee "${WORKSPACE}/BUILDINFO.txt" > "${WORKSPACE}/release-notes.md"
+          cat "${WORKSPACE}/BUILDINFO.txt"
+
       - name: Prepare build download
         shell: bash
         run: |
@@ -343,7 +374,9 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.target_device }}-${{ github.event.inputs.source_type }}-run${{ github.run_number }}
           name: ${{ github.event.inputs.target_device }} / ${{ github.event.inputs.source_type }} / #${{ github.run_number }}
+          body_path: release-notes.md          # ← 新增
           files: |
+            BUILDINFO.txt                      # ← 新增
             src/bin/targets/*/*/*.bin
             src/bin/targets/*/*/*.img.gz
             src/bin/targets/*/*/*.itb
