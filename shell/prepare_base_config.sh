@@ -24,7 +24,7 @@ SOURCE_TYPE="${1:-${SOURCE_TYPE:-immortalwrt}}"    # 默认 immortalwrt
 TARGET_DEVICE="${2:-${TARGET_DEVICE:-x86}}"      # 默认 x86 (对应 x86/64)
 VERSION="${VERSION:-}"      #对应版本号
 
-echo ">>> source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION:-<latest>} list_profiles=${LIST_PROFILES}"
+echo ">>> source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION:-<auto:latest stable>} list_profiles=${LIST_PROFILES}"
 
 # --- 环境自检 ---
 [ -f ./Makefile ] && [ -d ./scripts ] || {
@@ -80,24 +80,33 @@ download_buildinfo() {
 }
 
 CHANNEL=""
-if [ -z "$VERSION" ]; then
+if [ "$VERSION" = "snapshot" ]; then
     CHANNEL="snapshot"
+    VERSION=""
     FINAL_URL="${SITE}/snapshots/${DEVICE_PATH}/config.buildinfo"
-    echo ">>> 模式: 最新(snapshot) → ${FINAL_URL}"
-    if ! download_buildinfo "${FINAL_URL}"; then
-        echo "WARNING: snapshot buildinfo 下载失败，回退到最新 release（可能与源码分支不一致）"
-        VERSION="$(curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true)"
-        [ -n "$VERSION" ] || { echo "ERROR: 无法识别 release 版本"; exit 1; }
-        CHANNEL="release-fallback"
-        FINAL_URL="${SITE}/releases/${VERSION}/${DEVICE_PATH}/config.buildinfo"
-        echo ">>> 回退 → ${FINAL_URL}"
-        download_buildinfo "${FINAL_URL}" || { echo "ERROR: 下载失败: ${FINAL_URL}"; exit 1; }
-    fi
-else
+    echo ">>> 模式: 开发快照(snapshot) → ${FINAL_URL}"
+    echo "    ⚠ 使用 snapshot 时源码必须是默认分支，否则符号会错配"
+elif [ -n "$VERSION" ]; then
     CHANNEL="release"
     FINAL_URL="${SITE}/releases/${VERSION}/${DEVICE_PATH}/config.buildinfo"
-    echo ">>> 模式: release ${VERSION} → ${FINAL_URL}"
+    echo ">>> 模式: 指定稳定版 ${VERSION} → ${FINAL_URL}"
+else
+    CHANNEL="stable"
+    echo ">>> 模式: 最新稳定版（自动识别）"
+    VERSION="$(curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true)"
+    [ -n "$VERSION" ] || { echo "ERROR: 无法识别最新稳定版本，请显式传入 VERSION"; exit 1; }
+    FINAL_URL="${SITE}/releases/${VERSION}/${DEVICE_PATH}/config.buildinfo"
+    echo ">>> 最新稳定版: ${VERSION}"
+    echo ">>> 基线地址: ${FINAL_URL}"
+fi
+
+if ! download_buildinfo "${FINAL_URL}"; then
+    echo "WARNING: ${CHANNEL} 的 buildinfo 下载失败（${FINAL_URL}）"
+    echo "WARNING: 回退到 snapshot；如果源码不是默认分支，可能符号错配！"
+    CHANNEL="snapshot-fallback"
+    FINAL_URL="${SITE}/snapshots/${DEVICE_PATH}/config.buildinfo"
+    echo ">>> 回退地址: ${FINAL_URL}"
     download_buildinfo "${FINAL_URL}" || { echo "ERROR: 下载失败: ${FINAL_URL}"; exit 1; }
 fi
 
@@ -105,7 +114,7 @@ grep -q '^CONFIG_TARGET_' tmp_config.buildinfo || {
     echo "ERROR: 下载内容不是 config.buildinfo，前 5 行："; sed -n '1,5p' tmp_config.buildinfo; exit 1; }
 
 mv -f tmp_config.buildinfo .config
-echo ">>> 已用 buildinfo 覆盖 .config（channel=${CHANNEL}）"
+echo ">>> 已用 buildinfo 覆盖 .config（channel=${CHANNEL} version=${VERSION:-snapshot}）"
 
 # --- 3.5列出配置文件 ---
 if [ "$LIST_PROFILES" = "1" ]; then
@@ -154,7 +163,8 @@ make defconfig
 # --- 6. 执行校验 ---    
 grep -q "^CONFIG_TARGET_${BOARD}_${SUBTARGET}=y" .config || {
     echo "ERROR: 目标 ${BOARD}/${SUBTARGET} 不在当前源码中 →"
-    echo "       源码分支与 buildinfo(${CHANNEL}${VERSION:+/${VERSION}}) 不匹配，请检查 feeds 或改用 source_ref 配套"
+    echo "       源码分支与 buildinfo(${CHANNEL}${VERSION:+/${VERSION}}) 不配套，"
+    echo "       稳定版基线要用稳定分支源码（workflow 会自动配对，请检查日志里的 ref）"
     exit 1; }
 
 if [ -n "$PROFILE" ]; then
@@ -176,7 +186,7 @@ if [ -n "$PROFILE" ]; then
 fi
 
 echo "=============================================================="
-echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} channel=${CHANNEL} version=${VERSION:-latest})"
+echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} channel=${CHANNEL} version=${VERSION:-snapshot})"
 grep -E "^CONFIG_TARGET_${BOARD}_${SUBTARGET}(_DEVICE_[A-Za-z0-9_.-]+)?=y$" .config || true
 grep -E '^CONFIG_TARGET_PROFILE=' .config || true
 echo ">>> 已启用 device 选项数: $(grep -cE "^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]+=y$" .config || true)"
