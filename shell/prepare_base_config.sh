@@ -24,30 +24,20 @@ SOURCE_TYPE="${1:-${SOURCE_TYPE:-immortalwrt}}"    # 默认 immortalwrt
 TARGET_DEVICE="${2:-${TARGET_DEVICE:-x86}}"      # 默认 x86 (对应 x86/64)
 VERSION="${VERSION:-}"      #对应版本号
 
-echo ">>> source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION:-<auto>} list_profiles=${LIST_PROFILES}"
+echo ">>> source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION:-<latest>} list_profiles=${LIST_PROFILES}"
 
 # --- 环境自检 ---
 [ -f ./Makefile ] && [ -d ./scripts ] || {
     echo "ERROR: 当前目录不是 buildroot（$(pwd)），请 cd 到 src/ 后执行"; exit 1; }
 [ -d ./feeds ] || echo "WARNING: ./feeds 不存在，feeds 可能尚未安装"
 
-
-# --- 1. 自动获取版本号与配置基础 URL ---
 case "$SOURCE_TYPE" in
-    immortalwrt) BASE_URL="https://downloads.immortalwrt.org/releases" ;;
-    openwrt)     BASE_URL="https://downloads.openwrt.org/releases" ;;
+    immortalwrt) SITE="https://downloads.immortalwrt.org" ;;
+    openwrt)     SITE="https://downloads.openwrt.org" ;;
     *) echo "ERROR: 不支持的 SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
 esac
 
-if [ -z "$VERSION" ]; then
-    echo ">>> 未指定 VERSION，从 ${BASE_URL}/ 自动识别（建议显式锁定以便复现）"
-    VERSION="$(curl -fsSL --retry 3 --connect-timeout 20 "${BASE_URL}/" \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true)"
-    [ -n "$VERSION" ] || { echo "ERROR: 无法识别版本，请显式传入 VERSION"; exit 1; }
-fi
-echo ">>> VERSION=${VERSION}"
-
-# --- 2. 设备与 Target 路径映射 (核心：确保内核哈希一致) ---
+# --- 1. 设备映射 (核心：确保内核哈希一致) ---
 MAPPING_FILE="../configs/device_mapping.conf"
 
 [ -f "$MAPPING_FILE" ] || {
@@ -68,15 +58,8 @@ if [ -z "$DEVICE_LINE" ]; then
 fi
 
 case "$DEVICE_LINE" in
-    *"|"*)
-        DEVICE_PATH="${DEVICE_LINE#*=}"
-        DEVICE_PATH="${DEVICE_PATH%%|*}"
-        PROFILE="${DEVICE_LINE#*|}"
-        ;;
-    *)
-        DEVICE_PATH="${DEVICE_LINE#*=}"
-        PROFILE=""
-        ;;
+    *"|"*) DEVICE_PATH="${DEVICE_LINE#*=}"; DEVICE_PATH="${DEVICE_PATH%%|*}"; PROFILE="${DEVICE_LINE#*|}" ;;
+    *)     DEVICE_PATH="${DEVICE_LINE#*=}"; PROFILE="" ;;
 esac
 
 DEVICE_PATH="$(printf '%s' "$DEVICE_PATH" | tr -d '[:space:]')"
@@ -91,28 +74,44 @@ SUBTARGET="$(printf '%s' "$DEVICE_PATH" | cut -d/ -f3)"
 [ -n "$BOARD" ] && [ -n "$SUBTARGET" ] || {
     echo "ERROR: 无法从 '${DEVICE_PATH}' 解析 board/subtarget"; exit 1; }
 
-# --- 3. 构造最终 URL ---
-# 官方通常的路径结构是: BASE_URL/targets/xxx/xxx/xxx/config.buildinfo
-# 对于 x86，路径是 targets/x86/64/generic
-# 路径结构：BASE_URL/VERSION/DEVICE_PATH/config.buildinfo
-FINAL_URL="${BASE_URL}/${VERSION}/${DEVICE_PATH}/config.buildinfo"
+# --- 3. 下载 config.buildinfo ---
+download_buildinfo() {
+    curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 -o tmp_config.buildinfo "$1" 2>/dev/null
+}
 
-echo ">>> 下载 ${FINAL_URL}"
+CHANNEL=""
+if [ -z "$VERSION" ]; then
+    CHANNEL="snapshot"
+    FINAL_URL="${SITE}/snapshots/${DEVICE_PATH}/config.buildinfo"
+    echo ">>> 模式: 最新(snapshot) → ${FINAL_URL}"
+    if ! download_buildinfo "${FINAL_URL}"; then
+        echo "WARNING: snapshot buildinfo 下载失败，回退到最新 release（可能与源码分支不一致）"
+        VERSION="$(curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true)"
+        [ -n "$VERSION" ] || { echo "ERROR: 无法识别 release 版本"; exit 1; }
+        CHANNEL="release-fallback"
+        FINAL_URL="${SITE}/releases/${VERSION}/${DEVICE_PATH}/config.buildinfo"
+        echo ">>> 回退 → ${FINAL_URL}"
+        download_buildinfo "${FINAL_URL}" || { echo "ERROR: 下载失败: ${FINAL_URL}"; exit 1; }
+    fi
+else
+    CHANNEL="release"
+    FINAL_URL="${SITE}/releases/${VERSION}/${DEVICE_PATH}/config.buildinfo"
+    echo ">>> 模式: release ${VERSION} → ${FINAL_URL}"
+    download_buildinfo "${FINAL_URL}" || { echo "ERROR: 下载失败: ${FINAL_URL}"; exit 1; }
+fi
 
-# 使用 -L 跟随重定向，-s 静默模式，-o 输出到临时文件
-curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 -o tmp_config.buildinfo "$FINAL_URL" || {
-    echo "ERROR: 下载失败（HTTP 错误或网络问题）: ${FINAL_URL}"; exit 1; }
 grep -q '^CONFIG_TARGET_' tmp_config.buildinfo || {
     echo "ERROR: 下载内容不是 config.buildinfo，前 5 行："; sed -n '1,5p' tmp_config.buildinfo; exit 1; }
 
 mv -f tmp_config.buildinfo .config
-echo ">>> 已用官方 buildinfo 覆盖 .config"
+echo ">>> 已用 buildinfo 覆盖 .config（channel=${CHANNEL}）"
 
 # --- 3.5列出配置文件 ---
 if [ "$LIST_PROFILES" = "1" ]; then
     make defconfig
     echo "=============================================================="
-    echo ">>> 候选 profile（symbol 形式，复制其一填进 device_mapping.conf 第二段）"
+    echo ">>> 候选 profile（symbol 形式，复制其一填进 configs/device_mapping.conf 第二段）"
     grep -oE '^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y' .config \
         | sed 's/^CONFIG_TARGET_[A-Za-z0-9_]*_DEVICE_//; s/=y$//' | sort -u || true
     echo ">>> 候选 profile（string 形式，若本源码使用）"
@@ -149,13 +148,13 @@ fi
     # 这一步非常关键：
     # 1. 使用 FORCE=1 是为了跳过 GitHub Actions 环境中可能存在的 host 架构不匹配检查
     # 2. 它会根据我们下载的 .buildinfo 自动补全所有基础依赖、架构相关的内核配置和工具链
-    echo ">>> make defconfig"
-    make defconfig
+echo ">>> make defconfig"
+make defconfig
 
 # --- 6. 执行校验 ---    
 grep -q "^CONFIG_TARGET_${BOARD}_${SUBTARGET}=y" .config || {
     echo "ERROR: 目标 ${BOARD}/${SUBTARGET} 不在当前源码中 →"
-    echo "       源码分支与下载的 buildinfo 版本(${VERSION})不一致，请锁定同一版本"
+    echo "       源码分支与 buildinfo(${CHANNEL}${VERSION:+/${VERSION}}) 不匹配，请检查 feeds 或改用 source_ref 配套"
     exit 1; }
 
 if [ -n "$PROFILE" ]; then
@@ -167,7 +166,7 @@ if [ -n "$PROFILE" ]; then
     fi
     if [ "$PROFILE_OK" != "1" ]; then
         echo "ERROR: profile '${PROFILE}' 未被 defconfig 保留 → 本源码不认这个值"
-        echo ">>> 本源码可用的 profile（复制其一填进 device_mapping.conf 第二段）："
+        echo ">>> 本源码可用的 profile（复制其一填进 configs/device_mapping.conf 第二段）："
         grep -oE '^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y' .config \
             | sed 's/^CONFIG_TARGET_[A-Za-z0-9_]*_DEVICE_//; s/=y$//' | sort -u | sed -n '1,40p' || true
         grep -E '^CONFIG_TARGET_PROFILE=' .config || true
@@ -177,7 +176,7 @@ if [ -n "$PROFILE" ]; then
 fi
 
 echo "=============================================================="
-echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} version=${VERSION})"
+echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} channel=${CHANNEL} version=${VERSION:-latest})"
 grep -E "^CONFIG_TARGET_${BOARD}_${SUBTARGET}(_DEVICE_[A-Za-z0-9_.-]+)?=y$" .config || true
 grep -E '^CONFIG_TARGET_PROFILE=' .config || true
 echo ">>> 已启用 device 选项数: $(grep -cE "^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]+=y$" .config || true)"
