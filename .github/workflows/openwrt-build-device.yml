@@ -62,16 +62,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Validate inputs
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if [ -n "${VERSION}" ] && [ -z "${SOURCE_REF}" ]; then
-            echo "::warning::指定了 version=${VERSION} 但 source_ref 为空：源码是最新默认分支，"
-            echo "::warning::而基线来自 release ${VERSION}，两者可能对不上。建议同时填 source_ref。"
-          fi
-          echo ">>> mode: source_ref=${SOURCE_REF:-<default/latest>}  version=${VERSION:-<snapshot>}"
-
       - name: Cache OpenWrt downloads (dl)
         uses: actions/cache@v4
         with:
@@ -97,17 +87,67 @@ jobs:
         run: |
           set -euxo pipefail
           case "${SOURCE_TYPE}" in
-            immortalwrt) SRC_URL="https://github.com/ImmortalWrt/immortalwrt.git" ;;
-            openwrt)     SRC_URL="https://github.com/openwrt/openwrt.git" ;;
+            immortalwrt) SRC_URL="https://github.com/ImmortalWrt/immortalwrt.git"
+                         SITE="https://downloads.immortalwrt.org" ;;
+            openwrt)     SRC_URL="https://github.com/openwrt/openwrt.git"
+                         SITE="https://downloads.openwrt.org" ;;
             *) echo "ERROR: unknown SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
           esac
+
+          latest_stable() {
+            curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true
+          }
+          release_in_series() {   # $1=24.10 → 取该系列里版本最高的
+            curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu \
+              | grep -E "^$(printf '%s' "$1" | sed 's/[.]/\\./g')\." | sed -n '$p' || true
+          }
+
           rm -rf src
           if [ -n "${SOURCE_REF}" ]; then
-            git clone --depth=1 -b "${SOURCE_REF}" "${SRC_URL}" src
+              MODE="指定 ref=${SOURCE_REF}"
+              CANDIDATES="${SOURCE_REF}"
+              case "${SOURCE_REF}" in
+                openwrt-*) SERIES="$(printf '%s' "${SOURCE_REF}" | sed 's/^openwrt-//')"
+                           VERSION="$(release_in_series "${SERIES}")" ;;
+                *)         VERSION="$(printf '%s' "${SOURCE_REF}" | sed -E 's/^v//; s/-immortalwrt$//')" ;;
+              esac
+          elif [ -n "${INPUT_VERSION}" ]; then
+              MODE="指定版本=${INPUT_VERSION}"
+              VERSION="${INPUT_VERSION}"
+              CANDIDATES="v${VERSION} openwrt-$(printf '%s' "${VERSION}" | cut -d. -f1,2)"
           else
-            git clone --depth=1 "${SRC_URL}" src
+              MODE="最新稳定版"
+              VERSION="$(latest_stable)"
+              [ -n "${VERSION}" ] || { echo "ERROR: 无法识别最新稳定版本"; exit 1; }
+              S="$(printf '%s' "${VERSION}" | cut -d. -f1,2)"
+              CANDIDATES="openwrt-${S} v${VERSION} v${VERSION}-immortalwrt"
           fi
-          git -C src log -1 --format='>>> 源码 commit: %H  %cd  %s' --date=iso
+
+          echo ">>> 模式: ${MODE}"
+          echo ">>> 版本: ${VERSION:-<未知>}"
+          echo ">>> 候选 ref: ${CANDIDATES}"
+
+          OK=0
+          for ref in ${CANDIDATES}; do
+              echo ">>> 尝试 git clone --depth=1 -b ${ref}"
+              if git clone --depth=1 -b "${ref}" "${SRC_URL}" src 2>/dev/null; then OK=1; break; fi
+              rm -rf src
+          done
+          [ "${OK}" = "1" ] || {
+              echo "ERROR: 候选 ref 全部克隆失败（${CANDIDATES}）"
+              echo "       请用 workflow 的 source_ref 手动指定正确的分支或 tag"; exit 1; }
+
+          git -C src log -1 --format='>>> 源码: %H  %cd  %s' --date=iso
+          echo ">>> 当前分支: $(git -C src rev-parse --abbrev-ref HEAD)"
+
+          if [ -n "${VERSION}" ]; then
+              echo "VERSION=${VERSION}" >> "$GITHUB_ENV"      # ← 传给 prepare_base_config.sh
+              echo ">>> 已导出 VERSION=${VERSION}（基线将使用 releases/${VERSION}/ 的 buildinfo）"
+          else
+              echo "::warning::无法推导版本号，prepare_base_config 会自行取最新稳定版，可能与源码 ref 不配套"
+          fi
 
       - name: Prepare dl cache link & clean build dirs
         shell: bash
