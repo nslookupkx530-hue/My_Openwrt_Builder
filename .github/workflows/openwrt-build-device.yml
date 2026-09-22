@@ -68,14 +68,29 @@ jobs:
         run: |
           set -euxo pipefail
           FAIL=0
-          for f in shell/*.sh; do
-            if bash -n "$f"; then echo "OK   $f"; else echo "FAIL $f"; FAIL=1; fi
-          done
-          for f in Third-Party/third-party.config files/etc/third-party/install_third_party_apk.sh \
-                   files/etc/init.d/apk-install files/*/etc/uci-defaults/99-custom-network; do
-            [ -f "$f" ] || continue
-            if bash -n "$f" 2>/dev/null || sh -n "$f" 2>/dev/null; then echo "OK   $f"; else echo "FAIL $f"; FAIL=1; fi
-          done
+
+          check() {                       # 不存在 = 本次构建用不到，直接跳过（不报噪音）
+              [ -f "$1" ] || return 0
+              if bash -n "$1" 2>/dev/null || sh -n "$1" 2>/dev/null; then
+                  echo "OK   $1"
+              else
+                  echo "FAIL $1"
+                  FAIL=1
+              fi
+          }
+
+          # 1) 公共脚本
+          for f in shell/*.sh; do check "$f"; done
+          check "Third-Party/third-party.config"
+
+          # 2) 本次设备专属（${TARGET_DEVICE} 来自 job env）
+          for f in "files/${TARGET_DEVICE:-x86}/etc/uci-defaults/"*; do check "$f"; done
+
+          # 3) 公共 overlay 里的首启脚本（在哪个路径就查哪个）
+          check "files/etc/init.d/apk-install"
+          check "files/etc/ithird-party/install_third_party_apk.sh"
+          check "files/etc/third-party/install_third_party_apk.sh"
+
           [ "$FAIL" = "0" ] || { echo "存在语法错误，请先修复"; exit 1; }
 
       - name: Cache OpenWrt downloads (dl)
