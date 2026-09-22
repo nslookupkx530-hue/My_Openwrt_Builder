@@ -74,15 +74,12 @@ normalize() {   # luci-i18n-quickstart-zh-cn → quickstart ; luci-app-store →
         | sed 's/[-_ ]//g'
 }
 
-cand_name() {   # 从目录/.run/.apk 名字里提取"纯包名"
+cand_name() {   # 从目录/.run/.apk 名字里提取纯包名
     local n
     n="$(basename "$1")"
     n="${n%.run}"; n="${n%.apk}"
-    # 1) 去掉分类号前缀：25-argon-2.4.3_x86_64 → argon-2.4.3_x86_64
     n="$(printf '%s' "$n" | sed -E 's/^[0-9]+-//')"
-    # 2) 去掉架构后缀：_x86_64 / _aarch64_cortex-a53 / _arm_cortex-a7 ...
     n="$(printf '%s' "$n" | sed -E 's/_(x86_64|x86|i386|aarch64[_-][A-Za-z0-9_.-]*|aarch64|arm[_-][A-Za-z0-9_.-]*|arm|mips[a-z0-9_.-]*|riscv64).*$//')"
-    # 3) 去掉版本后缀：_v5.3.4-r5 / -2.4.3 / _1.0
     n="$(printf '%s' "$n" | sed -E 's/[_-]v?[0-9][0-9A-Za-z._-]*$//')"
     printf '%s' "$n"
 }
@@ -102,7 +99,7 @@ score_name() {   # $1=候选纯名 $2=包名 → 分数（0=不匹配）
     echo 0
 }
 
-prefilter() {   # $1=搜索根 $2=核心词(已 normalize) $3=深度 → 打印文件名含核心词的条目
+prefilter() {   # $1=根 $2=核心词 $3=深度 → 打印"文件名含核心词"的目录/.run/.apk
     find "$1" -maxdepth "${3:-3}" \( -type d -o -type f \( -name '*.run' -o -name '*.apk' \) \) -print 2>/dev/null \
         | awk -v kw="$2" '{ n=$0; sub(/.*\//,"",n); if (index(tolower(n), kw) > 0) print }'
 }
@@ -117,9 +114,25 @@ resolve_candidates() {   # $1=根 $2=深度 $3=包名 $4=核心词 → 打印 "�
     return 0
 }
 
+dedupe_paths() {   # 从 stdin 读路径列表，丢掉"被其它候选包含"的路径（如目录里的各个 apk）
+    local item other skip
+    local -a ALL=()
+    while IFS= read -r item; do
+        if [ -n "${item}" ]; then ALL+=("${item}"); fi
+    done
+    for item in "${ALL[@]}"; do
+        skip=0
+        for other in "${ALL[@]}"; do
+            [ "${other}" = "${item}" ] && continue
+            case "${item}" in "${other}"/*) skip=1; break ;; esac
+        done
+        if [ "${skip}" = "0" ]; then printf '%s\n' "${item}"; fi
+    done
+}
+
 apk_count() { find "${OUTPUT_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l; }
 
-unpack_run() {   # $1=*.run 文件；解包到临时目录并打印其路径（成功返回 0）
+unpack_run() {   # $1=*.run → 解包到临时目录并打印该目录路径
     local runfile="$1" work
     work="/tmp/apk-unpack-$(basename "${runfile}" .run)"
     rm -rf "${work}"; mkdir -p "${work}"
@@ -127,11 +140,11 @@ unpack_run() {   # $1=*.run 文件；解包到临时目录并打印其路径（�
         echo "${work}"
         return 0
     fi
-    echo "      WARNING: 解包失败 ${runfile}" >&2
+    echo "      WARNING: .run 解包失败 ${runfile}" >&2
     return 1
 }
 
-copy_apks() {   # $1=源目录 $2=核心词(已 normalize) → 拷贝 apk，返回"是否拷到文件"
+copy_apks() {   # $1=源目录 $2=核心词 → 拷贝 *.apk（.apk 不做任何处理，直接 cp）
     local dir="$1" kw="$2" f base kept=0 skipped=0
     for f in "${dir}"/*.apk; do
         [ -f "$f" ] || continue
@@ -147,20 +160,29 @@ copy_apks() {   # $1=源目录 $2=核心词(已 normalize) → 拷贝 apk，返�
     done
     if [ "${kept}" -gt 0 ]; then
         echo "      拷贝 ${kept} 个 apk ← $(basename "${dir}")"
-        [ "${skipped}" -eq 0 ] || echo "      提示：同目录另有 ${skipped} 个 apk 未拷（APK_MATCH_STRICT=1）；若它们是依赖，请设 APK_MATCH_STRICT=0"
+        [ "${skipped}" -eq 0 ] || echo "      提示：同目录另有 ${skipped} 个 apk 未拷；若为依赖请设 APK_MATCH_STRICT=0"
         return 0
     fi
     return 1
 }
 
-collect_from_path() {   # $1=目录或 .run $2=核心词 → 收集 apk
-    local path="$1" kw="$2" work
-    if [ -f "${path}" ]; then
-        work="$(unpack_run "${path}")" || return 1
-        copy_apks "${work}" "${kw}" && return 0 || return 1
-    fi
+collect_from_path() {   # $1=目录 / *.run / *.apk；$2=核心词
+    local path="$1" kw="$2" work runfile
+
+    case "${path}" in
+        *.run)
+            work="$(unpack_run "${path}")" || return 1
+            copy_apks "${work}" "${kw}" && return 0 || return 1
+            ;;
+        *.apk)
+            # ★ .apk 不需要任何处理，直接放进去
+            cp -f "${path}" "${OUTPUT_DIR}/" && {
+                echo "      直接拷贝 apk ← $(basename "${path}")"; return 0; }
+            return 1
+            ;;
+    esac
+
     if [ -d "${path}" ]; then
-        local runfile
         runfile="$(find "${path}" -maxdepth 1 -type f -name '*.run' -print -quit 2>/dev/null || true)"
         if [ -n "${runfile}" ]; then
             work="$(unpack_run "${runfile}" || true)"
@@ -198,7 +220,7 @@ for PACKAGE in ${CUSTOM_PACKAGES}; do
     fi
 
     BEST="$(printf '%s\n' "${CAND}" | sort -k1,1nr -k2,2 | awk -F'\t' 'NR==1{print $1}')"
-    TOP="$(printf '%s\n' "${CAND}" | awk -F'\t' -v s="${BEST}" '$1==s {print $2}')"
+    TOP="$(printf '%s\n' "${CAND}" | awk -F'\t' -v s="${BEST}" '$1==s {print $2}' | dedupe_paths)"
     echo "  命中（分数 ${BEST}，共 $(printf '%s\n' "${TOP}" | grep -c . || true) 个）："
     printf '%s\n' "${TOP}" | sed 's/^/      /'
 
@@ -219,21 +241,7 @@ for PACKAGE in ${CUSTOM_PACKAGES}; do
     fi
 done
 
-# --- 架构体检 + 汇总 ---
-EXPECT=""; case "${ARCH}" in
-    x86) EXPECT="x86_64";; arm64-a53) EXPECT="aarch64_cortex-a53";; arm64) EXPECT="aarch64_*";; arm) EXPECT="arm_*";;
-esac
-for f in "${OUTPUT_DIR}"/*.apk; do
-    [ -f "$f" ] || continue
-    A="$(tar -xzOf "$f" .PKGINFO 2>/dev/null | sed -n 's/^arch = //p' || true)"
-    A="${A%%$'\n'*}"
-    [ -z "${A}" ] && continue
-    case "$A" in
-        ${EXPECT}) : ;;
-        *) echo "WARNING: $(basename "$f") 架构为 ${A}，期望 ${EXPECT}" ;;
-    esac
-done
-
+# --- 汇总 ---
 APK_TOTAL="$(apk_count)"
 echo "=========================================="
 echo "APK 输出目录: ${OUTPUT_DIR}（${APK_TOTAL} 个 apk）"
@@ -246,8 +254,8 @@ fi
 if [ -n "${MISSING}" ]; then
     echo "ERROR: 以下请求的包没有准备好:${MISSING}"
     echo "       若该包本来就在官方 feed 里（bash、kmod-* 等），请从 CUSTOM_PACKAGES 去掉；"
-    echo "       若是仓库命名特殊，用 MATCH_OVERRIDE=\"包名=关键词\" 指定，"
-    echo "       或先看仓库里实际的条目名：find ${RUN_PATH_DIR} -maxdepth 1 | sort"
+    echo "       若是仓库命名特殊，用 MATCH_OVERRIDE=\"包名=关键词\" 指定，或先看："
+    echo "       find ${RUN_PATH_DIR} -maxdepth 1 | sort"
     [ "${ALLOW_MISSING}" = "1" ] && echo "（ALLOW_MISSING=1，按警告处理）" || exit 1
 fi
 exit 0
