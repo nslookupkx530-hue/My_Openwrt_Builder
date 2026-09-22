@@ -1,1 +1,354 @@
+name: OpenWrt Build & Release
 
+on:
+  workflow_dispatch:
+    inputs:
+      source_type:
+        description: 'Source Type'
+        required: true
+        default: 'immortalwrt'
+        type: choice
+        options:
+          - openwrt
+          - immortalwrt
+      target_device:
+        description: 'Target Device'
+        required: true
+        default: 'x86'
+        type: choice
+        options:
+          - x86
+          - AXT-1800
+          - GL-MT3600BE
+          - Cudy-TR3000-256MB
+          - Tenda-BE12PRO
+      source_ref:
+        description: '源码分支或 tag（留空=默认分支）'
+        required: false
+        default: ''
+      version:
+        description: 'buildinfo 版本号，如 25.12.0（留空=自动抓最新 release）'
+        required: false
+        default: ''
+      custom_packages:
+        description: '追加的第三方 apk 包名（空格分隔，可留空）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write        # 建 Release 必需，否则 GITHUB_TOKEN 默认只读 → 403
+
+concurrency:
+  group: build-${{ github.event.inputs.source_type }}-${{ github.event.inputs.target_device }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_TYPE: ${{ github.event.inputs.source_type }}
+  TARGET_DEVICE: ${{ github.event.inputs.target_device }}
+  SOURCE_REF: ${{ github.event.inputs.source_ref }}
+  VERSION: ${{ github.event.inputs.version }}
+  CUSTOM_PACKAGE_EXTRA: ${{ github.event.inputs.custom_packages }}
+
+jobs:
+  build:
+    name: Build ${{ github.event.inputs.target_device }} (${{ github.event.inputs.source_type }})
+    runs-on: ubuntu-22.04
+    env:
+      WORKSPACE: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Cache OpenWrt downloads (dl)
+        uses: actions/cache@v4
+        with:
+          path: dl-cache
+          key: dl-${{ github.event.inputs.source_type }}-${{ github.run_id }}
+          restore-keys: |
+            dl-${{ github.event.inputs.source_type }}-
+
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang autoconf automake libtool bison flex gawk gettext git file swig \
+            python3 python3-pip python3-mako rsync unzip wget curl zstd dos2unix texinfo \
+            libncurses-dev zlib1g-dev libssl-dev libffi-dev libreadline-dev \
+            libsqlite3-dev libcap-dev libgd-dev libjpeg-dev libpng-dev \
+            libcurl4-gnutls-dev libxml2-dev libxslt-dev qemu-utils
+
+      - name: Clone Source Repository
+        shell: bash
+        run: |
+          set -euxo pipefail
+          case "${SOURCE_TYPE}" in
+            immortalwrt) SRC_URL="https://github.com/ImmortalWrt/immortalwrt.git" ;;
+            openwrt)     SRC_URL="https://github.com/openwrt/openwrt.git" ;;
+            *) echo "ERROR: unknown SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
+          esac
+          rm -rf src
+          if [ -n "${SOURCE_REF}" ]; then
+            git clone --depth=1 -b "${SOURCE_REF}" "${SRC_URL}" src
+          else
+            git clone --depth=1 "${SRC_URL}" src
+          fi
+          git -C src log -1 --format='>>> 源码 commit: %H  %cd  %s' --date=iso
+
+      - name: Prepare dl cache link & clean build dirs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          rm -rf staging_dir build_dir tmp dl
+          mkdir -p "${GITHUB_WORKSPACE}/dl-cache"
+          ln -sfn "${GITHUB_WORKSPACE}/dl-cache" dl
+          ls -ld dl "${GITHUB_WORKSPACE}/dl-cache"
+
+      - name: Update & Install feeds
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          rm -rf ./feeds ./data/feeds-*.tmp ./package/feeds
+          for i in 1 2 3; do
+            ./scripts/feeds update -a && break || { echo "feeds update 失败，重试 ${i}/3"; sleep 5; }
+          done
+          ./scripts/feeds install -a
+          # 清理已知会引发 WARNING 的冷门包（保留原有行为，可整段删掉）
+          for p in package/feeds/luci/luci-app-bmx7 \
+                   package/feeds/luci/luci-app-babeld \
+                   package/feeds/luci/luci-app-librespeed \
+                   package/feeds/packages/bmx7-dnsupdate \
+                   package/feeds/packages/prometheus-node-exporter-lua \
+                   package/boot/arm-trusted-firmware-microchipsw; do
+            [ -e "$p" ] && rm -rf "$p"
+          done
+          ./scripts/feeds install -a
+
+      - name: Prepare Base Configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          bash ../shell/prepare_base_config.sh "${SOURCE_TYPE}" "${TARGET_DEVICE}"
+          test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
+
+      - name: Load Third-Party Config & Inject Plugins
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+
+          echo "=== STEP 1: source Third-Party/third-party.config ==="
+          CONFIG_PATH="${WORKSPACE}/Third-Party/third-party.config"
+          [ -f "${CONFIG_PATH}" ] || { echo "ERROR: 找不到 ${CONFIG_PATH}"; exit 1; }
+          source "${CONFIG_PATH}"
+          CUSTOM_PACKAGES="$(printf '%s %s' "${CUSTOM_PACKAGES}" "${CUSTOM_PACKAGE_EXTRA}" | xargs)"
+          echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
+          echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES}" >> "$GITHUB_ENV"
+
+          echo "=== STEP 2: inject_plugins.sh ==="
+          bash ../shell/inject_plugins.sh
+
+      - name: Apply custom files (common + device)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SOURCE_DIR="${WORKSPACE}/src"
+          REPO_FILES_DIR="${WORKSPACE}/files"
+          FIRMWARE_FILES_DIR="${SOURCE_DIR}/files"
+
+          mkdir -p "${FIRMWARE_FILES_DIR}"
+
+          if [ -d "${REPO_FILES_DIR}/etc" ]; then
+            cp -af "${REPO_FILES_DIR}/etc" "${FIRMWARE_FILES_DIR}/"
+            echo ">>> 已应用公共 overlay: files/etc"
+          fi
+
+          [ -d "${REPO_FILES_DIR}/${TARGET_DEVICE}" ] || {
+            echo "ERROR: 找不到设备目录 files/${TARGET_DEVICE}"; exit 1; }
+          cp -af "${REPO_FILES_DIR}/${TARGET_DEVICE}/." "${FIRMWARE_FILES_DIR}/"
+          echo ">>> 已应用设备 overlay: files/${TARGET_DEVICE}"
+
+          # 兼容旧目录名
+          if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ] && [ ! -d "${FIRMWARE_FILES_DIR}/etc/third-party" ]; then
+            mv "${FIRMWARE_FILES_DIR}/etc/ithird-party" "${FIRMWARE_FILES_DIR}/etc/third-party"
+            echo ">>> 已重命名 etc/ithird-party → etc/third-party"
+          fi
+
+          NET_CONF="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-custom-network"
+          [ -f "${NET_CONF}" ] || {
+            echo "ERROR: 缺少 ${NET_CONF}（应来自 files/${TARGET_DEVICE}/）"; exit 1; }
+          chmod 755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
+          [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && \
+            chmod 755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
+          [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && \
+            chmod 755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
+
+          echo ">>> 网络配置预览:"
+          cat "${NET_CONF}"
+          echo ">>> overlay 结构:"
+          find "${FIRMWARE_FILES_DIR}" -maxdepth 3 | sort
+
+      - name: Prepare Third-Party APKs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          bash ../shell/apk-prepare-packages.sh
+
+      - name: Install Third-Party APKs into image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OPENWRT_DIR="${WORKSPACE}/src"
+          FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
+          APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
+
+          APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' 2>/dev/null | wc -l)"
+          [ "${APK_COUNT}" -gt 0 ] || { echo "ERROR: ${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
+          echo ">>> 找到 ${APK_COUNT} 个第三方 apk"
+
+          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" "${FIRMWARE_FILES_DIR}/etc/rc.d"
+          find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' \
+            -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
+
+          test -f "${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh" || {
+            echo "ERROR: 缺少 etc/third-party/install_third_party_apk.sh"; exit 1; }
+
+          # 【关键】rcS 只执行 /etc/rc.d/S*，必须显式启用这个首启服务
+          ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+          test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+
+          echo ">>> overlay 中的第三方 APK:"
+          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f | sort
+          echo ">>> 首启服务已启用: /etc/rc.d/S99apk-install"
+
+      - name: Finalize Configuration (defconfig + 校验注入存活)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          make defconfig
+
+          echo ">>> 校验插件注入结果"
+          MISSING_OPT=""
+          if [ -f tmp/injected-plugins.txt ]; then
+            while read -r opt; do
+              [ -n "${opt}" ] || continue
+              if grep -q "^${opt}=y" .config; then
+                echo "  OK   ${opt}"
+              else
+                echo "  MISS ${opt}"
+                MISSING_OPT="${MISSING_OPT} ${opt}"
+              fi
+            done < tmp/injected-plugins.txt
+          else
+            echo "WARNING: 未找到 tmp/injected-plugins.txt（inject_plugins.sh 可能没生效）"
+          fi
+
+          echo ">>> 已启用包数量: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
+          echo ">>> 当前 device profile:"
+          grep -E '^CONFIG_TARGET_.*_DEVICE_.*=y$|^CONFIG_TARGET_PROFILE=' .config || true
+
+          [ -z "${MISSING_OPT}" ] || {
+            echo "ERROR: 以下插件在 defconfig 后没有保留，固件里不会包含它们:${MISSING_OPT}"
+            echo "       常见原因：选项名写错 / 依赖在 feeds 里不存在 / 与其它选项冲突"
+            exit 1; }
+          echo ">>> 插件注入校验通过"
+
+      - name: Prepare build download
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          make download -j"$(nproc)" 2>&1 | tee build_download.log || {
+            echo ">>> 并行下载失败，降级单线程重试一次"
+            make download -j1 V=s 2>&1 | tee -a build_download.log
+          }
+          echo "=== 下载阶段 warning/error 汇总 ==="
+          grep -Ei "error|warning" build_download.log || true
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "${WORKSPACE}/src"
+          export MAKEFLAGS="-j$(nproc)"
+          # 需要看完整编译细节时把下面的 make 换成 make V=s（日志会非常大）
+          # 若 host 侧告警导致失败，可启用（OpenWrt 用的变量名是 HOST_CFLAGS）
+          # export HOST_CFLAGS="-Wno-error"
+          echo ">>> 开始编译 (CPU=$(nproc))"
+          set +e
+          make 2>&1 | tee build.log
+          BUILD_RC=${PIPESTATUS[0]}
+          set -e
+          echo "make exit code: ${BUILD_RC}"
+          if [ "${BUILD_RC}" -ne 0 ]; then
+            echo "========== FAILED PACKAGE =========="
+            grep -E "ERROR: package/|failed to build" build.log | tail -30 || true
+            echo "========== MAKE ERRORS =========="
+            grep -E "make\[[0-9]+\]: \*\*\*" build.log | tail -50 || true
+            echo "========== COMPILER FATAL =========="
+            grep -E "fatal error:|error:" build.log | tail -50 || true
+            echo "========== LAST 200 LINES =========="
+            tail -200 build.log
+            exit "${BUILD_RC}"
+          fi
+          echo ">>> 编译成功"
+
+      - name: Verify Images
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,60p' || true
+          IMG="$(find bin/targets -maxdepth 3 -type f \
+                 \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) \
+                 -print -quit)"
+          [ -n "${IMG}" ] || { echo "ERROR: bin/targets 下没有找到固件镜像"; exit 1; }
+          echo ">>> 生成镜像示例: ${IMG}"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.target_device }}-logs-${{ github.run_id }}
+          path: |
+            src/build.log
+            src/build_download.log
+            src/.config
+          if-no-files-found: ignore
+
+      - name: Upload Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.target_device }}-${{ github.event.inputs.source_type }}-${{ github.run_id }}
+          path: |
+            src/bin/targets/*
+            !src/bin/targets/**/packages/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.target_device }}-${{ github.event.inputs.source_type }}-run${{ github.run_number }}
+          name: ${{ github.event.inputs.target_device }} / ${{ github.event.inputs.source_type }} / #${{ github.run_number }}
+          files: |
+            src/bin/targets/*/*/*.bin
+            src/bin/targets/*/*/*.img.gz
+            src/bin/targets/*/*/*.itb
+            src/bin/targets/*/*/*.squashfs
+            src/bin/targets/*/*/sha256sums
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
