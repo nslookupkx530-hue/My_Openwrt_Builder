@@ -18,13 +18,12 @@ STRICT_SYMBOL_CHECK="${STRICT_SYMBOL_CHECK:-0}"
 [ -f "$PLUGIN_CFG" ]  || { echo "ERROR: 找不到 ${PLUGIN_CFG}"; exit 1; }   # 硬失败，不再静默跳过
 
 # 开关 → 选项 映射表
-# [核对] 标记的选项名我持怀疑态度，symbol_exists() 会在日志里报出来
 plugins=(
-    "ENABLE_ARGON|CONFIG_PACKAGE_luci-theme-argon"          # [核对] 原为 luci-app-argon
+    "ENABLE_ARGON|CONFIG_PACKAGE_luci-theme-argon"
     "ENABLE_DISKMAN|CONFIG_PACKAGE_luci-app-diskman"
-    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_irqbalance"           # [核对] 原为 CONFIG_irqbalance
+    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_irqbalance"
     "ENABLE_FILEBROWSER_GO|CONFIG_PACKAGE_luci-app-filebrowser-go"
-    "ENABLE_SQM|CONFIG_PACKAGE_sqm-scripts"                 # [核对] 原为 CONFIG_PACKAGE_sqm
+    "ENABLE_SQM|CONFIG_PACKAGE_sqm-scripts"
     "ENABLE_TTYD|CONFIG_PACKAGE_luci-app-ttyd"
     "ENABLE_AUTOREBOOT|CONFIG_PACKAGE_luci-app-autoreboot"
     "ENABLE_DOCKER|CONFIG_PACKAGE_docker"
@@ -79,9 +78,10 @@ for entry in "${plugins[@]}"; do
 done
 
 # 反向校验：cfg 里有、映射表里没有的开关
+# ⚠ 这里必须用 [:blank:]（只删空格/Tab）；用 [:space:] 会把换行也删掉，导致所有名字被拼成一个
 MAPPED_NAMES="$(printf '%s\n' "${plugins[@]}" | cut -d'|' -f1)"
 for v in $(sed -e 's/#.*//' "$PLUGIN_CFG" \
-           | grep -oE '^[[:space:]]*ENABLE_[A-Z0-9_]+' | tr -d '[:space:]'); do
+           | grep -oE '^[[:space:]]*ENABLE_[A-Z0-9_]+' | tr -d '[:blank:]'); do
     echo "$MAPPED_NAMES" | grep -qx "$v" || \
         echo "WARNING: ${v} 在 ${PLUGIN_CFG} 中定义，但脚本映射表里没有，将被忽略"
 done
