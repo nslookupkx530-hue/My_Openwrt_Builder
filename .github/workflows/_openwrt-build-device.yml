@@ -333,10 +333,18 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
-          # 将下载过程也重定向到日志文件，方便排查网络或路径问题
-          # 使用 grep -Ei 过滤出包含 "error" 或 "warning" 的行（不区分大小写）
-          # 同时将标准错误 (2>&1) 重定向到管道中处理
-          make download -j$(nproc) 2>&1 | grep -Ei "error|warning" | tee build_download.log
+          
+          # 1. 完整运行下载，将标准输出和错误全部实时写入日志，且不拦截终端屏幕输出
+          # 这样你可以在 GitHub Actions 页面实时看到每一个包的下载进度
+          make download -j$(nproc) 2>&1 | tee build_download.log
+          
+          # 2. 下载完成后，安全地清算和展示警告/错误日志
+          # 末尾加上 "|| true" 是黄金准则，确保即使没找到任何错误，grep 也不会让 Action 崩溃
+          echo "=============================================================="
+          echo ">>> 编译下载阶段的 警告/错误 汇总 (Warnings/Errors Summary) <<<"
+          echo "=============================================================="
+          grep -Ei "error|warning" build_download.log || true
+          echo "=============================================================="
 
 
       - name: Build firmware
