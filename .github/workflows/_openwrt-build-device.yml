@@ -316,7 +316,9 @@ jobs:
           set -euxo pipefail
           cd "${{ github.workspace }}/src"
           # 将下载过程也重定向到日志文件，方便排查网络或路径问题
-          make download -j$(nproc) 2>&1 | tee build_download.log
+          # 使用 grep -Ei 过滤出包含 "error" 或 "warning" 的行（不区分大小写）
+          # 同时将标准错误 (2>&1) 重定向到管道中处理
+          make download -j$(nproc) 2>&1 | grep -Ei "error|warning" | tee build_download.log
 
 
       - name: Build firmware
@@ -388,7 +390,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # 使用更通用的名称，包含所有可能生成的日志
-          name: ${{ inputs.device }}-logs-${{ github.run_id }}
+          name: ${{ github.event.inputs.target_device }}-logs-${{ github.run_id }}
           # 同时上传构建日志和下载日志（如果存在的话）
           path: |
             src/build.log
