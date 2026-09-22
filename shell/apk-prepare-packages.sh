@@ -67,7 +67,7 @@ RUN_PATH_DIR="${APK_REPO_DIR}/run/${ARCH}"
     echo "ERROR: 仓库中不存在 ${RUN_PATH_DIR}，可用目录："; ls "${APK_REPO_DIR}/run" || true; exit 1; }
 
 # --- 模糊匹配核心 ---
-normalize() {   # luci-i18n-quickstart-zh-cn → quickstart ; luci-app-store → store
+normalize() {
     printf '%s' "$1" \
         | sed -E 's/^luci-(app|i18n|theme|proto|lib)-//; s/-(zh-cn|zh-tw|zh-hans|zh-hant|en|ru|ja)$//' \
         | tr 'A-Z' 'a-z' \
@@ -99,7 +99,7 @@ score_name() {   # $1=候选纯名 $2=包名 → 分数（0=不匹配）
     echo 0
 }
 
-prefilter() {   # $1=根 $2=核心词 $3=深度 → 打印"文件名含核心词"的目录/.run/.apk
+prefilter() {
     find "$1" -maxdepth "${3:-3}" \( -type d -o -type f \( -name '*.run' -o -name '*.apk' \) \) -print 2>/dev/null \
         | awk -v kw="$2" '{ n=$0; sub(/.*\//,"",n); if (index(tolower(n), kw) > 0) print }'
 }
@@ -114,7 +114,7 @@ resolve_candidates() {   # $1=根 $2=深度 $3=包名 $4=核心词 → 打印 "�
     return 0
 }
 
-dedupe_paths() {   # 从 stdin 读路径列表，丢掉"被其它候选包含"的路径（如目录里的各个 apk）
+dedupe_paths() {   # 丢掉"被其它候选包含"的路径（如目录里的各个 apk）
     local item other skip
     local -a ALL=()
     while IFS= read -r item; do
@@ -144,7 +144,7 @@ unpack_run() {   # $1=*.run → 解包到临时目录并打印该目录路径
     return 1
 }
 
-copy_apks() {   # $1=源目录 $2=核心词 → 拷贝 *.apk（.apk 不做任何处理，直接 cp）
+copy_apks() {   # 拷到至少一个 apk 返回 0（同名已存在也算成功，直接覆盖）
     local dir="$1" kw="$2" f base kept=0 skipped=0
     for f in "${dir}"/*.apk; do
         [ -f "$f" ] || continue
@@ -166,7 +166,7 @@ copy_apks() {   # $1=源目录 $2=核心词 → 拷贝 *.apk（.apk 不做任何
     return 1
 }
 
-collect_from_path() {   # $1=目录 / *.run / *.apk；$2=核心词
+collect_from_path() {   # 成功收集到 apk 返回 0
     local path="$1" kw="$2" work runfile
 
     case "${path}" in
@@ -175,7 +175,6 @@ collect_from_path() {   # $1=目录 / *.run / *.apk；$2=核心词
             copy_apks "${work}" "${kw}" && return 0 || return 1
             ;;
         *.apk)
-            # ★ .apk 不需要任何处理，直接放进去
             cp -f "${path}" "${OUTPUT_DIR}/" && {
                 echo "      直接拷贝 apk ← $(basename "${path}")"; return 0; }
             return 1
@@ -224,13 +223,16 @@ for PACKAGE in ${CUSTOM_PACKAGES}; do
     echo "  命中（分数 ${BEST}，共 $(printf '%s\n' "${TOP}" | grep -c . || true) 个）："
     printf '%s\n' "${TOP}" | sed 's/^/      /'
 
+    # ★ 用函数返回状态判断成功，不看 packages/ 的文件数
+    #   （多个包命中同一目录时，第二次是重复拷贝同名文件，数量不会增加，但那也是成功）
     HIT=0
     while IFS= read -r item; do
         [ -n "${item}" ] || continue
-        BEFORE="$(apk_count)"
-        collect_from_path "${item}" "${KW}" || true
-        AFTER="$(apk_count)"
-        if [ "${AFTER}" -gt "${BEFORE}" ]; then HIT=$((HIT + 1)); fi
+        if collect_from_path "${item}" "${KW}"; then
+            HIT=$((HIT + 1))
+        else
+            echo "      （该来源没有可用 apk: ${item}）"
+        fi
     done <<< "${TOP}"
 
     if [ "${HIT}" -eq 0 ]; then
