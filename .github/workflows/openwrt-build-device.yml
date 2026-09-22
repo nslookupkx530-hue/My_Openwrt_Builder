@@ -36,7 +36,7 @@ on:
         default: ''
 
 permissions:
-  contents: write        # 建 Release 必需，否则 GITHUB_TOKEN 默认只读 → 403
+  contents: write        # 建 Release 必需，否则403
 
 concurrency:
   group: build-${{ github.event.inputs.source_type }}-${{ github.event.inputs.target_device }}
