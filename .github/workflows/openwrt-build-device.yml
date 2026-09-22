@@ -203,6 +203,7 @@ jobs:
           CONFIG_PATH="${WORKSPACE}/Third-Party/third-party.config"
           [ -f "${CONFIG_PATH}" ] || { echo "ERROR: 找不到 ${CONFIG_PATH}"; exit 1; }
           source "${CONFIG_PATH}"
+          CUSTOM_PACKAGE_EXTRA="${CUSTOM_PACKAGE_EXTRA:-}"
           CUSTOM_PACKAGES="$(printf '%s %s' "${CUSTOM_PACKAGES}" "${CUSTOM_PACKAGE_EXTRA}" | xargs)"
           echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
           echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES}" >> "$GITHUB_ENV"
