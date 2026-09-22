@@ -21,10 +21,12 @@ OUTPUT_DIR="${SOURCE_DIR}/packages"
 REPO="${REPO:-https://github.com/nslookupkx530-hue/apk.git}"
 MATCH_OVERRIDE="${MATCH_OVERRIDE:-}"
 ALLOW_MISSING="${ALLOW_MISSING:-0}"
+APK_MATCH_STRICT="${APK_MATCH_STRICT:-0}"
 
 echo "=========================================="
 echo " Prepare third-party APK packages"
 echo " SOURCE_DIR=${SOURCE_DIR}"
+echo " CUSTOM_PACKAGES=${CUSTOM_PACKAGES:-<none>}"
 echo "=========================================="
 
 if [ -z "$(printf '%s' "${CUSTOM_PACKAGES}" | tr -d '[:space:]')" ]; then
@@ -65,14 +67,27 @@ RUN_PATH_DIR="${APK_REPO_DIR}/run/${ARCH}"
     echo "ERROR: 仓库中不存在 ${RUN_PATH_DIR}，可用目录："; ls "${APK_REPO_DIR}/run" || true; exit 1; }
 
 # --- 模糊匹配核心 ---
-normalize() {
+normalize() {   # luci-i18n-quickstart-zh-cn → quickstart ; luci-app-store → store
     printf '%s' "$1" \
         | sed -E 's/^luci-(app|i18n|theme|proto|lib)-//; s/-(zh-cn|zh-tw|zh-hans|zh-hant|en|ru|ja)$//' \
         | tr 'A-Z' 'a-z' \
         | sed 's/[-_ ]//g'
 }
 
-score_name() {   # $1=候选名（已去扩展名） $2=包名 → 打印分数，0 表示不匹配
+cand_name() {   # 从目录/.run/.apk 名字里提取"纯包名"
+    local n
+    n="$(basename "$1")"
+    n="${n%.run}"; n="${n%.apk}"
+    # 1) 去掉分类号前缀：25-argon-2.4.3_x86_64 → argon-2.4.3_x86_64
+    n="$(printf '%s' "$n" | sed -E 's/^[0-9]+-//')"
+    # 2) 去掉架构后缀：_x86_64 / _aarch64_cortex-a53 / _arm_cortex-a7 ...
+    n="$(printf '%s' "$n" | sed -E 's/_(x86_64|x86|i386|aarch64[_-][A-Za-z0-9_.-]*|aarch64|arm[_-][A-Za-z0-9_.-]*|arm|mips[a-z0-9_.-]*|riscv64).*$//')"
+    # 3) 去掉版本后缀：_v5.3.4-r5 / -2.4.3 / _1.0
+    n="$(printf '%s' "$n" | sed -E 's/[_-]v?[0-9][0-9A-Za-z._-]*$//')"
+    printf '%s' "$n"
+}
+
+score_name() {   # $1=候选纯名 $2=包名 → 分数（0=不匹配）
     local base pkg
     base="$(normalize "$1")"
     pkg="$(normalize "$2")"
@@ -87,43 +102,71 @@ score_name() {   # $1=候选名（已去扩展名） $2=包名 → 打印分数�
     echo 0
 }
 
-resolve_candidates() {   # $1=搜索根 $2=包名/关键词 → 打印 "分数<TAB>路径"
-    local root="$1" pkg="$2" item base sc
+prefilter() {   # $1=搜索根 $2=核心词(已 normalize) $3=深度 → 打印文件名含核心词的条目
+    find "$1" -maxdepth "${3:-3}" \( -type d -o -type f \( -name '*.run' -o -name '*.apk' \) \) -print 2>/dev/null \
+        | awk -v kw="$2" '{ n=$0; sub(/.*\//,"",n); if (index(tolower(n), kw) > 0) print }'
+}
+
+resolve_candidates() {   # $1=根 $2=深度 $3=包名 $4=核心词 → 打印 "分数<TAB>路径"
+    local root="$1" depth="$2" pkg="$3" kw="$4" item sc
     while IFS= read -r item; do
-        base="$(basename "${item}")"
-        base="${base%.run}"
-        sc="$(score_name "${base}" "${pkg}")"
+        [ -n "${item}" ] || continue
+        sc="$(score_name "$(cand_name "${item}")" "${pkg}")"
         if [ "${sc}" -gt 0 ]; then printf '%s\t%s\n' "${sc}" "${item}"; fi
-    done < <(find "${root}" -maxdepth 3 \( -type d -o -type f -name '*.run' \) -print 2>/dev/null | sort)
+    done < <(prefilter "${root}" "${kw}" "${depth}")
     return 0
 }
 
 apk_count() { find "${OUTPUT_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l; }
 
-unpack_run() {   # $1 = *.run 文件；成功解包并拷贝 apk 返回 0
+unpack_run() {   # $1=*.run 文件；解包到临时目录并打印其路径（成功返回 0）
     local runfile="$1" work
     work="/tmp/apk-unpack-$(basename "${runfile}" .run)"
     rm -rf "${work}"; mkdir -p "${work}"
     if sh "${runfile}" --noexec --target "${work}" >/dev/null 2>&1; then
-        find "${work}" -name '*.apk' -exec cp -f {} "${OUTPUT_DIR}/" \;
-        echo "      [run] 解包 $(basename "${runfile}")"
+        echo "${work}"
         return 0
     fi
-    echo "      WARNING: 解包失败 ${runfile}"
+    echo "      WARNING: 解包失败 ${runfile}" >&2
     return 1
 }
 
-collect_from_path() {   # $1 = 目录 或 *.run 文件
-    local path="$1" runfile
+copy_apks() {   # $1=源目录 $2=核心词(已 normalize) → 拷贝 apk，返回"是否拷到文件"
+    local dir="$1" kw="$2" f base kept=0 skipped=0
+    for f in "${dir}"/*.apk; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        if [ "${APK_MATCH_STRICT}" = "1" ]; then
+            case "$(normalize "${base}")" in
+                *"${kw}"*) : ;;
+                *) skipped=$((skipped + 1)); continue ;;
+            esac
+        fi
+        cp -f "$f" "${OUTPUT_DIR}/"
+        kept=$((kept + 1))
+    done
+    if [ "${kept}" -gt 0 ]; then
+        echo "      拷贝 ${kept} 个 apk ← $(basename "${dir}")"
+        [ "${skipped}" -eq 0 ] || echo "      提示：同目录另有 ${skipped} 个 apk 未拷（APK_MATCH_STRICT=1）；若它们是依赖，请设 APK_MATCH_STRICT=0"
+        return 0
+    fi
+    return 1
+}
+
+collect_from_path() {   # $1=目录或 .run $2=核心词 → 收集 apk
+    local path="$1" kw="$2" work
     if [ -f "${path}" ]; then
-        unpack_run "${path}" && return 0 || return 1
+        work="$(unpack_run "${path}")" || return 1
+        copy_apks "${work}" "${kw}" && return 0 || return 1
     fi
     if [ -d "${path}" ]; then
+        local runfile
         runfile="$(find "${path}" -maxdepth 1 -type f -name '*.run' -print -quit 2>/dev/null || true)"
-        if [ -n "${runfile}" ]; then unpack_run "${runfile}" || true; fi
-        find "${path}" -name '*.apk' -exec cp -f {} "${OUTPUT_DIR}/" \;
-        echo "      [dir] 收集 $(basename "${path}") 下的 *.apk"
-        return 0
+        if [ -n "${runfile}" ]; then
+            work="$(unpack_run "${runfile}" || true)"
+            [ -n "${work}" ] && { copy_apks "${work}" "${kw}" || true; }
+        fi
+        copy_apks "${path}" "${kw}" && return 0 || return 1
     fi
     return 1
 }
@@ -136,50 +179,43 @@ for PACKAGE in ${CUSTOM_PACKAGES}; do
 
     KEY="$(printf '%s\n' "${MATCH_OVERRIDE}" | tr ' ' '\n' \
         | grep -E "^${PACKAGE}=" | sed -n '$p' | cut -d= -f2 || true)"
-    if [ -n "${KEY}" ]; then
-        echo "  使用覆盖关键词: ${KEY}（来自 MATCH_OVERRIDE）"
-    else
-        KEY="${PACKAGE}"
-    fi
-    echo "  归一化核心词: $(normalize "${KEY}")"
+    if [ -n "${KEY}" ]; then echo "  使用覆盖关键词: ${KEY}（MATCH_OVERRIDE）"; else KEY="${PACKAGE}"; fi
+    KW="$(normalize "${KEY}")"
+    echo "  核心词: ${KW}"
 
-    CAND="$(resolve_candidates "${RUN_PATH_DIR}" "${KEY}")"
+    CAND="$(resolve_candidates "${RUN_PATH_DIR}" 3 "${KEY}" "${KW}")"
     SCOPE="run/${ARCH}"
     if [ -z "${CAND}" ]; then
-        echo "  run/${ARCH} 内无匹配 → 全仓库深搜"
-        CAND="$(resolve_candidates "${APK_REPO_DIR}" "${KEY}")"
+        echo "  run/${ARCH}/ 内无匹配 → 全仓库深搜"
+        CAND="$(resolve_candidates "${APK_REPO_DIR}" 4 "${KEY}" "${KW}")"
         SCOPE="repo"
     fi
 
     if [ -z "${CAND}" ]; then
-        echo "  FAIL: 在 ${SCOPE} 中找不到与 '${KEY}' 匹配的目录或 .run"
+        echo "  FAIL: 在 ${SCOPE} 中找不到与 '${KW}' 匹配的 .run / 目录 / .apk"
         MISSING="${MISSING} ${PACKAGE}"
         continue
     fi
 
     BEST="$(printf '%s\n' "${CAND}" | sort -k1,1nr -k2,2 | awk -F'\t' 'NR==1{print $1}')"
     TOP="$(printf '%s\n' "${CAND}" | awk -F'\t' -v s="${BEST}" '$1==s {print $2}')"
-    echo "  匹配到最高分 ${BEST}，候选 $(printf '%s\n' "${TOP}" | grep -c . || true) 个："
+    echo "  命中（分数 ${BEST}，共 $(printf '%s\n' "${TOP}" | grep -c . || true) 个）："
     printf '%s\n' "${TOP}" | sed 's/^/      /'
 
     HIT=0
     while IFS= read -r item; do
         [ -n "${item}" ] || continue
         BEFORE="$(apk_count)"
-        collect_from_path "${item}" || true
+        collect_from_path "${item}" "${KW}" || true
         AFTER="$(apk_count)"
-        if [ "${AFTER}" -gt "${BEFORE}" ]; then
-            HIT=$((HIT + 1))
-        else
-            echo "      （该来源没有产生新 apk: ${item}）"
-        fi
+        if [ "${AFTER}" -gt "${BEFORE}" ]; then HIT=$((HIT + 1)); fi
     done <<< "${TOP}"
 
     if [ "${HIT}" -eq 0 ]; then
-        echo "  FAIL: 候选里没有可用的 .apk"
+        echo "  FAIL: 命中的来源里没有可用 .apk"
         MISSING="${MISSING} ${PACKAGE}"
     else
-        echo "  OK: ${PACKAGE}（命中 ${HIT} 个来源）"
+        echo "  OK: ${PACKAGE}"
     fi
 done
 
@@ -209,8 +245,9 @@ if [ "${APK_TOTAL}" -eq 0 ]; then
 fi
 if [ -n "${MISSING}" ]; then
     echo "ERROR: 以下请求的包没有准备好:${MISSING}"
-    echo "       若该包本来就在官方 feed 里（bash、kmod-* 等），请从 CUSTOM_PACKAGES 里去掉；"
-    echo "       若是仓库目录名特殊，用 MATCH_OVERRIDE=\"包名=关键词\" 指定（见文件头注释）"
+    echo "       若该包本来就在官方 feed 里（bash、kmod-* 等），请从 CUSTOM_PACKAGES 去掉；"
+    echo "       若是仓库命名特殊，用 MATCH_OVERRIDE=\"包名=关键词\" 指定，"
+    echo "       或先看仓库里实际的条目名：find ${RUN_PATH_DIR} -maxdepth 1 | sort"
     [ "${ALLOW_MISSING}" = "1" ] && echo "（ALLOW_MISSING=1，按警告处理）" || exit 1
 fi
 exit 0
