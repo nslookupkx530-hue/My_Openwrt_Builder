@@ -3,151 +3,129 @@
 APK_DIR="/usr/share/third-party"
 LOG_FILE="/tmp/third-party-apk-install.log"
 LOCK_DIR="/tmp/third-party-apk-install.lock"
-DONE_FILE="/etc/third-party-apk-installed"
+STAMP_FILE="/etc/third-party-apk.stamp"
 
-MAX_RETRIES=30
-RETRY_INTERVAL=10
+LOCK_STALE_SEC=1800
+NET_MAX_RETRIES=12
+NET_INTERVAL=10
+LOCKED=0
 
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"
+    echo "$(date '+%F %T') $*" | tee -a "$LOG_FILE"
+    logger -t third-party-apk "$*" 2>/dev/null
 }
+
+keepalive() { touch "$LOCK_DIR" 2>/dev/null; return 0; }
 
 log "=========================================="
 log "Starting third-party APK installation"
 log "=========================================="
 
-# 成功安装后不再重复执行
-if [ -f "$DONE_FILE" ]; then
-    log "Third-party APK packages are already installed."
+# ---------- 0. 清单与 stamp ----------
+[ -d "$APK_DIR" ] || { log "ERROR: 目录不存在: $APK_DIR"; exit 1; }
+
+set -- "$APK_DIR"/*.apk
+[ -f "$1" ] || { log "没有找到第三方 APK，跳过"; exit 0; }
+
+STAMP="$(printf '%s\n' "$@" | sed 's#.*/##' | sort | md5sum | cut -d' ' -f1)"
+
+if [ -f "$STAMP_FILE" ] && [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$STAMP" ]; then
+    log "已安装且清单未变（stamp=$STAMP），跳过"
     exit 0
 fi
 
-# 防止多个安装进程同时运行
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    log "Another installation process is already running."
-    exit 0
-fi
+# ---------- 1. 进程锁（pid 判活 + 超时兜底 + 心跳）----------
+acquire_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        LOCKED=1
+        return 0
+    fi
 
-cleanup() {
-    rmdir "$LOCK_DIR" 2>/dev/null
+    OTHER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || echo '')"
+    if [ -n "$OTHER_PID" ] && kill -0 "$OTHER_PID" 2>/dev/null; then
+        log "已有安装进程在运行（pid=${OTHER_PID}），本次跳过"
+        return 1
+    fi
+
+    LOCK_TS="$(date -r "$LOCK_DIR" +%s 2>/dev/null || echo 0)"
+    LOCK_AGE="$(( $(date +%s) - LOCK_TS ))"
+    if [ "$LOCK_AGE" -gt "$LOCK_STALE_SEC" ]; then
+        log "WARNING: 清理陈旧锁（pid=${OTHER_PID:-未知} 已不存在，锁龄 ${LOCK_AGE}s）"
+        rm -rf "$LOCK_DIR"
+        if mkdir "$LOCK_DIR" 2>/dev/null; then
+            echo $$ > "$LOCK_DIR/pid"
+            LOCKED=1
+            return 0
+        fi
+    fi
+
+    log "锁状态不明确（pid=${OTHER_PID:-无}，锁龄 ${LOCK_AGE}s），保守跳过"
+    return 1
 }
 
-trap cleanup EXIT INT TERM
+release_lock() { [ "$LOCKED" = "1" ] && rm -rf "$LOCK_DIR"; }
+trap 'release_lock' EXIT INT TERM
 
-# 检查 APK 目录
-if [ ! -d "$APK_DIR" ]; then
-    log "ERROR: APK directory does not exist: $APK_DIR"
-    exit 1
-fi
+acquire_lock || exit 0
 
-# 获取 APK 文件
-set -- "$APK_DIR"/*.apk
+# ---------- 2. 逐个安装（一个坏包不再拖垮全部）----------
+[ -x /usr/bin/apk ] || { log "ERROR: /usr/bin/apk 不可用"; exit 1; }
 
-if [ ! -f "$1" ]; then
-    log "No third-party APK packages found."
-    exit 0
-fi
-
-log "APK packages to install:"
-
-for apk_file in "$@"; do
-    log "  $apk_file"
-done
-
-# 检查 apk 命令
-if [ ! -x /usr/bin/apk ]; then
-    log "ERROR: /usr/bin/apk is not available."
-    exit 1
-fi
-
-# 等待网络可用
-log "Waiting for network connectivity..."
-
-COUNT=0
-
-while :; do
-    NETWORK_READY=0
-
-    # 优先测试 HTTPS，避免仅通过 ping 判断网络状态
-    if command -v uclient-fetch >/dev/null 2>&1; then
-        if uclient-fetch \
-            -q \
-            -O /tmp/third-party-network-test \
-            "https://downloads.openwrt.org/" \
-            >/dev/null 2>&1; then
-            NETWORK_READY=1
+FAILED=""
+install_all() {
+    FAILED=""
+    for apk_file in "$@"; do
+        keepalive
+        if apk add --allow-untrusted "$apk_file" >>"$LOG_FILE" 2>&1; then
+            log "  OK   ${apk_file##*/}"
+        else
+            log "  FAIL ${apk_file##*/}"
+            FAILED="$FAILED $apk_file"
         fi
+    done
+    [ -z "$FAILED" ]
+}
 
-        rm -f /tmp/third-party-network-test
+log "共 $# 个 apk 待安装"
 
-    elif command -v wget >/dev/null 2>&1; then
-        if wget \
-            -q \
-            -O /tmp/third-party-network-test \
-            "https://downloads.openwrt.org/" \
-            >/dev/null 2>&1; then
-            NETWORK_READY=1
-        fi
+# 离线优先：先直接装（依赖齐备时根本不需要网络、也不会干等）
+if install_all "$@"; then
+    log "首次尝试全部成功"
+else
+    log "部分失败，等待 apk 仓库可达后重试：$FAILED"
+    i=0; READY=0
+    while [ "$i" -lt "$NET_MAX_RETRIES" ]; do
+        i=$((i + 1))
+        keepalive
+        if apk update >>"$LOG_FILE" 2>&1; then READY=1; break; fi
+        log "仓库不可达，${NET_INTERVAL}s 后重试（${i}/${NET_MAX_RETRIES}）"
+        sleep "$NET_INTERVAL"
+    done
 
-        rm -f /tmp/third-party-network-test
-
-    elif command -v ping >/dev/null 2>&1; then
-        if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-            NETWORK_READY=1
-        fi
+    if [ "$READY" = "1" ]; then
+        set -- $FAILED
+        log "重试剩余 $# 个包"
+        install_all "$@" && log "重试后全部成功" || log "重试后仍有失败：$FAILED"
     else
-        log "WARNING: No network test command found."
-        NETWORK_READY=1
+        log "ERROR: 仓库始终不可达，放弃本次重试"
     fi
+fi
 
-    if [ "$NETWORK_READY" -eq 1 ]; then
-        log "Network connectivity is available."
-        break
-    fi
-
-    if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
-        log "ERROR: Network is not ready after 5 minutes."
-        exit 1
-    fi
-
-    COUNT=$((COUNT + 1))
-
-    log "Network is not ready. Retrying in ${RETRY_INTERVAL}s (${COUNT}/${MAX_RETRIES})..."
-
-    sleep "$RETRY_INTERVAL"
-done
-
-log "Installing third-party APK packages..."
-
-# 不使用 --force-reinstall，避免不必要的重复安装
-if ! apk add --allow-untrusted "$@"; then
-    log "ERROR: APK installation failed."
-    log "Please check APK dependencies and repository connectivity."
+# ---------- 3. 收尾 ----------
+if [ -n "$FAILED" ]; then
+    log "ERROR: 以下包安装失败：$FAILED"
+    log "未写入 stamp，下次开机会自动重试（已装成功的包不会重复安装）"
     exit 1
 fi
 
-log "APK installation completed."
-
-# 清理 LuCI 缓存
-log "Refreshing LuCI caches..."
-
-rm -f /tmp/luci-indexcache.*
-rm -rf /tmp/luci-modulecache
-
-# 重启 LuCI 相关服务
-if [ -x /etc/init.d/rpcd ]; then
-    /etc/init.d/rpcd restart
-fi
-
-if [ -x /etc/init.d/uhttpd ]; then
-    /etc/init.d/uhttpd restart
-fi
-
-# 只有安装成功后才写入完成标志
-touch "$DONE_FILE"
+printf '%s\n' "$STAMP" > "$STAMP_FILE"
+rm -rf /tmp/luci-indexcache /tmp/luci-indexcache.* /tmp/luci-modulecache
+[ -x /etc/init.d/rpcd ]   && /etc/init.d/rpcd restart
+[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd restart
 
 log "=========================================="
-log "Third-party APK installation completed"
+log "全部安装完成，已写入 stamp"
 log "=========================================="
 
 exit 0
