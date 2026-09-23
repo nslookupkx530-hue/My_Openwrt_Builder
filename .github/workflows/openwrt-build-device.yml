@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_type:
-        description: 'Source Type'
+        description: "源码类型"
         required: true
         default: 'immortalwrt'
         type: choice
@@ -12,7 +12,7 @@ on:
           - openwrt
           - immortalwrt
       target_device:
-        description: 'Target Device'
+        description: "目标设备"
         required: true
         default: 'x86'
         type: choice
@@ -23,17 +23,20 @@ on:
           - Cudy-TR3000-256MB
           - Tenda-BE12PRO
       source_ref:
-        description: '【可选】源码分支或 tag，留空=默认分支(跟随最新)'
+        description: "源码 ref / tag（留空 = 自动挑最新稳定版 tag）"
         required: false
-        default: ''
+        default: ""
+        type: string
       version:
-        description: 'buildinfo 版本号，如 25.12.0（留空=自动抓最新 release）'
+        description: "版本号（留空 = 自动探测最新稳定版；snapshot = 快照）"
         required: false
-        default: ''
+        default: ""
+        type: string
       custom_packages:
-        description: '追加的第三方 apk 包名（空格分隔，可留空）'
+        description: "额外第三方包（空格分隔，可选）"
         required: false
-        default: ''
+        default: ""
+        type: string
 
 permissions:
   contents: write        # 建 Release 必需，否则403
@@ -47,7 +50,7 @@ env:
   SOURCE_TYPE: ${{ github.event.inputs.source_type }}
   TARGET_DEVICE: ${{ github.event.inputs.target_device }}
   SOURCE_REF: ${{ github.event.inputs.source_ref }}
-  INPUT_VERSION: ${{ github.event.inputs.version }} 
+  INPUT_VERSION: ${{ github.event.inputs.version }}
   CUSTOM_PACKAGE_EXTRA: ${{ github.event.inputs.custom_packages }}
 
 jobs:
@@ -90,6 +93,9 @@ jobs:
           check "files/etc/init.d/apk-install"
           check "files/etc/ithird-party/install_third_party_apk.sh"
           check "files/etc/third-party/install_third_party_apk.sh"
+
+          # 4) 公共 overlay 的 uci-defaults（98-drop-kmods-repo 等）
+          for f in files/etc/uci-defaults/*; do check "$f"; done
 
           [ "$FAIL" = "0" ] || { echo "存在语法错误，请先修复"; exit 1; }
 
@@ -225,20 +231,72 @@ jobs:
           test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
 
       - name: Modify APK/OPKG mirror
-         # 修改软件包地址
+        # 按 SOURCE_TYPE 选镜像；并把仓库地址写进镜像（distfeeds.list 的来源）
         shell: bash
         run: |
           set -euxo pipefail
-          SOURCE_DIR="${WORKSPACE}/src"
-          cd "${SOURCE_DIR}"
+          cd "${WORKSPACE}/src"
 
-          # ↓↓↓ 要换镜像只改这一行 ↓↓↓
-          MIRROR="https://mirror.nju.edu.cn/openwrt"
+          SOURCE_TYPE="${SOURCE_TYPE:-immortalwrt}"
+          VERSION="${VERSION:-}"
 
+          # ===== 1) 按源区分镜像（唯一真源；下一步会做一致性断言）=====
+          case "${SOURCE_TYPE}" in
+            immortalwrt) MIRROR="https://mirror.nju.edu.cn/immortalwrt" ;;
+            openwrt)     MIRROR="https://mirror.nju.edu.cn/openwrt" ;;
+            *) echo "ERROR: 未知 SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
+          esac
           echo ">>> source_type=${SOURCE_TYPE} version=${VERSION:-<auto>} mirror=${MIRROR}"
 
+          # ===== 2) 推导 target 路径 / release 目录（本步与 Check 步共用）=====
+          MAP="${WORKSPACE}/configs/device_mapping.conf"
+          [ -f "${MAP}" ] || { echo "ERROR: 找不到 ${MAP}"; exit 1; }
+          LINE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 || true)"
+          [ -n "${LINE}" ] || { echo "ERROR: ${MAP} 里没有 ${TARGET_DEVICE}"; exit 1; }
+          TARGET_PATH="${LINE#*=}"; TARGET_PATH="${TARGET_PATH%%|*}"
+          TARGET_PATH="$(printf '%s' "${TARGET_PATH}" | tr -d '[:space:]')"
+          TARGET_PATH="${TARGET_PATH%/}"
+          case "${TARGET_PATH}" in
+            ""|*/-) echo "ERROR: ${TARGET_DEVICE} 的 target 路径不合法: '${TARGET_PATH}'"; exit 1 ;;
+          esac
+
+          if [ -n "${VERSION}" ]; then REL_DIR="releases/${VERSION}"; else REL_DIR="snapshots"; fi
+          RELEASE_BASE="${MIRROR}/${REL_DIR}/targets/${TARGET_PATH}"
+
+          {
+            echo "MIRROR=${MIRROR}"
+            echo "TARGET_PATH=${TARGET_PATH}"
+            echo "REL_DIR=${REL_DIR}"
+            echo "RELEASE_BASE=${RELEASE_BASE}"
+          } >> "$GITHUB_ENV"
+
+          # ===== 3) CONFIG_VERSION_REPO 换主机、保留 releases 路径（两种源都试）=====
+          #      immortalwrt 若没有该符号不算错误，其机制是第 4 步的 apk_mirror
+          if grep -q '^CONFIG_VERSION_REPO=' .config; then
+            OLD_LINE="$(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+            OLD_PATH="$(printf '%s' "${OLD_LINE}" | sed -E 's#^CONFIG_VERSION_REPO="https?://[^/]+(/.*)"$#\1#')"
+            case "${OLD_PATH}" in
+              /*) : ;;
+              *)  echo "::warning::无法从 ${OLD_LINE} 解析路径，改用 /${REL_DIR}"
+                  OLD_PATH="/${REL_DIR}" ;;
+            esac
+            echo ">>> VERSION_REPO 原: ${OLD_LINE}"
+            sed -i -E "s#^CONFIG_VERSION_REPO=.*#CONFIG_VERSION_REPO=\"${MIRROR}${OLD_PATH}\"#" .config
+            echo ">>> VERSION_REPO 新: $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+            grep -qE "^CONFIG_VERSION_REPO=\"${MIRROR}" .config \
+              || { echo "ERROR: CONFIG_VERSION_REPO 替换失败"; exit 1; }
+          elif [ -f package/base-files/image-config.in ] && \
+               grep -qE 'default "https?://downloads\.(openwrt|immortalwrt)\.org' package/base-files/image-config.in; then
+            echo ">>> .config 无 CONFIG_VERSION_REPO，改 image-config.in 默认值兜底"
+            sed -i -E "s#(default \")https?://downloads\.(openwrt|immortalwrt)\.org#\1${MIRROR}#" package/base-files/image-config.in
+            grep -Fq "default \"${MIRROR}" package/base-files/image-config.in \
+              || { echo "ERROR: image-config.in 兜底失败"; exit 1; }
+          else
+            echo "::warning::未找到 CONFIG_VERSION_REPO（.config / image-config.in），运行时由 apk_mirror 兜底"
+          fi
+
+          # ===== 4) immortalwrt：只改 apk_mirror 的"默认值"一行 =====
           if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
-            # ---------- immortalwrt：只改 apk_mirror 的"默认值" ----------
             F="package/emortal/default-settings/files/99-default-settings-chinese"
             [ -f "${F}" ] || { echo "ERROR: 找不到 ${F}"; exit 1; }
 
@@ -262,66 +320,87 @@ jobs:
               || { echo "ERROR: distfeeds 的 sed 匹配模式被改坏了"; exit 1; }
 
             echo ">>> immortalwrt 镜像设置完成"
-
-          else
-            # ---------- openwrt：改 .config 的 CONFIG_VERSION_REPO（换主机，保留 releases 路径）----------
-            [ -f .config ] || {
-              echo "ERROR: 找不到 .config（本步骤必须放在 Prepare Base Configuration 之后）"; exit 1; }
-
-            if grep -q '^CONFIG_VERSION_REPO=' .config; then
-              OLD_LINE="$(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
-              OLD_PATH="$(printf '%s' "${OLD_LINE}" | sed -E 's#^CONFIG_VERSION_REPO="https?://[^/]+(/.*)"$#\1#')"
-              echo ">>> 原: ${OLD_LINE}"
-              sed -i -E "s#^CONFIG_VERSION_REPO=.*#CONFIG_VERSION_REPO=\"${MIRROR}${OLD_PATH}\"#" .config
-              echo ">>> 新: $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
-              grep -qE "^CONFIG_VERSION_REPO=\"${MIRROR}" .config \
-                || { echo "ERROR: CONFIG_VERSION_REPO 替换失败"; exit 1; }
-            else
-              # 兜底：.config 没有该符号 → 改 kconfig 默认值（构建期生成 distfeeds.list 时生效）
-              echo ">>> .config 无 CONFIG_VERSION_REPO，改 image-config.in 的默认值兜底"
-              F="package/base-files/image-config.in"
-              sed -i -E "s#(default \")https?://downloads\.(openwrt|immortalwrt)\.org#\1${MIRROR}#" "${F}"
-              grep -nE 'default "https?://' "${F}" | sed -n '1,3p' || true
-              grep -Fq "default \"${MIRROR}" "${F}" \
-                || { echo "ERROR: image-config.in 兜底失败"; exit 1; }
-            fi
-
-            echo ">>> openwrt 镜像设置完成"
           fi
 
       - name: Check APK package mirror
-        # 检测是否已修改成功，是否为：https://mirror.nju.edu.cn/openwrt
+        # 本地断言 + 远端真探活：所有 apk 源必须 200（一个源 404 → 整个 apk 事务失败）
         shell: bash
         run: |
           set -euxo pipefail
-          SOURCE_DIR="${WORKSPACE}/src"
-          cd "${SOURCE_DIR}"
-          MIRROR="https://mirror.nju.edu.cn/openwrt"
-          FAIL=0
+          cd "${WORKSPACE}/src"
 
+          # ---- 0) 与上一步一致性断言（防止两处 MIRROR 又写歪）----
+          case "${SOURCE_TYPE}" in
+            immortalwrt) EXPECT="https://mirror.nju.edu.cn/immortalwrt" ;;
+            openwrt)     EXPECT="https://mirror.nju.edu.cn/openwrt" ;;
+            *) echo "ERROR: 未知 SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
+          esac
+          MIRROR="${MIRROR:?MIRROR 未由 Modify APK/OPKG mirror 步骤导出}"
+          [ "${MIRROR}" = "${EXPECT}" ] || {
+            echo "ERROR: MIRROR(${MIRROR}) 与 SOURCE_TYPE=${SOURCE_TYPE} 期望值(${EXPECT}) 不一致"; exit 1; }
+          REL_DIR="${REL_DIR:?}"; RELEASE_BASE="${RELEASE_BASE:?}"
+
+          # ---- 1) 本地改写结果断言 ----
           if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
             F="package/emortal/default-settings/files/99-default-settings-chinese"
             echo ">>> ${F} 关键行:"
-            grep -nE 'apk_mirror=|distfeeds' "${F}" || FAIL=1
-
+            grep -nE 'apk_mirror=|distfeeds' "${F}" || true
             grep -qE "^[[:space:]]*apk_mirror=\"${MIRROR}\"$" "${F}" \
-              || { echo "ERROR: apk_mirror 默认值不是 ${MIRROR}"; FAIL=1; }
+              || { echo "ERROR: apk_mirror 默认值不是 ${MIRROR}"; exit 1; }
             grep -Fq 'apk_mirror="$(uci' "${F}" \
-              || { echo "ERROR: uci 读取那一行被改坏了"; FAIL=1; }
+              || { echo "ERROR: uci 读取那一行被改坏了"; exit 1; }
             grep -Fq 's,https://downloads.immortalwrt.org,' "${F}" \
-              || { echo "ERROR: distfeeds 的 sed 匹配模式被改坏了"; FAIL=1; }
-          else
-            echo ">>> .config 的仓库地址:"
-            grep -E '^CONFIG_VERSION_REPO=' .config || FAIL=1
+              || { echo "ERROR: distfeeds 的 sed 匹配模式被改坏了"; exit 1; }
+          fi
+
+          if grep -q '^CONFIG_VERSION_REPO=' .config; then
+            echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
             grep -qE "^CONFIG_VERSION_REPO=\"${MIRROR}" .config \
-              || { echo "ERROR: CONFIG_VERSION_REPO 未指向镜像"; FAIL=1; }
+              || { echo "ERROR: CONFIG_VERSION_REPO 未指向镜像"; exit 1; }
+          else
+            echo "::warning::.config 无 CONFIG_VERSION_REPO（immortalwrt 常见），首启由 apk_mirror 兜底"
           fi
 
           echo ">>> 运行时源的生成位置（供排查）:"
           grep -nE 'FeedSourcesAppendAPK|repositories\.d' \
                package/base-files/Makefile package/system/apk/Makefile 2>/dev/null || true
 
-          [ "${FAIL}" = "0" ] || exit 1
+          # ---- 2) 远端真探活 ----
+          proberc=0
+          probe() {
+            url="$1"; label="$2"
+            code="$(curl -s -o /dev/null -w '%{http_code}' -L --retry 3 --max-time 60 "${url}" || echo 000)"
+            if [ "${code}" = "200" ]; then
+              echo "OK   [${code}] ${label}: ${url}"
+            else
+              echo "FAIL [${code}] ${label}: ${url}"
+              proberc=1
+            fi
+          }
+
+          ARCH_PACKAGES="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+          echo ">>> CONFIG_TARGET_ARCH_PACKAGES=${ARCH_PACKAGES:-<none>}"
+
+          probe "${RELEASE_BASE}/config.buildinfo"      "target 基线 buildinfo"
+          probe "${RELEASE_BASE}/packages/packages.adb" "target 包索引"
+          if [ -n "${ARCH_PACKAGES}" ]; then
+            probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/packages.adb" \
+                  "核心包索引 (${ARCH_PACKAGES})"
+          fi
+
+          KMODS_LIST="$(curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" 2>/dev/null || true)"
+          KMODS_DIR="$(printf '%s\n' "${KMODS_LIST}" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[0-9a-f]{32,}' | sort -u | tail -n1 || true)"
+          if [ -n "${KMODS_DIR}" ]; then
+            probe "${RELEASE_BASE}/kmods/${KMODS_DIR}/packages.adb" "kmods (${KMODS_DIR})"
+            echo "KMODS_DIR=${KMODS_DIR}" >> "$GITHUB_ENV"
+            echo ">>> 镜像内核 = ${KMODS_DIR%%-*}；设备 uname -r 应与此一致，否则 98-drop-kmods-repo 会删掉该源"
+          else
+            echo "::warning::未能从 ${RELEASE_BASE}/kmods/ 解析内核目录，跳过 kmods 探活"
+          fi
+
+          [ "${proberc}" = "0" ] || {
+            echo "ERROR: 有源不可用 —— 一个 404 就会让整个 apk 安装事务失败"; exit 1; }
           echo ">>> 镜像检查通过"
 
       - name: Load Third-Party Config & Inject Plugins
@@ -466,12 +545,20 @@ jobs:
           cd "${WORKSPACE}/src"
           make defconfig
 
-          echo ">>> 校验插件注入结果（必须仍为 y）"
+          echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config || echo '<无>')"
+          echo ">>> ARCH_PACKAGES     : $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+
+          # 已启用包符号表（注意：只能用 [:blank:]，[:space:] 会把换行删掉导致符号粘连）
+          awk '/^CONFIG_PACKAGE_[^=]*=y$/{sub(/=y$/,"");print}' .config \
+            | tr -d '[:blank:]' | sort -u > tmp/enabled-symbols.txt
+          echo ">>> 已启用 CONFIG_PACKAGE_* 数量: $(wc -l < tmp/enabled-symbols.txt)"
+
+          # ---- 1) 注入的插件必须还在 ----
           MISSING_OPT=""
-          if [ -f tmp/injected-plugins.txt ]; then
+          if [ -s tmp/injected-plugins.txt ]; then
             while read -r opt; do
               [ -n "${opt}" ] || continue
-              if grep -q "^${opt}=y" .config; then
+              if grep -qxF "${opt}" tmp/enabled-symbols.txt; then
                 echo "  OK   ${opt}"
               else
                 echo "  MISS ${opt}"
@@ -482,28 +569,41 @@ jobs:
             echo "WARNING: 未找到 tmp/injected-plugins.txt"
           fi
 
-          echo ">>> 校验关闭项（必须仍为 n / 不存在）"
-          BACK_ON=""
-          if [ -f tmp/trimmed-options.txt ]; then
-            while read -r opt; do
-              [ -n "${opt}" ] || continue
-              if grep -q "^${opt}=y" .config; then
-                echo "  WARN ${opt} 又被打开了"
-                BACK_ON="${BACK_ON} ${opt}"
-              else
-                echo "  OK   ${opt} 已关闭"
-              fi
+          # ---- 2) 裁剪 / 强制项必须按要求落地 ----
+          BAD_TRIM=""
+          if [ -s tmp/trimmed-options.txt ]; then
+            while read -r want sym; do
+              [ -n "${sym:-}" ] || continue
+              case "${want}" in
+                ON)
+                  if grep -qxF "${sym}" tmp/enabled-symbols.txt; then
+                    echo "  OK   ${sym} 已启用"
+                  else
+                    echo "  FAIL ${sym} 未启用"
+                    BAD_TRIM="${BAD_TRIM} ${sym}"
+                  fi ;;
+                OFF)
+                  if grep -qxF "${sym}" tmp/enabled-symbols.txt; then
+                    echo "  FAIL ${sym} 又被打开了"
+                    BAD_TRIM="${BAD_TRIM} ${sym}"
+                  else
+                    echo "  OK   ${sym} 已关闭"
+                  fi ;;
+              esac
             done < tmp/trimmed-options.txt
+          else
+            echo "WARNING: 未找到 tmp/trimmed-options.txt"
           fi
 
-          echo ">>> 已启用包数量: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
+          # ---- 3) ip 落点自查 ----
+          echo ">>> ip 相关:"
+          grep -E '^CONFIG_PACKAGE_ip-(full|tiny)=|^# CONFIG_PACKAGE_ip-(full|tiny) is not set' .config || true
 
           [ -z "${MISSING_OPT}" ] || {
-            echo "ERROR: 以下插件没有被保留，固件里不会有它们:${MISSING_OPT}"; exit 1; }
-          [ -z "${BACK_ON}" ] || {
-            echo "ERROR: 以下选项被 defconfig 重新打开，编译会再次失败:${BACK_ON}"
-            echo "       请检查是否有其它选项依赖它"; exit 1; }
-          echo ">>> 插件注入校验通过"
+            echo "ERROR: 以下插件没进固件，请核对 configs/plugins.cfg 里的包名:${MISSING_OPT}"; exit 1; }
+          [ -z "${BAD_TRIM}" ] || {
+            echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
+          echo ">>> 注入/裁剪校验通过"
 
       - name: Generate release notes
         id: notes
@@ -527,6 +627,8 @@ jobs:
             echo "src_date    : $(git log -1 --format=%cd --date=iso)"
             echo "build_time  : $(date -u '+%F %T UTC')"
             echo "run_id      : ${{ github.run_id }}"
+            echo "mirror      : ${MIRROR:-<unknown>}"
+            echo "kmods_dir   : ${KMODS_DIR:-<unknown>}"
             echo "config_md5  : $(md5sum .config | cut -d' ' -f1)"
           } > "${WORKSPACE}/BUILDINFO.txt"
 
@@ -561,27 +663,6 @@ jobs:
 
           echo ">>> release-notes.md 预览:"
           cat "${WORKSPACE}/release-notes.md"
-
-      - name: Generate build info
-        shell: bash
-        run: |
-          set -euxo pipefail
-          {
-            echo "## 构建信息"
-            echo ""
-            echo '```'
-            echo "device      : ${TARGET_DEVICE}"
-            echo "source_type : ${SOURCE_TYPE}"
-            echo "source_ref  : ${SOURCE_REF:-<default branch / latest>}"
-            echo "channel     : ${VERSION:-snapshot}"
-            echo "src_commit  : $(git -C "${WORKSPACE}/src" rev-parse HEAD)"
-            echo "src_date    : $(git -C "${WORKSPACE}/src" log -1 --format=%cd --date=iso)"
-            echo "build_time  : $(date -u '+%F %T UTC')"
-            echo "run_id      : ${{ github.run_id }}"
-            echo "config_md5  : $(md5sum "${WORKSPACE}/src/.config" | cut -d' ' -f1)"
-            echo '```'
-          } | tee "${WORKSPACE}/BUILDINFO.txt" 
-          cat "${WORKSPACE}/BUILDINFO.txt"
 
       - name: Prepare build download
         shell: bash
@@ -645,6 +726,9 @@ jobs:
             src/build.log
             src/build_download.log
             src/.config
+            src/tmp/injected-plugins.txt
+            src/tmp/trimmed-options.txt
+            src/tmp/enabled-symbols.txt
           if-no-files-found: ignore
 
       - name: Upload Artifacts
@@ -662,7 +746,7 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.notes.outputs.tag }}      # ← 形如 x86-2026-09-23-35429357989
+          tag_name: ${{ steps.notes.outputs.tag }}      # ← 形如 x86-immortalwrt-2026-09-23-35429357989
           name: ${{ steps.notes.outputs.tag }}          # 标题同一个（截图里标题=tag）
           body_path: release-notes.md                   # ← 正文用上面生成的文件
           files: |
