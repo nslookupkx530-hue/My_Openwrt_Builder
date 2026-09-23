@@ -7,86 +7,78 @@
 #   优化点：采用幂等性处理逻辑，确保配置项的唯一性和确定性，助力哈希对齐。
 # ==============================================================================
 
-set -euxo pipefail
+set -euo pipefail
 
-CONFIG_FILE=".config"
-PLUGIN_CFG="../configs/plugins.cfg"
-STRICT_SYMBOL_CHECK="${STRICT_SYMBOL_CHECK:-0}"
+CONFIG_FILE="${CONFIG_FILE:-.config}"
+PLUGIN_CFG="${PLUGIN_CFG:-../configs/plugins.cfg}"
+OUT_FILE="${OUT_FILE:-tmp/injected-plugins.txt}"
 
-[ -f "$CONFIG_FILE" ] || { echo "ERROR: 找不到 .config，请先运行 prepare_base_config.sh"; exit 1; }
-[ -f "$PLUGIN_CFG" ]  || { echo "ERROR: 找不到 ${PLUGIN_CFG}"; exit 1; }   # 硬失败，不再静默跳过
+echo ">>> inject_plugins.sh"
 
-# 开关 → 选项 映射表
-plugins=(
-    "ENABLE_ARGON|CONFIG_PACKAGE_luci-theme-argon CONFIG_PACKAGE_luci-app-argon-config CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn"
-    "ENABLE_DISKMAN|CONFIG_PACKAGE_luci-app-diskman CONFIG_PACKAGE_luci-i18n-diskman-zh-cn"
-    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_irqbalance CONFIG_PACKAGE_luci-app-irqbalance CONFIG_PACKAGE_luci-i18n-irqbalance-zh-cn"
-    "ENABLE_FILEBROWSER_GO|CONFIG_PACKAGE_luci-app-filebrowser-go CONFIG_PACKAGE_luci-i18n-filebrowser-go-zh-cn"
-    "ENABLE_SQM|CONFIG_PACKAGE_luci-app-sqm CONFIG_PACKAGE_luci-i18n-sqm-zh-cn"
-    "ENABLE_TTYD|CONFIG_PACKAGE_luci-app-ttyd CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn"
-    "ENABLE_AUTOREBOOT|CONFIG_PACKAGE_luci-app-autoreboot CONFIG_PACKAGE_luci-i18n-autoreboot-zh-cn"
-    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_smartdns CONFIG_PACKAGE_luci-app-smartdns CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn"
-    "ENABLE_DOCKER|CONFIG_PACKAGE_docker CONFIG_PACKAGE_luci-app-dockerman CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn"
+if [ ! -f "$PLUGIN_CFG" ]; then
+    echo "ERROR: 找不到插件开关文件 ${PLUGIN_CFG}" >&2
+    exit 1
+fi
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: 找不到 ${CONFIG_FILE}（本脚本必须在 src/ 下执行，且已生成基础配置）" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$OUT_FILE")"
+: > "$OUT_FILE"
+
+# ------------------------------------------------------------ 映射表
+# 格式：  "开关名|选项1 选项2 选项3"
+# 注意：这里是 .config 里的真实符号（去掉 CONFIG_ 前缀）
+PLUGIN_MAP=(
+    "ENABLE_ARGON|luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn"
+    "ENABLE_DISKMAN|luci-app-diskman luci-i18n-diskman-zh-cn"
+    "ENABLE_IRQBALANCE|irqbalance luci-app-irqbalance luci-i18n-irqbalance-zh-cn"
+    "ENABLE_FILEBROWSER_GO|luci-app-filebrowser-go luci-i18n-filebrowser-go-zh-cn"
+    "ENABLE_SQM|luci-app-sqm luci-i18n-sqm-zh-cn"
+    "ENABLE_TTYD|luci-app-ttyd luci-i18n-ttyd-zh-cn"
+    "ENABLE_AUTOREBOOT|luci-app-autoreboot luci-i18n-autoreboot-zh-cn"
+    "ENABLE_IRQBALANCE|smartdns luci-app-smartdns luci-i18n-smartdns-zh-cn"
+    "ENABLE_DOCKER|docker luci-app-dockerman luci-i18n-dockerman-zh-cn"
 )
 
-get_switch() {   # 取最后一次定义，忽略注释与空格
-    sed -e 's/#.*//' -e 's/[[:space:]]//g' "$PLUGIN_CFG" \
-        | grep -E "^$1=" | sed -n '$p' | cut -d= -f2
-}
+# 读开关（plugins.cfg 里形如 ENABLE_SQM=1）
+# shellcheck disable=SC1090
+. "$PLUGIN_CFG"
 
-symbol_exists() {
-    local sym="${1#CONFIG_}"
-    ls tmp/.config-*.in >/dev/null 2>&1 || return 0
-    grep -qE "^[[:space:]]*config ${sym}$" tmp/.config-*.in 2>/dev/null
-}
-
-set_opt() {   # $1=选项名 $2=y|n
-    sed -i "/^$1=/d; /^# $1 is not set$/d" "$CONFIG_FILE"
-    case "$2" in
-        y) echo "$1=y" >> "$CONFIG_FILE" ;;
-        n) echo "# $1 is not set" >> "$CONFIG_FILE" ;;
+is_on() {
+    local flag="$1" val=""
+    eval "val=\${${flag}:-0}"
+    case "$val" in
+        1|y|Y|yes|YES|true|TRUE|on|ON) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
-mkdir -p tmp
-: > tmp/injected-plugins.txt
+# 幂等写入：先清掉 `SYM=y` 和 `# SYM is not set`，再追加唯一一行
+set_opt_on() {
+    local sym="CONFIG_PACKAGE_$1"
+    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "$CONFIG_FILE"
+    printf '%s=y\n' "$sym" >> "$CONFIG_FILE"
+    printf '%s\n'   "$sym" >> "$OUT_FILE"
+}
 
-TOTAL=0; ENABLED=0; UNKNOWN=""
-for entry in "${plugins[@]}"; do
-    IFS="|" read -r var_name opt_list <<< "$entry"
-    enable_val="$(get_switch "$var_name" || true)"
-    TOTAL=$((TOTAL + 1))
-
-    if [ -z "$enable_val" ]; then
-        echo "WARNING: ${PLUGIN_CFG} 中没有 ${var_name}，按禁用处理"
-    elif [ "$enable_val" != "0" ] && [ "$enable_val" != "1" ]; then
-        echo "ERROR: ${var_name}=${enable_val} 非法（只允许 0 或 1）"; exit 1
+enabled_flags=0
+for entry in "${PLUGIN_MAP[@]}"; do
+    flag="${entry%%|*}"
+    opts="${entry#*|}"
+    if is_on "$flag"; then
+        echo ">>> ${flag}=1  →  ${opts}"
+        for o in $opts; do
+            set_opt_on "$o"
+        done
+        enabled_flags=$((enabled_flags + 1))
+    else
+        echo ">>> ${flag}=0  →  跳过"
     fi
-
-    for config_opt in ${opt_list}; do
-        if [ "$enable_val" = "1" ]; then
-            if ! symbol_exists "$config_opt"; then
-                echo "WARNING: ${config_opt} 在当前源码中不存在，注入无效（请核对选项名）"
-                UNKNOWN="$UNKNOWN ${config_opt}"
-                [ "$STRICT_SYMBOL_CHECK" = "1" ] && exit 1
-            fi
-            set_opt "$config_opt" y
-            echo "$config_opt" >> tmp/injected-plugins.txt
-            ENABLED=$((ENABLED + 1))
-        else
-            set_opt "$config_opt" n
-        fi
-    done
 done
 
-# 反向校验：cfg 里有、映射表里没有的开关
-# ⚠ 必须用 [:blank:]（[:space:] 会把换行也删掉，导致名字被拼成一串）
-MAPPED_NAMES="$(printf '%s\n' "${plugins[@]}" | cut -d'|' -f1)"
-for v in $(sed -e 's/#.*//' "$PLUGIN_CFG" \
-           | grep -oE '^[[:space:]]*ENABLE_[A-Z0-9_]+' | tr -d '[:blank:]'); do
-    echo "$MAPPED_NAMES" | grep -qx "$v" || \
-        echo "WARNING: ${v} 在 ${PLUGIN_CFG} 中定义，但脚本映射表里没有，将被忽略"
-done
-
-echo "Plugin injection done: ${ENABLED} 个选项已启用（来自 ${TOTAL} 个开关）"
-[ -z "$UNKNOWN" ] || echo "WARNING: 以下选项在源码中不存在:${UNKNOWN}"
+echo ">>> 已开启开关数: ${enabled_flags}"
+echo ">>> 注入选项清单（${OUT_FILE}）:"
+sed 's/^/      /' "$OUT_FILE"
+[ "$enabled_flags" -gt 0 ] || echo ">>> 提示：没有任何插件开关被打开"
