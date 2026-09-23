@@ -215,6 +215,56 @@ jobs:
           done
           ./scripts/feeds install -a
 
+      - name: Modify APK mirror
+        # 修改软件包地址
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SOURCE_DIR="${WORKSPACE}/src"
+          APK_MIRROR="https://mirror.nju.edu.cn/openwrt"
+          FILE="${SOURCE_DIR}/package/emortal/default-settings/files/99-default-settings-chinese"
+
+          if [ ! -f "${FILE}" ]; then
+            echo "WARNING: 找不到 ${FILE}（openwrt 上游没有 emortal/default-settings），跳过"
+            exit 0
+          fi
+
+          echo ">>> 替换前（含 http 的行）:"
+          grep -n 'http' "${FILE}" || true
+
+          # 注意 [^\"'[:space:]] ：同时排除双引号、单引号和空白，兼容单/双引号写法
+          sed -i -E "s#https?://[^\"'[:space:]]+/openwrt#${APK_MIRROR}#g" "${FILE}"
+
+          echo ">>> 替换后（含 http 的行）:"
+          grep -n 'http' "${FILE}" || true
+
+      - name: Check APK package mirror
+        # 检测是否已修改成功，是否为：https://mirror.nju.edu.cn/openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SOURCE_DIR="${WORKSPACE}/src"
+          APK_MIRROR="https://mirror.nju.edu.cn/openwrt"
+          FILE="${SOURCE_DIR}/package/emortal/default-settings/files/99-default-settings-chinese"
+
+          if [ ! -f "${FILE}" ]; then
+            echo "WARNING: 未找到 ${FILE}，跳过检查"
+            exit 0
+          fi
+
+          if grep -q "${APK_MIRROR}" "${FILE}"; then
+            echo "OK: 已指向 ${APK_MIRROR}"
+          else
+            echo "ERROR: 镜像没被替换成功！文件里与 http 相关的行："
+            grep -n 'http' "${FILE}" || true
+            echo "       请核对 sed 的匹配模式是否与你源码里的 URL 形式一致"
+            exit 1
+          fi
+
+          echo ">>> 全仓库搜索 apk_mirror（供排查）:"
+          cd "${SOURCE_DIR}"
+          grep -Rni 'apk_mirror' package --exclude-dir=.git || true
+
       - name: Prepare Base Configuration
         shell: bash
         run: |
