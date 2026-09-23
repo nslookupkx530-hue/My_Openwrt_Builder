@@ -1,0 +1,13 @@
+#!/bin/sh
+# 首启：移除 distfeeds.list 里不可用的 kmods 源
+# 原因：kmods 目录名含"本次编译的内核配置哈希"，自编译固件的哈希与官方镜像不同 → 必然 404，
+#       而 apk 只要有一个源拉不到索引，整个安装事务就会失败。
+#       需要内核模块请直接用 .config 编进固件。
+F="/etc/apk/repositories.d/distfeeds.list"
+[ -f "$F" ] || exit 0
+
+if grep -q '/kmods/' "$F"; then
+    sed -i '/\/kmods\//d' "$F"
+    logger -t drop-kmods-repo "已移除不可用的 kmods 源" 2>/dev/null
+fi
+exit 0
