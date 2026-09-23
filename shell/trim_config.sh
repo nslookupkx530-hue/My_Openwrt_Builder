@@ -29,7 +29,7 @@ OUT_FILE="${OUT_FILE:-tmp/trimmed-options.txt}"
 TRIM_OPTS=(
     "CONFIG_PACKAGE_kselftests-bpf"
     "CONFIG_PACKAGE_kselftests-net"
-"
+)
 
 # ------------------------------------------------------------------
 # 必须打开的选项
@@ -48,32 +48,44 @@ FORCE_OFF_OPTS=(
     "CONFIG_PACKAGE_ip-tiny"
 )
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "ERROR: 找不到 ${CONFIG_FILE}（本脚本必须在 src/ 下执行）" >&2
+if [ ! -f "${CONFIG_FILE}" ]; then
+    echo "ERROR: 找不到 ${CONFIG_FILE}（必须在 src/ 下执行）" >&2
     exit 1
 fi
 
-mkdir -p "$(dirname "$OUT_FILE")"
-: > "$OUT_FILE"
+mkdir -p "$(dirname "${OUT_FILE}")"
+: > "${OUT_FILE}"
 
 set_off() {
     local sym="$1"
-    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "$CONFIG_FILE"
-    printf '# %s is not set\n' "$sym" >> "$CONFIG_FILE"
-    printf '# %s is not set\n' "$sym" >> "$OUT_FILE"
+    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "${CONFIG_FILE}"
+    printf '# %s is not set\n' "${sym}" >> "${CONFIG_FILE}"
+    printf 'OFF %s\n' "${sym}" >> "${OUT_FILE}"
 }
 
 set_on() {
     local sym="$1"
-    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "$CONFIG_FILE"
-    printf '%s=y\n' "$sym" >> "$CONFIG_FILE"
-    printf '%s=y\n' "$sym" >> "$OUT_FILE"
+    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "${CONFIG_FILE}"
+    printf '%s=y\n' "${sym}" >> "${CONFIG_FILE}"
+    printf 'ON %s\n' "${sym}" >> "${OUT_FILE}"
 }
 
 echo ">>> trim_config.sh"
-for s in "${TRIM_OPTS[@]}";      do echo ">>> 关闭 ${s}"; set_off "$s"; done
-for s in "${FORCE_OFF_OPTS[@]}"; do echo ">>> 关闭 ${s}"; set_off "$s"; done
-for s in "${FORCE_ON_OPTS[@]}";  do echo ">>> 开启 ${s}"; set_on  "$s"; done
+
+for s in "${TRIM_OPTS[@]}"; do
+    echo ">>> 关闭 ${s}"
+    set_off "${s}"
+done
+
+for s in "${FORCE_OFF_OPTS[@]}"; do
+    echo ">>> 关闭 ${s}"
+    set_off "${s}"
+done
+
+for s in "${FORCE_ON_OPTS[@]}"; do
+    echo ">>> 开启 ${s}"
+    set_on "${s}"
+done
 
 echo ">>> 本次改动:"
-sed 's/^/      /' "$OUT_FILE"
+sed 's/^/      /' "${OUT_FILE}"
