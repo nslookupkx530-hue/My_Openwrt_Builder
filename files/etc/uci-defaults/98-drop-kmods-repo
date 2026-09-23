@@ -1,13 +1,56 @@
 #!/bin/sh
-# 首启：移除 distfeeds.list 里不可用的 kmods 源
-# 原因：kmods 目录名含"本次编译的内核配置哈希"，自编译固件的哈希与官方镜像不同 → 必然 404，
-#       而 apk 只要有一个源拉不到索引，整个安装事务就会失败。
-#       需要内核模块请直接用 .config 编进固件。
-F="/etc/apk/repositories.d/distfeeds.list"
-[ -f "$F" ] || exit 0
+# ============================================================
+#  98-drop-kmods-repo
+#
+#  目的：distfeeds.list 里的 /kmods/ 源，其内核版本必须与设备实际运行内核
+#        一致，否则 apk update 会因 404 **整体失败**（一个源失败 = 整个事务失败）。
+#
+#  策略：版本一致 → 保留（这样才能装官方/镜像的 kmod-* 包）
+#        版本不一致 → 删掉这一个源
+#
+#  实测：官方 25.12.2 的 kmods 目录 = 6.12.103-1-0413601b1c3f0490e17f340fe09229ea
+#        设备 uname -r = 6.12.103  → 一致 → 该源会保留并可用
+#
+#  幂等，只在首次启动（uci-defaults）跑一次；始终 exit 0 防止反复重试。
+# ============================================================
 
-if grep -q '/kmods/' "$F"; then
-    sed -i '/\/kmods\//d' "$F"
-    logger -t drop-kmods-repo "已移除不可用的 kmods 源" 2>/dev/null
+LIST="/etc/apk/repositories.d/distfeeds.list"
+
+[ -f "$LIST" ] || exit 0
+
+KERNEL="$(uname -r)"            # 例如 6.12.103
+[ -n "$KERNEL" ] || exit 0
+
+TMP="$(mktemp)" || exit 0
+cp "$LIST" "$TMP"
+REMOVED=0
+
+while IFS= read -r line; do
+    case "$line" in
+        *"/kmods/"*) ;;
+        *) continue ;;
+    esac
+
+    dir="${line#*/kmods/}"      # 6.12.103-1-0413601b.../packages.adb
+    dir="${dir%%/*}"            # 6.12.103-1-0413601b...
+    ver="${dir%%-*}"            # 6.12.103
+
+    if [ "$ver" = "$KERNEL" ]; then
+        logger -t drop-kmods-repo "kmods 源内核匹配 (${ver})，保留"
+        continue
+    fi
+
+    logger -t drop-kmods-repo "kmods 源内核不匹配 (${ver} != ${KERNEL})，删除该源"
+    grep -vxF "$line" "$TMP" > "${TMP}.new" 2>/dev/null || true
+    mv "${TMP}.new" "$TMP"
+    REMOVED=$((REMOVED + 1))
+done < "$LIST"
+
+if [ "$REMOVED" -gt 0 ]; then
+    cp "$TMP" "$LIST"
+    rm -f /var/lock/apk* 2>/dev/null || true
+    logger -t drop-kmods-repo "已删除 ${REMOVED} 个不匹配的 kmods 源"
 fi
+
+rm -f "$TMP" "${TMP}.new" 2>/dev/null || true
 exit 0
