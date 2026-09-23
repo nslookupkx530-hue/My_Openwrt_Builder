@@ -215,28 +215,78 @@ jobs:
           done
           ./scripts/feeds install -a
 
-      - name: Modify APK mirror
+      - name: Modify APK/OPKG mirror
         # 修改软件包地址
         shell: bash
         run: |
           set -euxo pipefail
           SOURCE_DIR="${WORKSPACE}/src"
-          APK_MIRROR="https://mirror.nju.edu.cn/openwrt"
-          FILE="${SOURCE_DIR}/package/emortal/default-settings/files/99-default-settings-chinese"
+          cd "${SOURCE_DIR}"
 
-          if [ ! -f "${FILE}" ]; then
-            echo "WARNING: 找不到 ${FILE}（openwrt 上游没有 emortal/default-settings），跳过"
-            exit 0
+          MIRROR_OW="https://mirror.nju.edu.cn/openwrt"   # openwrt 源镜像
+          MIRROR_IW="${MIRROR_OW}"                        # immortalwrt 源镜像（默认同上；要单独指定就改这行）
+
+          echo ">>> source_type=${SOURCE_TYPE} version=${VERSION:-<auto>}"
+          echo ">>> openwrt 镜像     : ${MIRROR_OW}"
+          echo ">>> immortalwrt 镜像 : ${MIRROR_IW}"
+
+          # ---------- 1) .config 里的版本仓库地址（保留 releases/snapshots 路径，只换主机）----------
+          if grep -q '^CONFIG_VERSION_REPO=' .config 2>/dev/null; then
+            OLD_LINE="$(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+            OLD_PATH="$(printf '%s' "${OLD_LINE}" | sed -E 's#^CONFIG_VERSION_REPO="https?://[^/]+(/.*)"$#\1#')"
+            case "${OLD_LINE}" in
+              *immortalwrt*) NEW_MIRROR="${MIRROR_IW}" ;;
+              *)             NEW_MIRROR="${MIRROR_OW}" ;;
+            esac
+            echo ">>> 原 ${OLD_LINE}"
+            sed -i -E "s#^CONFIG_VERSION_REPO=.*#CONFIG_VERSION_REPO=\"${NEW_MIRROR}${OLD_PATH}\"#" .config
+            echo ">>> 新 $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+          else
+            echo ">>> 本源码没有 CONFIG_VERSION_REPO"
           fi
 
-          echo ">>> 替换前（含 http 的行）:"
-          grep -n 'http' "${FILE}" || true
+          # ---------- 2) 组装候选文件列表（只碰"最终进 rootfs 的 /etc 配置"，不碰 Makefile）----------
+          FILES="$(
+            {
+              find package -maxdepth 7 -type f \( \
+                  -path '*/default-settings/files/*' \
+                  -o -path '*/etc/apk/repositories*' \
+                  -o -path '*/etc/opkg/*.conf' \) 2>/dev/null
+              grep -rlE 'https?://downloads\.(openwrt|immortalwrt)\.org' package \
+                  --exclude-dir=.git 2>/dev/null | grep -E '/(files/)?etc/' || true
+            } | sort -u
+          )"
 
-          # 注意 [^\"'[:space:]] ：同时排除双引号、单引号和空白，兼容单/双引号写法
-          sed -i -E "s#https?://[^\"'[:space:]]+/openwrt#${APK_MIRROR}#g" "${FILE}"
+          echo ">>> 候选文件:"
+          printf '%s\n' "${FILES}" | sed '/^$/d' | sed 's/^/    /'
 
-          echo ">>> 替换后（含 http 的行）:"
-          grep -n 'http' "${FILE}" || true
+          # ---------- 3) 逐个替换 + 就地断言 ----------
+          CHANGED=0
+          for f in ${FILES}; do
+            BEFORE="$(grep -nE 'https?://' "$f" || true)"
+            sed -i -E \
+              -e "s#https?://downloads\.openwrt\.org#${MIRROR_OW}#g" \
+              -e "s#https?://downloads\.immortalwrt\.org#${MIRROR_IW}#g" \
+              -e "s#https?://[^\"'[:space:]]+/openwrt#${MIRROR_OW}#g" \
+              -e "s#https?://[^\"'[:space:]]+/immortalwrt#${MIRROR_IW}#g" \
+              "$f"
+            AFTER="$(grep -nE 'https?://' "$f" || true)"
+            if [ "${BEFORE}" != "${AFTER}" ]; then
+              echo ">>> 已修改: $f"
+              echo "    改前: ${BEFORE}"
+              echo "    改后: ${AFTER}"
+              CHANGED=$((CHANGED + 1))
+            fi
+            if [ -n "$(grep -E 'https?://downloads\.(openwrt|immortalwrt)\.org' "$f" || true)" ]; then
+              echo "ERROR: $f 仍残留官方地址，匹配规则没覆盖到，请把这段日志发我"
+              exit 1
+            fi
+          done
+
+          echo ">>> 共修改 ${CHANGED} 个文件"
+          if [ "${CHANGED}" -eq 0 ] && ! grep -q '^CONFIG_VERSION_REPO=' .config 2>/dev/null; then
+            echo "::warning::没有找到任何可修改的运行时包源配置，请把上面的候选文件列表发我"
+          fi
 
       - name: Check APK package mirror
         # 检测是否已修改成功，是否为：https://mirror.nju.edu.cn/openwrt
@@ -244,26 +294,24 @@ jobs:
         run: |
           set -euxo pipefail
           SOURCE_DIR="${WORKSPACE}/src"
-          APK_MIRROR="https://mirror.nju.edu.cn/openwrt"
-          FILE="${SOURCE_DIR}/package/emortal/default-settings/files/99-default-settings-chinese"
-
-          if [ ! -f "${FILE}" ]; then
-            echo "WARNING: 未找到 ${FILE}，跳过检查"
-            exit 0
-          fi
-
-          if grep -q "${APK_MIRROR}" "${FILE}"; then
-            echo "OK: 已指向 ${APK_MIRROR}"
-          else
-            echo "ERROR: 镜像没被替换成功！文件里与 http 相关的行："
-            grep -n 'http' "${FILE}" || true
-            echo "       请核对 sed 的匹配模式是否与你源码里的 URL 形式一致"
-            exit 1
-          fi
-
-          echo ">>> 全仓库搜索 apk_mirror（供排查）:"
           cd "${SOURCE_DIR}"
-          grep -Rni 'apk_mirror' package --exclude-dir=.git || true
+
+          echo ">>> .config 里的仓库地址:"
+          grep -E '^CONFIG_VERSION_REPO=' .config || echo "    (无)"
+
+          echo ">>> 源码里仍引用官方下载站的文件（带行号）:"
+          grep -rnE 'https?://downloads\.(openwrt|immortalwrt)\.org' package \
+               --exclude-dir=.git 2>/dev/null | sed -n '1,40p' || true
+
+          echo ">>> apk/opkg 关键字（排查第二处生成点）:"
+          grep -rnE 'apk_mirror|/etc/apk/repositories|distfeeds' package \
+               --exclude-dir=.git 2>/dev/null | sed -n '1,40p' || true
+
+          echo ">>> 已替换结果抽查（default-settings）:"
+          for f in $(find package -maxdepth 7 -type f -path '*/default-settings/files/*' 2>/dev/null | sort); do
+            echo "--- $f"
+            grep -nE 'https?://' "$f" || true
+          done
 
       - name: Prepare Base Configuration
         shell: bash
