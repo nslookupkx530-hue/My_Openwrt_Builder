@@ -29,7 +29,6 @@ mkdir -p "$(dirname "$OUT_FILE")"
 
 # ------------------------------------------------------------ 映射表
 # 格式：  "开关名|选项1 选项2 选项3"
-# 注意：这里是 .config 里的真实符号（去掉 CONFIG_ 前缀）
 PLUGIN_MAP=(
     "ENABLE_ARGON|luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn"
     "ENABLE_DISKMAN|luci-app-diskman luci-i18n-diskman-zh-cn"
