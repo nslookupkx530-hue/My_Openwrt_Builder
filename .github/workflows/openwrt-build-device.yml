@@ -404,6 +404,64 @@ jobs:
             echo "       请检查是否有其它选项依赖它"; exit 1; }
           echo ">>> 插件注入校验通过"
 
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+
+          DATE_UTC="$(date -u +%F)"
+          TAG="${TARGET_DEVICE}-${DATE_UTC}-${{ github.run_id }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo ">>> tag=${TAG}"
+
+          # ---------- 构建信息（作为 Release 附件，方便回溯）----------
+          {
+            echo "device      : ${TARGET_DEVICE}"
+            echo "source_type : ${SOURCE_TYPE}"
+            echo "version     : ${VERSION:-snapshot}"
+            echo "src_branch  : $(git rev-parse --abbrev-ref HEAD)"
+            echo "src_commit  : $(git rev-parse HEAD)"
+            echo "src_date    : $(git log -1 --format=%cd --date=iso)"
+            echo "build_time  : $(date -u '+%F %T UTC')"
+            echo "run_id      : ${{ github.run_id }}"
+            echo "config_md5  : $(md5sum .config | cut -d' ' -f1)"
+          } > "${WORKSPACE}/BUILDINFO.txt"
+
+          # ---------- Release 正文 ----------
+          {
+            echo "OpenWrt automated build release"
+            echo
+            echo "Device:"
+            echo
+            echo "${TARGET_DEVICE}"
+            echo "${SOURCE_TYPE} ${VERSION:-snapshot}"
+            echo
+            echo "Run ID:"
+            echo
+            echo "${{ github.run_id }}"
+            echo
+            echo "LuCI package list"
+            echo
+            echo "${TARGET_DEVICE}"
+            echo
+            # 官方 LuCI 包（含 _INCLUDE_* 子项，和你截图里的样式一致）
+            grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
+              | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort | sed 's/^/- /' || true
+            # plugins.cfg 额外启用的非 LuCI 包（例如 irqbalance、sqm-scripts）
+            if [ -f tmp/injected-plugins.txt ]; then
+              grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt \
+                | sed 's/^CONFIG_PACKAGE_//' | sort | sed 's/^/- /' || true
+            fi
+            echo
+            echo "Third-Party package list"
+            echo
+            printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
+          } > "${WORKSPACE}/release-notes.md"
+
+          echo ">>> release-notes.md 预览:"
+          cat "${WORKSPACE}/release-notes.md"
 
       - name: Generate build info
         shell: bash
@@ -505,11 +563,11 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.target_device }}-${{ github.event.inputs.source_type }}-run${{ github.run_number }}
-          name: ${{ github.event.inputs.target_device }} / ${{ github.event.inputs.source_type }} / #${{ github.run_number }}
-          body_path: release-notes.md          # ← 新增
+          tag_name: ${{ steps.notes.outputs.tag }}      # ← 形如 x86-2026-09-23-35429357989
+          name: ${{ steps.notes.outputs.tag }}          # 标题同一个（截图里标题=tag）
+          body_path: release-notes.md                   # ← 正文用上面生成的文件
           files: |
-            BUILDINFO.txt                      # ← 新增
+            BUILDINFO.txt
             src/bin/targets/*/*/*.bin
             src/bin/targets/*/*/*.img.gz
             src/bin/targets/*/*/*.itb
