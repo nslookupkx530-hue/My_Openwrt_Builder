@@ -241,6 +241,14 @@ jobs:
           echo "=== STEP 2: inject_plugins.sh ==="
           bash ../shell/inject_plugins.sh
 
+          echo "=== STEP 3: trim_config.sh ==="
+          bash ../shell/trim_config.sh
+
+          echo "=== STEP 4: 汇总 ==="
+          echo "Source Type: ${SOURCE_TYPE}"
+          echo "Target Device: ${TARGET_DEVICE}"
+          echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
+
       - name: Apply custom files (common + device)
         shell: bash
         run: |
@@ -350,14 +358,14 @@ jobs:
           echo ">>> init 服务链接:"
           ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
 
-      - name: Finalize Configuration (defconfig + 校验注入存活)
+      - name: Finalize Configuration (defconfig + 校验注入)
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
           make defconfig
 
-          echo ">>> 校验插件注入结果"
+          echo ">>> 校验插件注入结果（必须仍为 y）"
           MISSING_OPT=""
           if [ -f tmp/injected-plugins.txt ]; then
             while read -r opt; do
@@ -370,18 +378,32 @@ jobs:
               fi
             done < tmp/injected-plugins.txt
           else
-            echo "WARNING: 未找到 tmp/injected-plugins.txt（inject_plugins.sh 可能没生效）"
+            echo "WARNING: 未找到 tmp/injected-plugins.txt"
+          fi
+
+          echo ">>> 校验关闭项（必须仍为 n / 不存在）"
+          BACK_ON=""
+          if [ -f tmp/trimmed-options.txt ]; then
+            while read -r opt; do
+              [ -n "${opt}" ] || continue
+              if grep -q "^${opt}=y" .config; then
+                echo "  WARN ${opt} 又被打开了"
+                BACK_ON="${BACK_ON} ${opt}"
+              else
+                echo "  OK   ${opt} 已关闭"
+              fi
+            done < tmp/trimmed-options.txt
           fi
 
           echo ">>> 已启用包数量: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
-          echo ">>> 当前 device profile:"
-          grep -E '^CONFIG_TARGET_.*_DEVICE_.*=y$|^CONFIG_TARGET_PROFILE=' .config || true
 
           [ -z "${MISSING_OPT}" ] || {
-            echo "ERROR: 以下插件在 defconfig 后没有保留，固件里不会包含它们:${MISSING_OPT}"
-            echo "       常见原因：选项名写错 / 依赖在 feeds 里不存在 / 与其它选项冲突"
-            exit 1; }
+            echo "ERROR: 以下插件没有被保留，固件里不会有它们:${MISSING_OPT}"; exit 1; }
+          [ -z "${BACK_ON}" ] || {
+            echo "ERROR: 以下选项被 defconfig 重新打开，编译会再次失败:${BACK_ON}"
+            echo "       请检查是否有其它选项依赖它"; exit 1; }
           echo ">>> 插件注入校验通过"
+
 
       - name: Generate build info
         shell: bash
