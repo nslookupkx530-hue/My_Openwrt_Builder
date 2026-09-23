@@ -21,17 +21,31 @@ CONFIG_FILE=".config"
 
 # ------------------------------------------------------------------
 # 关闭列表
-#   CONFIG_PACKAGE_kselftests-bpf  ← 本次构建就是死在它上面；内核 BPF 自测集，
-#                                    依赖内核 BTF/调试信息，固件用不到
-#   CONFIG_PACKAGE_kselftests-net  ← 同族，一并关掉（源码里若不存在会自动跳过）
-#
-#   以下两个本次没报错，先留着（需要时取消注释加进列表）：
-#   CONFIG_PACKAGE_perf            ← 内核性能剖析，体积大、需要调试信息
-#   CONFIG_PACKAGE_bpftool         ← 只有要玩 eBPF 才需要
+#   CONFIG_PACKAGE_kselftests-bpf  ← 内核 BPF 自测集，依赖内核 BTF/调试信息，用不到
+#   CONFIG_PACKAGE_kselftests-net  ← 同族（源码里没有会自动跳过）
+#   CONFIG_PACKAGE_perf            ← 需要时再放开
+#   CONFIG_PACKAGE_bpftool
 # ------------------------------------------------------------------
 TRIM_OPTS="
 CONFIG_PACKAGE_kselftests-bpf
 CONFIG_PACKAGE_kselftests-net
+"
+
+# ------------------------------------------------------------------
+# 必须打开的选项
+#   CONFIG_PACKAGE_ip-full  ← 第三方包 quickstart（网络向导后端）要求 ip-full
+#     官方基线装的是 ip-tiny，两者 CONFLICTS，不换掉就永远装不上 quickstart
+# ------------------------------------------------------------------
+FORCE_ON_OPTS="
+CONFIG_PACKAGE_ip-full
+"
+
+# ------------------------------------------------------------------
+# 必须关闭的选项（与上面互斥）
+#   CONFIG_PACKAGE_ip-tiny
+# ------------------------------------------------------------------
+FORCE_OFF_OPTS="
+CONFIG_PACKAGE_ip-tiny
 "
 
 symbol_exists() {
@@ -40,16 +54,22 @@ symbol_exists() {
     grep -qE "^[[:space:]]*config ${sym}$" tmp/.config-*.in 2>/dev/null
 }
 
-set_opt_off() {   # 先删干净所有写法，再写唯一一行
+set_opt_on() {
+    sed -i "/^$1=/d; /^# $1 is not set$/d" "$CONFIG_FILE"
+    echo "$1=y" >> "$CONFIG_FILE"
+}
+
+set_opt_off() {
     sed -i "/^$1=/d; /^# $1 is not set$/d" "$CONFIG_FILE"
     echo "# $1 is not set" >> "$CONFIG_FILE"
 }
 
 mkdir -p tmp
 : > tmp/trimmed-options.txt
+: > tmp/injected-plugins.txt
 
-COUNT=0
-for opt in ${TRIM_OPTS}; do
+# ---------- 关闭 ----------
+for opt in ${TRIM_OPTS} ${FORCE_OFF_OPTS}; do
     if ! symbol_exists "${opt}"; then
         echo "  skip ${opt}（当前源码里没有这个选项）"
         continue
@@ -61,7 +81,17 @@ for opt in ${TRIM_OPTS}; do
     fi
     set_opt_off "${opt}"
     echo "${opt}" >> tmp/trimmed-options.txt
-    COUNT=$((COUNT + 1))
 done
 
-echo ">>> trim_config 完成，共处理 ${COUNT} 个选项"
+# ---------- 打开 ----------
+for opt in ${FORCE_ON_OPTS}; do
+    if ! symbol_exists "${opt}"; then
+        echo "WARNING: ${opt} 在当前源码中不存在，跳过"
+        continue
+    fi
+    echo "  on   ${opt}"
+    set_opt_on "${opt}"
+    echo "${opt}" >> tmp/injected-plugins.txt
+done
+
+echo ">>> trim_config 完成：关闭 $(wc -l < tmp/trimmed-options.txt) 项，打开 $(wc -l < tmp/injected-plugins.txt) 项"
