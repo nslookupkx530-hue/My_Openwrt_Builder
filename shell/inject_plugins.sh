@@ -10,7 +10,6 @@
 set -euxo pipefail
 
 CONFIG_FILE=".config"
-# 开关文件在 configs/ 根目录（不是 configs/<SOURCE_TYPE>/ 下）
 PLUGIN_CFG="../configs/plugins.cfg"
 STRICT_SYMBOL_CHECK="${STRICT_SYMBOL_CHECK:-0}"
 
@@ -19,14 +18,14 @@ STRICT_SYMBOL_CHECK="${STRICT_SYMBOL_CHECK:-0}"
 
 # 开关 → 选项 映射表
 plugins=(
-    "ENABLE_ARGON|CONFIG_PACKAGE_luci-theme-argon"
-    "ENABLE_DISKMAN|CONFIG_PACKAGE_luci-app-diskman"
-    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_irqbalance"
-    "ENABLE_FILEBROWSER_GO|CONFIG_PACKAGE_luci-app-filebrowser-go"
-    "ENABLE_SQM|CONFIG_PACKAGE_sqm-scripts"
-    "ENABLE_TTYD|CONFIG_PACKAGE_luci-app-ttyd"
-    "ENABLE_AUTOREBOOT|CONFIG_PACKAGE_luci-app-autoreboot"
-    "ENABLE_DOCKER|CONFIG_PACKAGE_docker"
+    "ENABLE_ARGON|CONFIG_PACKAGE_luci-theme-argon CONFIG_PACKAGE_luci-app-argon-config CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn"
+    "ENABLE_DISKMAN|CONFIG_PACKAGE_luci-app-diskman CONFIG_PACKAGE_luci-i18n-diskman-zh-cn"
+    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_irqbalance CONFIG_PACKAGE_luci-app-irqbalance CONFIG_PACKAGE_luci-i18n-irqbalance-zh-cn"
+    "ENABLE_FILEBROWSER_GO|CONFIG_PACKAGE_luci-app-filebrowser-go CONFIG_PACKAGE_luci-i18n-filebrowser-go-zh-cn"
+    "ENABLE_SQM|CONFIG_PACKAGE_luci-app-sqm CONFIG_PACKAGE_luci-i18n-sqm-zh-cn"
+    "ENABLE_TTYD|CONFIG_PACKAGE_luci-app-ttyd CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn"
+    "ENABLE_AUTOREBOOT|CONFIG_PACKAGE_luci-app-autoreboot CONFIG_PACKAGE_luci-i18n-autoreboot-zh-cn"
+    "ENABLE_DOCKER|CONFIG_PACKAGE_docker CONFIG_PACKAGE_luci-app-dockerman CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn"
 )
 
 get_switch() {   # 取最后一次定义，忽略注释与空格
@@ -53,7 +52,7 @@ mkdir -p tmp
 
 TOTAL=0; ENABLED=0; UNKNOWN=""
 for entry in "${plugins[@]}"; do
-    IFS="|" read -r var_name config_opt <<< "$entry"
+    IFS="|" read -r var_name opt_list <<< "$entry"
     enable_val="$(get_switch "$var_name" || true)"
     TOTAL=$((TOTAL + 1))
 
@@ -63,22 +62,24 @@ for entry in "${plugins[@]}"; do
         echo "ERROR: ${var_name}=${enable_val} 非法（只允许 0 或 1）"; exit 1
     fi
 
-    if [ "$enable_val" = "1" ]; then
-        if ! symbol_exists "$config_opt"; then
-            echo "WARNING: ${config_opt} 在当前源码中不存在，注入无效（请核对选项名）"
-            UNKNOWN="$UNKNOWN ${config_opt}"
-            [ "$STRICT_SYMBOL_CHECK" = "1" ] && exit 1
+    for config_opt in ${opt_list}; do
+        if [ "$enable_val" = "1" ]; then
+            if ! symbol_exists "$config_opt"; then
+                echo "WARNING: ${config_opt} 在当前源码中不存在，注入无效（请核对选项名）"
+                UNKNOWN="$UNKNOWN ${config_opt}"
+                [ "$STRICT_SYMBOL_CHECK" = "1" ] && exit 1
+            fi
+            set_opt "$config_opt" y
+            echo "$config_opt" >> tmp/injected-plugins.txt
+            ENABLED=$((ENABLED + 1))
+        else
+            set_opt "$config_opt" n
         fi
-        set_opt "$config_opt" y
-        echo "$config_opt" >> tmp/injected-plugins.txt
-        ENABLED=$((ENABLED + 1))
-    else
-        set_opt "$config_opt" n
-    fi
+    done
 done
 
 # 反向校验：cfg 里有、映射表里没有的开关
-# ⚠ 这里必须用 [:blank:]（只删空格/Tab）；用 [:space:] 会把换行也删掉，导致所有名字被拼成一个
+# ⚠ 必须用 [:blank:]（[:space:] 会把换行也删掉，导致名字被拼成一串）
 MAPPED_NAMES="$(printf '%s\n' "${plugins[@]}" | cut -d'|' -f1)"
 for v in $(sed -e 's/#.*//' "$PLUGIN_CFG" \
            | grep -oE '^[[:space:]]*ENABLE_[A-Z0-9_]+' | tr -d '[:blank:]'); do
@@ -86,5 +87,5 @@ for v in $(sed -e 's/#.*//' "$PLUGIN_CFG" \
         echo "WARNING: ${v} 在 ${PLUGIN_CFG} 中定义，但脚本映射表里没有，将被忽略"
 done
 
-echo "Plugin injection done: ${ENABLED}/${TOTAL} enabled"
+echo "Plugin injection done: ${ENABLED} 个选项已启用（来自 ${TOTAL} 个开关）"
 [ -z "$UNKNOWN" ] || echo "WARNING: 以下选项在源码中不存在:${UNKNOWN}"
