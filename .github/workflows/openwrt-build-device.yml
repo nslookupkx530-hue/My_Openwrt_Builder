@@ -72,30 +72,45 @@ jobs:
           set -euxo pipefail
           FAIL=0
 
-          check() {                       # 不存在 = 本次构建用不到，直接跳过（不报噪音）
+          # 用"最终执行它的解释器"检查，绝不能用 `bash -n || sh -n`（那样会互相掩盖）
+          check_bash() {
               [ -f "$1" ] || return 0
-              if bash -n "$1" 2>/dev/null || sh -n "$1" 2>/dev/null; then
-                  echo "OK   $1"
+              if grep -q $'\r' "$1"; then
+                  echo "FAIL $1 含 CRLF 换行（请转成 LF）"; FAIL=1; return 0
+              fi
+              if bash -n "$1" 2>&1; then
+                  echo "OK(bash) $1"
               else
-                  echo "FAIL $1"
-                  FAIL=1
+                  echo "FAIL(bash) $1"; FAIL=1
               fi
           }
 
-          # 1) 公共脚本
-          for f in shell/*.sh; do check "$f"; done
-          check "Third-Party/third-party.config"
+          check_sh() {
+              [ -f "$1" ] || return 0
+              if grep -q $'\r' "$1"; then
+                  echo "FAIL $1 含 CRLF 换行（请转成 LF）"; FAIL=1; return 0
+              fi
+              if sh -n "$1" 2>&1; then
+                  echo "OK(sh)   $1"
+              else
+                  echo "FAIL(sh) $1"; FAIL=1
+              fi
+          }
 
-          # 2) 本次设备专属（${TARGET_DEVICE} 来自 job env）
-          for f in "files/${TARGET_DEVICE:-x86}/etc/uci-defaults/"*; do check "$f"; done
+          # 1) 公共脚本（用 bash 执行）
+          for f in shell/*.sh; do check_bash "$f"; done
+          check_bash "Third-Party/third-party.config"
 
-          # 3) 公共 overlay 里的首启脚本（在哪个路径就查哪个）
-          check "files/etc/init.d/apk-install"
-          check "files/etc/ithird-party/install_third_party_apk.sh"
-          check "files/etc/third-party/install_third_party_apk.sh"
+          # 2) 设备层 uci-defaults（用 sh 执行）
+          for f in "files/${TARGET_DEVICE:-x86}/etc/uci-defaults/"*; do check_sh "$f"; done
 
-          # 4) 公共 overlay 的 uci-defaults（98-drop-kmods-repo 等）
-          for f in files/etc/uci-defaults/*; do check "$f"; done
+          # 3) 公共层 uci-defaults 与 init.d（用 sh 执行）
+          for f in files/etc/uci-defaults/*; do check_sh "$f"; done
+          for f in files/etc/init.d/*; do check_sh "$f"; done
+
+          # 4) 第三方安装脚本（设备上由 busybox ash 跑）
+          check_sh "files/etc/third-party/install_third_party_apk.sh"
+          check_sh "files/etc/ithird-party/install_third_party_apk.sh"
 
           [ "$FAIL" = "0" ] || { echo "存在语法错误，请先修复"; exit 1; }
 
