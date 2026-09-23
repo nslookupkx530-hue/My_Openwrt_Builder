@@ -14,10 +14,10 @@
 #
 # 注意：只关"用不到 + 易失败"的；base-files / busybox / libc 这类基础包不要动。
 # ==============================================================================
-set -euxo pipefail
+set -euo pipefail
 
-CONFIG_FILE=".config"
-[ -f "$CONFIG_FILE" ] || { echo "ERROR: 找不到 .config"; exit 1; }
+CONFIG_FILE="${CONFIG_FILE:-.config}"
+OUT_FILE="${OUT_FILE:-tmp/trimmed-options.txt}"
 
 # ------------------------------------------------------------------
 # 关闭列表
@@ -26,9 +26,9 @@ CONFIG_FILE=".config"
 #   CONFIG_PACKAGE_perf            ← 需要时再放开
 #   CONFIG_PACKAGE_bpftool
 # ------------------------------------------------------------------
-TRIM_OPTS="
-CONFIG_PACKAGE_kselftests-bpf
-CONFIG_PACKAGE_kselftests-net
+TRIM_OPTS=(
+    "CONFIG_PACKAGE_kselftests-bpf"
+    "CONFIG_PACKAGE_kselftests-net"
 "
 
 # ------------------------------------------------------------------
@@ -36,62 +36,44 @@ CONFIG_PACKAGE_kselftests-net
 #   CONFIG_PACKAGE_ip-full  ← 第三方包 quickstart（网络向导后端）要求 ip-full
 #     官方基线装的是 ip-tiny，两者 CONFLICTS，不换掉就永远装不上 quickstart
 # ------------------------------------------------------------------
-FORCE_ON_OPTS="
-CONFIG_PACKAGE_ip-full
-"
+FORCE_ON_OPTS=(
+    "CONFIG_PACKAGE_ip-full"
+)
 
 # ------------------------------------------------------------------
 # 必须关闭的选项（与上面互斥）
 #   CONFIG_PACKAGE_ip-tiny
 # ------------------------------------------------------------------
-FORCE_OFF_OPTS="
-CONFIG_PACKAGE_ip-tiny
-"
+FORCE_OFF_OPTS=(
+    "CONFIG_PACKAGE_ip-tiny"
+)
 
-symbol_exists() {
-    local sym="${1#CONFIG_}"
-    ls tmp/.config-*.in >/dev/null 2>&1 || return 0
-    grep -qE "^[[:space:]]*config ${sym}$" tmp/.config-*.in 2>/dev/null
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: 找不到 ${CONFIG_FILE}（本脚本必须在 src/ 下执行）" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$OUT_FILE")"
+: > "$OUT_FILE"
+
+set_off() {
+    local sym="$1"
+    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "$CONFIG_FILE"
+    printf '# %s is not set\n' "$sym" >> "$CONFIG_FILE"
+    printf '# %s is not set\n' "$sym" >> "$OUT_FILE"
 }
 
-set_opt_on() {
-    sed -i "/^$1=/d; /^# $1 is not set$/d" "$CONFIG_FILE"
-    echo "$1=y" >> "$CONFIG_FILE"
+set_on() {
+    local sym="$1"
+    sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" "$CONFIG_FILE"
+    printf '%s=y\n' "$sym" >> "$CONFIG_FILE"
+    printf '%s=y\n' "$sym" >> "$OUT_FILE"
 }
 
-set_opt_off() {
-    sed -i "/^$1=/d; /^# $1 is not set$/d" "$CONFIG_FILE"
-    echo "# $1 is not set" >> "$CONFIG_FILE"
-}
+echo ">>> trim_config.sh"
+for s in "${TRIM_OPTS[@]}";      do echo ">>> 关闭 ${s}"; set_off "$s"; done
+for s in "${FORCE_OFF_OPTS[@]}"; do echo ">>> 关闭 ${s}"; set_off "$s"; done
+for s in "${FORCE_ON_OPTS[@]}";  do echo ">>> 开启 ${s}"; set_on  "$s"; done
 
-mkdir -p tmp
-: > tmp/trimmed-options.txt
-: > tmp/injected-plugins.txt
-
-# ---------- 关闭 ----------
-for opt in ${TRIM_OPTS} ${FORCE_OFF_OPTS}; do
-    if ! symbol_exists "${opt}"; then
-        echo "  skip ${opt}（当前源码里没有这个选项）"
-        continue
-    fi
-    if grep -q "^${opt}=y" "$CONFIG_FILE"; then
-        echo "  off  ${opt}（原本为 y，已关闭）"
-    else
-        echo "  off  ${opt}（原本就不是 y）"
-    fi
-    set_opt_off "${opt}"
-    echo "${opt}" >> tmp/trimmed-options.txt
-done
-
-# ---------- 打开 ----------
-for opt in ${FORCE_ON_OPTS}; do
-    if ! symbol_exists "${opt}"; then
-        echo "WARNING: ${opt} 在当前源码中不存在，跳过"
-        continue
-    fi
-    echo "  on   ${opt}"
-    set_opt_on "${opt}"
-    echo "${opt}" >> tmp/injected-plugins.txt
-done
-
-echo ">>> trim_config 完成：关闭 $(wc -l < tmp/trimmed-options.txt) 项，打开 $(wc -l < tmp/injected-plugins.txt) 项"
+echo ">>> 本次改动:"
+sed 's/^/      /' "$OUT_FILE"
