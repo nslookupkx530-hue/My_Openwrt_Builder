@@ -256,12 +256,15 @@ jobs:
           TARGET_PATH="${LINE#*=}"; TARGET_PATH="${TARGET_PATH%%|*}"
           TARGET_PATH="$(printf '%s' "${TARGET_PATH}" | tr -d '[:space:]')"
           TARGET_PATH="${TARGET_PATH%/}"
+          TARGET_PATH="${TARGET_PATH#targets/}"   # ← 映射表存的就是 targets/x86/64，去掉前缀，下面统一加回来
           case "${TARGET_PATH}" in
             ""|*/-) echo "ERROR: ${TARGET_DEVICE} 的 target 路径不合法: '${TARGET_PATH}'"; exit 1 ;;
           esac
 
           if [ -n "${VERSION}" ]; then REL_DIR="releases/${VERSION}"; else REL_DIR="snapshots"; fi
           RELEASE_BASE="${MIRROR}/${REL_DIR}/targets/${TARGET_PATH}"
+          echo ">>> TARGET_PATH=${TARGET_PATH}  REL_DIR=${REL_DIR}"
+          echo ">>> RELEASE_BASE=${RELEASE_BASE}"
 
           {
             echo "MIRROR=${MIRROR}"
@@ -366,37 +369,54 @@ jobs:
                package/base-files/Makefile package/system/apk/Makefile 2>/dev/null || true
 
           # ---- 2) 远端真探活 ----
+          # 说明：distfeeds.list 由若干"feed 目录"组成，任何一个 404 都会让整个 apk 事务失败。
+          #       这里按目录探活（200/403 都算存在；403 = 目录在但禁止列目录），
+          #       比猜具体的索引文件名更可靠。
           proberc=0
-          probe() {
-            url="$1"; label="$2"
+          probe() {                       # $1=url  $2=label  $3=dir（可选）
+            url="$1"; label="$2"; want="${3:-200}"
             code="$(curl -s -o /dev/null -w '%{http_code}' -L --retry 3 --max-time 60 "${url}" || echo 000)"
-            if [ "${code}" = "200" ]; then
-              echo "OK   [${code}] ${label}: ${url}"
+            if [ "${want}" = "dir" ]; then
+              case "${code}" in
+                200|403) echo "OK   [${code}] ${label}: ${url}" ;;
+                *)       echo "FAIL [${code}] ${label}: ${url}"; proberc=1 ;;
+              esac
             else
-              echo "FAIL [${code}] ${label}: ${url}"
-              proberc=1
+              if [ "${code}" = "${want}" ]; then
+                echo "OK   [${code}] ${label}: ${url}"
+              else
+                echo "FAIL [${code}] ${label}: ${url}"
+                proberc=1
+              fi
             fi
           }
 
           ARCH_PACKAGES="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           echo ">>> CONFIG_TARGET_ARCH_PACKAGES=${ARCH_PACKAGES:-<none>}"
 
-          probe "${RELEASE_BASE}/config.buildinfo"      "target 基线 buildinfo"
-          probe "${RELEASE_BASE}/packages/packages.adb" "target 包索引"
+          # 基线（prepare_base_config.sh 用的就是这个文件），必须真存在
+          probe "${RELEASE_BASE}/config.buildinfo" "target 基线 buildinfo"
+
+          # distfeeds.list 里的 feed 目录（存在即通过）
+          probe "${RELEASE_BASE}/packages" "target core feed" dir
           if [ -n "${ARCH_PACKAGES}" ]; then
-            probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/packages.adb" \
-                  "核心包索引 (${ARCH_PACKAGES})"
+            for feed in base luci packages routing telephony; do
+              probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/${feed}" \
+                    "arch feed ${ARCH_PACKAGES}/${feed}" dir
+            done
           fi
 
+          # kmods：先确认目录在，再拿目录名校验它的索引文件
+          probe "${RELEASE_BASE}/kmods" "kmods 目录" dir
           KMODS_LIST="$(curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" 2>/dev/null || true)"
           KMODS_DIR="$(printf '%s\n' "${KMODS_LIST}" \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[0-9a-f]{32,}' | sort -u | tail -n1 || true)"
           if [ -n "${KMODS_DIR}" ]; then
-            probe "${RELEASE_BASE}/kmods/${KMODS_DIR}/packages.adb" "kmods (${KMODS_DIR})"
+            probe "${RELEASE_BASE}/kmods/${KMODS_DIR}/packages.adb" "kmods 索引 (${KMODS_DIR})"
             echo "KMODS_DIR=${KMODS_DIR}" >> "$GITHUB_ENV"
             echo ">>> 镜像内核 = ${KMODS_DIR%%-*}；设备 uname -r 应与此一致，否则 98-drop-kmods-repo 会删掉该源"
           else
-            echo "::warning::未能从 ${RELEASE_BASE}/kmods/ 解析内核目录，跳过 kmods 探活"
+            echo "::warning::未能从 ${RELEASE_BASE}/kmods/ 解析内核目录（空列表或未开启目录索引），跳过 kmods 索引探活"
           fi
 
           [ "${proberc}" = "0" ] || {
