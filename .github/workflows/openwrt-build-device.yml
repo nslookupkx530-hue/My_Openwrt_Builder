@@ -423,9 +423,11 @@ jobs:
 
           # kmods：先确认目录在，再拿目录名校验它的索引文件
           probe "${RELEASE_BASE}/kmods" "kmods 目录" dir
-          KMODS_LIST="$(curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" 2>/dev/null || true)"
-          KMODS_DIR="$(printf '%s\n' "${KMODS_LIST}" \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[0-9a-f]{32,}' | sort -u | tail -n1 || true)"
+                    KMODS_INDEX="/tmp/kmods-index.html"
+          curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" \
+            -o "${KMODS_INDEX}" 2>/dev/null || true
+          KMODS_DIR="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[0-9a-f]{32,}' "${KMODS_INDEX}" 2>/dev/null \
+            | sort -u | tail -n1 || true)"
           if [ -n "${KMODS_DIR}" ]; then
             probe "${RELEASE_BASE}/kmods/${KMODS_DIR}/packages.adb" "kmods 索引 (${KMODS_DIR})"
             echo "KMODS_DIR=${KMODS_DIR}" >> "$GITHUB_ENV"
@@ -652,12 +654,14 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo ">>> tag=${TAG}"
 
-          # ---------- 构建信息（作为 Release 附件，不放进正文）----------
+          # ========== 1) 构建信息（作为 Release 附件，不放进正文）==========
           {
             echo "device      : ${TARGET_DEVICE}"
             echo "source_type : ${SOURCE_TYPE}"
             echo "version     : ${VERSION:-snapshot}"
+            echo "source_ref  : ${SOURCE_REF:-<auto: 最新稳定版 tag>}"
             echo "src_branch  : $(git rev-parse --abbrev-ref HEAD)"
+            echo "src_describe: $(git describe --tags 2>/dev/null || echo '<无 tag>')"
             echo "src_commit  : $(git rev-parse HEAD)"
             echo "src_date    : $(git log -1 --format=%cd --date=iso)"
             echo "build_time  : $(date -u '+%F %T UTC')"
@@ -667,7 +671,27 @@ jobs:
             echo "config_md5  : $(md5sum .config | cut -d' ' -f1)"
           } > "${WORKSPACE}/BUILDINFO.txt"
 
-          # ---------- Release 正文 ----------
+          # ========== 2) 包清单（去重）==========
+          PLIST="$(mktemp)"
+
+          # 2.1 .config 里已启用的 luci* 包
+          #     必须排除 *_INCLUDE_*（Kconfig 子开关，不是包，例如
+          #     CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy），否则正文里会出现
+          #     看起来装了 passwall / rclone 的假条目
+          grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
+            | grep -v '_INCLUDE_' \
+            | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' >> "${PLIST}" || true
+
+          # 2.2 注入清单里的非 luci 项（如 irqbalance / smartdns）
+          if [ -f tmp/injected-plugins.txt ]; then
+            grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt \
+              | sed 's/^CONFIG_PACKAGE_//' >> "${PLIST}" || true
+          fi
+
+          sort -u "${PLIST}" -o "${PLIST}"
+          echo ">>> LuCI/插件条目数: $(wc -l < "${PLIST}")"
+
+          # ========== 3) Release 正文 ==========
           {
             echo "OpenWrt automated build release"
             echo
@@ -684,17 +708,14 @@ jobs:
             echo
             echo "${TARGET_DEVICE}"
             echo
-            grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
-              | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort | sed 's/^/- /' || true
-            if [ -f tmp/injected-plugins.txt ]; then
-              grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt \
-                | sed 's/^CONFIG_PACKAGE_//' | sort | sed 's/^/- /' || true
-            fi
+            sed 's/^/- /' "${PLIST}" || true
             echo
             echo "Third-Party package list"
             echo
             printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
           } > "${WORKSPACE}/release-notes.md"
+
+          rm -f "${PLIST}"
 
           echo ">>> release-notes.md 预览:"
           cat "${WORKSPACE}/release-notes.md"
