@@ -153,11 +153,11 @@ jobs:
               VERSION="${INPUT_VERSION}"
               CANDIDATES="v${VERSION} openwrt-$(printf '%s' "${VERSION}" | cut -d. -f1,2)"
           else
-              MODE="最新稳定版"
+              MODE="最新稳定版（tag 优先）"
               VERSION="$(latest_stable)"
               [ -n "${VERSION}" ] || { echo "ERROR: 无法识别最新稳定版本"; exit 1; }
               S="$(printf '%s' "${VERSION}" | cut -d. -f1,2)"
-              CANDIDATES="openwrt-${S} v${VERSION} v${VERSION}-immortalwrt"
+              CANDIDATES="v${VERSION} v${VERSION}-immortalwrt ${VERSION} openwrt-${S}"
           fi
 
           echo ">>> 模式: ${MODE}"
@@ -176,6 +176,7 @@ jobs:
 
           git -C src log -1 --format='>>> 源码: %H  %cd  %s' --date=iso
           echo ">>> 当前分支: $(git -C src rev-parse --abbrev-ref HEAD)"
+          echo ">>> git describe: $(git -C src describe --tags 2>/dev/null || echo '<无 tag>')"
 
           if [ -n "${VERSION}" ]; then
               echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
