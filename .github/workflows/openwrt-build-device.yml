@@ -215,6 +215,14 @@ jobs:
           done
           ./scripts/feeds install -a
 
+      - name: Prepare Base Configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          bash ../shell/prepare_base_config.sh "${SOURCE_TYPE}" "${TARGET_DEVICE}"
+          test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
+
       - name: Modify APK/OPKG mirror
         # 修改软件包地址
         shell: bash
@@ -223,69 +231,50 @@ jobs:
           SOURCE_DIR="${WORKSPACE}/src"
           cd "${SOURCE_DIR}"
 
-          MIRROR_OW="https://mirror.nju.edu.cn/openwrt"   # openwrt 源镜像
-          MIRROR_IW="${MIRROR_OW}"                        # immortalwrt 源镜像（默认同上；要单独指定就改这行）
+          # ↓↓↓ 要换镜像只改这一行 ↓↓↓
+          MIRROR="https://mirror.nju.edu.cn/openwrt"
 
-          echo ">>> source_type=${SOURCE_TYPE} version=${VERSION:-<auto>}"
-          echo ">>> openwrt 镜像     : ${MIRROR_OW}"
-          echo ">>> immortalwrt 镜像 : ${MIRROR_IW}"
+          echo ">>> source_type=${SOURCE_TYPE} version=${VERSION:-<auto>} mirror=${MIRROR}"
 
-          # ---------- 1) .config 里的版本仓库地址（保留 releases/snapshots 路径，只换主机）----------
-          if grep -q '^CONFIG_VERSION_REPO=' .config 2>/dev/null; then
-            OLD_LINE="$(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
-            OLD_PATH="$(printf '%s' "${OLD_LINE}" | sed -E 's#^CONFIG_VERSION_REPO="https?://[^/]+(/.*)"$#\1#')"
-            case "${OLD_LINE}" in
-              *immortalwrt*) NEW_MIRROR="${MIRROR_IW}" ;;
-              *)             NEW_MIRROR="${MIRROR_OW}" ;;
-            esac
-            echo ">>> 原 ${OLD_LINE}"
-            sed -i -E "s#^CONFIG_VERSION_REPO=.*#CONFIG_VERSION_REPO=\"${NEW_MIRROR}${OLD_PATH}\"#" .config
-            echo ">>> 新 $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+          if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
+            # ---------- immortalwrt：只改 apk_mirror 的"值" ----------
+            # 原理：该文件首启时用 $apk_mirror 替换 distfeeds.list 里的 downloads.immortalwrt.org
+            #      → 只需改第 30 行的值；第 37 行那条 sed 的"匹配模式"绝对不能动
+            F="package/emortal/default-settings/files/99-default-settings-chinese"
+            [ -f "${F}" ] || { echo "ERROR: 找不到 ${F}"; exit 1; }
+
+            echo ">>> 改前:"
+            grep -nE 'apk_mirror=|s,https?://' "${F}" || true
+
+            sed -i -E "s#^([[:space:]]*apk_mirror=)[\"'][^\"']*[\"']#\1\"${MIRROR}\"#" "${F}"
+
+            echo ">>> 改后:"
+            grep -nE 'apk_mirror=|s,https?://' "${F}" || true
+
+            grep -q "apk_mirror=\"${MIRROR}\"" "${F}" || { echo "ERROR: apk_mirror 未被替换"; exit 1; }
+            grep -q 's,https://downloads.immortalwrt.org,' "${F}" || {
+              echo "ERROR: 文件里的 sed 匹配模式被改坏了（应保持 downloads.immortalwrt.org）"; exit 1; }
+            echo ">>> immortalwrt 镜像设置完成"
+
           else
-            echo ">>> 本源码没有 CONFIG_VERSION_REPO"
-          fi
+            # ---------- openwrt：改 .config 的 CONFIG_VERSION_REPO（保留 releases/snapshots 路径）----------
+            [ -f .config ] || { echo "ERROR: 找不到 .config（这一步必须放在 Prepare Base Configuration 之后）"; exit 1; }
 
-          # ---------- 2) 组装候选文件列表（只碰"最终进 rootfs 的 /etc 配置"，不碰 Makefile）----------
-          FILES="$(
-            {
-              find package -maxdepth 7 -type f \( \
-                  -path '*/default-settings/files/*' \
-                  -o -path '*/etc/apk/repositories*' \
-                  -o -path '*/etc/opkg/*.conf' \) 2>/dev/null
-              grep -rlE 'https?://downloads\.(openwrt|immortalwrt)\.org' package \
-                  --exclude-dir=.git 2>/dev/null | grep -E '/(files/)?etc/' || true
-            } | sort -u
-          )"
-
-          echo ">>> 候选文件:"
-          printf '%s\n' "${FILES}" | sed '/^$/d' | sed 's/^/    /'
-
-          # ---------- 3) 逐个替换 + 就地断言 ----------
-          CHANGED=0
-          for f in ${FILES}; do
-            BEFORE="$(grep -nE 'https?://' "$f" || true)"
-            sed -i -E \
-              -e "s#https?://downloads\.openwrt\.org#${MIRROR_OW}#g" \
-              -e "s#https?://downloads\.immortalwrt\.org#${MIRROR_IW}#g" \
-              -e "s#https?://[^\"'[:space:]]+/openwrt#${MIRROR_OW}#g" \
-              -e "s#https?://[^\"'[:space:]]+/immortalwrt#${MIRROR_IW}#g" \
-              "$f"
-            AFTER="$(grep -nE 'https?://' "$f" || true)"
-            if [ "${BEFORE}" != "${AFTER}" ]; then
-              echo ">>> 已修改: $f"
-              echo "    改前: ${BEFORE}"
-              echo "    改后: ${AFTER}"
-              CHANGED=$((CHANGED + 1))
+            if grep -q '^CONFIG_VERSION_REPO=' .config; then
+              OLD_LINE="$(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+              OLD_PATH="$(printf '%s' "${OLD_LINE}" | sed -E 's#^CONFIG_VERSION_REPO="https?://[^/]+(/.*)"$#\1#')"
+              echo ">>> 原: ${OLD_LINE}"
+              sed -i -E "s#^CONFIG_VERSION_REPO=.*#CONFIG_VERSION_REPO=\"${MIRROR}${OLD_PATH}\"#" .config
+              echo ">>> 新: $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
+            else
+              # 兜底：.config 没有该符号 → 改 kconfig 默认值（影响构建期生成的 distfeeds.list）
+              echo ">>> .config 无 CONFIG_VERSION_REPO，改 image-config.in 的默认值兜底"
+              F="package/base-files/image-config.in"
+              sed -i -E "s#(default \")https?://downloads\.(openwrt|immortalwrt)\.org#\1${MIRROR}#" "${F}"
+              grep -nE 'default "https?://' "${F}" | sed -n '1,3p' || true
+              grep -q "default \"${MIRROR}" "${F}" || { echo "ERROR: image-config.in 兜底也失败"; exit 1; }
             fi
-            if [ -n "$(grep -E 'https?://downloads\.(openwrt|immortalwrt)\.org' "$f" || true)" ]; then
-              echo "ERROR: $f 仍残留官方地址，匹配规则没覆盖到，请把这段日志发我"
-              exit 1
-            fi
-          done
-
-          echo ">>> 共修改 ${CHANGED} 个文件"
-          if [ "${CHANGED}" -eq 0 ] && ! grep -q '^CONFIG_VERSION_REPO=' .config 2>/dev/null; then
-            echo "::warning::没有找到任何可修改的运行时包源配置，请把上面的候选文件列表发我"
+            echo ">>> openwrt 镜像设置完成"
           fi
 
       - name: Check APK package mirror
@@ -295,31 +284,27 @@ jobs:
           set -euxo pipefail
           SOURCE_DIR="${WORKSPACE}/src"
           cd "${SOURCE_DIR}"
+          MIRROR="https://mirror.nju.edu.cn/openwrt"
+          FAIL=0
 
-          echo ">>> .config 里的仓库地址:"
-          grep -E '^CONFIG_VERSION_REPO=' .config || echo "    (无)"
+          if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
+            F="package/emortal/default-settings/files/99-default-settings-chinese"
+            echo ">>> ${F} 关键行:"
+            grep -nE 'apk_mirror=|distfeeds' "${F}" || FAIL=1
+            grep -q "apk_mirror=\"${MIRROR}\"" "${F}"      || { echo "ERROR: apk_mirror 不是 ${MIRROR}"; FAIL=1; }
+            grep -q 's,https://downloads.immortalwrt.org,' "${F}" || { echo "ERROR: sed 匹配模式被改坏"; FAIL=1; }
+          else
+            echo ">>> .config 的仓库地址:"
+            grep -E '^CONFIG_VERSION_REPO=' .config || FAIL=1
+            grep -qE "^CONFIG_VERSION_REPO=\"${MIRROR}" .config || { echo "ERROR: CONFIG_VERSION_REPO 未指向镜像"; FAIL=1; }
+          fi
 
-          echo ">>> 源码里仍引用官方下载站的文件（带行号）:"
-          grep -rnE 'https?://downloads\.(openwrt|immortalwrt)\.org' package \
-               --exclude-dir=.git 2>/dev/null | sed -n '1,40p' || true
+          echo ">>> 运行时源的生成位置（供排查）:"
+          grep -nE 'FeedSourcesAppendAPK|repositories\.d' \
+               package/base-files/Makefile package/system/apk/Makefile 2>/dev/null || true
 
-          echo ">>> apk/opkg 关键字（排查第二处生成点）:"
-          grep -rnE 'apk_mirror|/etc/apk/repositories|distfeeds' package \
-               --exclude-dir=.git 2>/dev/null | sed -n '1,40p' || true
-
-          echo ">>> 已替换结果抽查（default-settings）:"
-          for f in $(find package -maxdepth 7 -type f -path '*/default-settings/files/*' 2>/dev/null | sort); do
-            echo "--- $f"
-            grep -nE 'https?://' "$f" || true
-          done
-
-      - name: Prepare Base Configuration
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-          bash ../shell/prepare_base_config.sh "${SOURCE_TYPE}" "${TARGET_DEVICE}"
-          test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
+          [ "${FAIL}" = "0" ] || exit 1
+          echo ">>> 镜像检查通过"
 
       - name: Load Third-Party Config & Inject Plugins
         shell: bash
