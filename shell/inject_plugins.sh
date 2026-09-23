@@ -25,6 +25,7 @@ plugins=(
     "ENABLE_SQM|CONFIG_PACKAGE_luci-app-sqm CONFIG_PACKAGE_luci-i18n-sqm-zh-cn"
     "ENABLE_TTYD|CONFIG_PACKAGE_luci-app-ttyd CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn"
     "ENABLE_AUTOREBOOT|CONFIG_PACKAGE_luci-app-autoreboot CONFIG_PACKAGE_luci-i18n-autoreboot-zh-cn"
+    "ENABLE_IRQBALANCE|CONFIG_PACKAGE_smartdns CONFIG_PACKAGE_luci-app-smartdns CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn"
     "ENABLE_DOCKER|CONFIG_PACKAGE_docker CONFIG_PACKAGE_luci-app-dockerman CONFIG_PACKAGE_luci-i18n-dockerman-zh-cn"
 )
 
