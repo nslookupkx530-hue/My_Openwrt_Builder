@@ -412,11 +412,11 @@ jobs:
           cd "${WORKSPACE}/src"
 
           DATE_UTC="$(date -u +%F)"
-          TAG="${TARGET_DEVICE}-${DATE_UTC}-${{ github.run_id }}"
+          TAG="${TARGET_DEVICE}-${SOURCE_TYPE}-${DATE_UTC}-${{ github.run_id }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo ">>> tag=${TAG}"
 
-          # ---------- 构建信息（作为 Release 附件，方便回溯）----------
+          # ---------- 构建信息（作为 Release 附件，不放进正文）----------
           {
             echo "device      : ${TARGET_DEVICE}"
             echo "source_type : ${SOURCE_TYPE}"
@@ -446,10 +446,8 @@ jobs:
             echo
             echo "${TARGET_DEVICE}"
             echo
-            # 官方 LuCI 包（含 _INCLUDE_* 子项，和你截图里的样式一致）
             grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
               | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort | sed 's/^/- /' || true
-            # plugins.cfg 额外启用的非 LuCI 包（例如 irqbalance、sqm-scripts）
             if [ -f tmp/injected-plugins.txt ]; then
               grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt \
                 | sed 's/^CONFIG_PACKAGE_//' | sort | sed 's/^/- /' || true
@@ -481,7 +479,7 @@ jobs:
             echo "run_id      : ${{ github.run_id }}"
             echo "config_md5  : $(md5sum "${WORKSPACE}/src/.config" | cut -d' ' -f1)"
             echo '```'
-          } | tee "${WORKSPACE}/BUILDINFO.txt" > "${WORKSPACE}/release-notes.md"
+          } | tee "${WORKSPACE}/BUILDINFO.txt" 
           cat "${WORKSPACE}/BUILDINFO.txt"
 
       - name: Prepare build download
