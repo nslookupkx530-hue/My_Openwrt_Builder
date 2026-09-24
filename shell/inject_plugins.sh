@@ -38,6 +38,7 @@ PLUGIN_MAP=(
     "ENABLE_TTYD|luci-app-ttyd luci-i18n-ttyd-zh-cn"
     "ENABLE_AUTOREBOOT|luci-app-autoreboot luci-i18n-autoreboot-zh-cn"
     "ENABLE_SMARTDNS|smartdns luci-app-smartdns luci-i18n-smartdns-zh-cn"
+    "ENABLE_RAMFREE|luci-app-ramfree luci-i18n-ramfree-zh-cn"
     "ENABLE_DOCKER|docker luci-app-dockerman luci-i18n-dockerman-zh-cn"
 )
 
