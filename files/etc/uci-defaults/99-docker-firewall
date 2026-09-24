@@ -1,91 +1,93 @@
 #!/bin/sh
 # ============================================================
-#  99-docker-firewall
-#  作用：仅当系统里存在 Docker（dockerd）时，配置 docker 的防火墙
-#        zone / forwarding，让容器网段 172.16.0.0/12 的端口能穿过防火墙。
+#  99-docker-firewall   （uci-defaults，首启执行一次，成功后自动移除）
 #
-#  特点：
-#   - 幂等：先删掉旧的 docker zone 与所有引用 docker 的 forwarding，再重建
-#   - 全程用 uci 命令建 section（不用 cat >> 追加），避免与 uci 缓存打架
-#   - 未检测到 dockerd 时 exit 1 → uci-defaults 会【保留】本脚本，下次开机重试
-#     （这样"后装 docker"也能自动补上配置；docker 一直在时才 exit 0 被清理）
+#  作用：装了 Docker 的固件，自动放开 Docker 默认地址池 172.16.0.0/12
+#        的转发/访问，避免容器端口不通、容器出不了网。
+#
+#  进不进固件由构建期决定（ENABLE_DOCKER=1 才打包）；这里再做一次运行时检查兜底。
+#
+#  幂等：先删掉已有的 docker zone 和所有引用它的 forwarding，再追加新配置，
+#        重复执行不会累积重复条目。
 # ============================================================
 
-DOCKER_SUBNET='172.16.0.0/12'
+# ---------- 运行时兜底：没装 Docker 就直接退出 ----------
+if ! command -v dockerd >/dev/null 2>&1 && [ ! -x /etc/init.d/dockerd ]; then
+    logger -t docker-firewall "未检测到 Docker，跳过防火墙配置"
+    echo "未检测到 Docker，跳过防火墙配置。"
+    exit 0
+fi
 
-log() {
-    echo "[docker-fw] $*"
-    logger -t docker-fw "$*" 2>/dev/null || true
-}
+logger -t docker-firewall "检测到 Docker，开始配置防火墙规则"
+echo "检测到 Docker，正在配置防火墙规则..."
 
-if ! command -v dockerd >/dev/null 2>&1; then
-    log "未检测到 Docker，保留脚本，下次开机重试"
-    # 若你希望"首启没装 docker 就彻底放弃"（脚本会被删除），把下一行改成 exit 0
+FW_FILE="/etc/config/firewall"
+[ -f "$FW_FILE" ] || { logger -t docker-firewall "找不到 $FW_FILE"; exit 1; }
+
+# ---------- 1) 删掉旧的 docker zone ----------
+uci -q delete firewall.docker 2>/dev/null || true
+
+# ---------- 2) 删掉所有 src/dest 指向 docker 的 forwarding ----------
+#   必须"倒序"删：删掉一个索引后后面的会前移，正序会漏删/删错
+#   只取匿名段（firewall.@forwarding[N]=forwarding）的数字索引，
+#   避免命名段被拼成非法索引
+for idx in $(uci show firewall | grep '=forwarding' \
+             | sed -n 's/^firewall\.@forwarding\[\([0-9]\+\)\]=forwarding$/\1/p' \
+             | sort -rn); do
+    src="$(uci -q get "firewall.@forwarding[$idx].src" 2>/dev/null)"
+    dest="$(uci -q get "firewall.@forwarding[$idx].dest" 2>/dev/null)"
+    if [ "$src" = "docker" ] || [ "$dest" = "docker" ]; then
+        logger -t docker-firewall "删除 forwarding[$idx] (src=$src dest=$dest)"
+        uci -q delete "firewall.@forwarding[$idx]"
+    fi
+done
+
+# 提交删除；失败就退出 1 —— uci-defaults 会把脚本留到下次开机重试
+if ! uci commit firewall; then
+    logger -t docker-firewall "uci commit firewall 失败，下次开机重试"
     exit 1
 fi
 
-log "检测到 Docker，开始配置防火墙（subnet ${DOCKER_SUBNET}）"
+# ---------- 3) 追加新配置 ----------
+#   开头故意留一个空行：即使原文件末尾没有换行，也不会把新内容粘到最后一行上
+#   故意不写 option device 'docker0'：首启时 docker0 可能还没被 dockerd 创建，
+#   只按 subnet 匹配更稳（写了 device 反而可能让 fw4 报 device 不存在的警告）
+cat <<'EOF' >>"$FW_FILE"
 
-# ---------------- 1) 清理旧的 docker 相关配置（保证幂等）----------------
-uci -q delete firewall.docker
+config zone 'docker'
+	option name 'docker'
+	option input 'ACCEPT'
+	option output 'ACCEPT'
+	option forward 'ACCEPT'
+	list subnet '172.16.0.0/12'
 
-# 先收集所有 forwarding 索引，再【倒序】删除（正序删会打乱后面的索引号）
-IDX_LIST="$(uci show firewall 2>/dev/null | grep '=forwarding' | cut -d'[' -f2 | cut -d']' -f1 | sort -rn)"
-for idx in ${IDX_LIST}; do
-    src="$(uci -q get "firewall.@forwarding[${idx}].src")"
-    dest="$(uci -q get "firewall.@forwarding[${idx}].dest")"
-    if [ "${src}" = "docker" ] || [ "${dest}" = "docker" ]; then
-        log "  删除 forwarding[${idx}] (src=${src} dest=${dest})"
-        uci -q delete "firewall.@forwarding[${idx}]"
-    fi
-done
-uci -q commit firewall
+config forwarding
+	option src 'docker'
+	option dest 'lan'
 
-# ---------------- 2) 新建 docker zone ----------------
-uci set firewall.docker=zone
-uci set firewall.docker.name='docker'
-uci set firewall.docker.input='ACCEPT'
-uci set firewall.docker.output='ACCEPT'
-uci set firewall.docker.forward='ACCEPT'
-uci add_list "firewall.docker.subnet=${DOCKER_SUBNET}"
+config forwarding
+	option src 'docker'
+	option dest 'wan'
 
-# ---------------- 3) docker 与 lan / wan 互通的 forwarding ----------------
-# docker -> lan
-uci add firewall forwarding
-uci set firewall.@forwarding[-1].src='docker'
-uci set firewall.@forwarding[-1].dest='lan'
-# docker -> wan
-uci add firewall forwarding
-uci set firewall.@forwarding[-1].src='docker'
-uci set firewall.@forwarding[-1].dest='wan'
-# lan -> docker
-uci add firewall forwarding
-uci set firewall.@forwarding[-1].src='lan'
-uci set firewall.@forwarding[-1].dest='docker'
+config forwarding
+	option src 'lan'
+	option dest 'docker'
+EOF
 
-uci commit firewall
-log "firewall 配置已更新"
+# ---------- 4) 校验：让 uci 重新解析一遍，确认追加的内容合法 ----------
+if ! uci -q get firewall.docker.name >/dev/null 2>&1; then
+    logger -t docker-firewall "追加配置后 uci 解析异常，下次开机重试"
+    exit 1
+fi
 
-# 立即生效（若防火墙服务已启动；首启阶段未启动也无妨，随后启动会用新配置）
+# ---------- 5) 立即生效 ----------
+#   本脚本在 uci-defaults 阶段执行，正常会早于 /etc/init.d/firewall 的启动，
+#   所以通常不需要重启；这里仍重启一次，保证任何启动顺序下都立即生效。
 if [ -x /etc/init.d/firewall ]; then
-    /etc/init.d/firewall reload >/dev/null 2>&1
+    /etc/init.d/firewall restart >/dev/null 2>&1 \
+        || logger -t docker-firewall "firewall restart 失败（不影响配置写入）"
 fi
 
-# ============================================================
-#  与 docker 无关的通用设置 —— 不需要就整段删掉
-# ============================================================
-# 允许所有网口访问网页终端（ttyd 存在时才处理）
-if [ -f /etc/config/ttyd ]; then
-    uci -q delete ttyd.@ttyd[0].interface
-    log "已放开 ttyd 的网口限制"
-fi
-
-# 允许所有网口连接 SSH（清空 Interface 限制）
-if [ -f /etc/config/dropbear ]; then
-    uci -q set dropbear.@dropbear[0].Interface=''
-    log "已放开 dropbear 的网口限制"
-fi
-
-uci -q commit
-
+logger -t docker-firewall "Docker 防火墙规则配置完成"
+echo "Docker 防火墙规则配置完成。"
 exit 0
