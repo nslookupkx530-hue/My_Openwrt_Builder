@@ -491,11 +491,13 @@ jobs:
 
           mkdir -p "${FIRMWARE_FILES_DIR}"
 
+          # 公共层
           if [ -d "${REPO_FILES_DIR}/etc" ]; then
             cp -af "${REPO_FILES_DIR}/etc" "${FIRMWARE_FILES_DIR}/"
             echo ">>> 已应用公共 overlay: files/etc"
           fi
 
+          # 设备层（后拷贝，覆盖公共层同名文件）
           [ -d "${REPO_FILES_DIR}/${TARGET_DEVICE}" ] || {
             echo "ERROR: 找不到设备目录 files/${TARGET_DEVICE}"; exit 1; }
           cp -af "${REPO_FILES_DIR}/${TARGET_DEVICE}/." "${FIRMWARE_FILES_DIR}/"
@@ -510,11 +512,22 @@ jobs:
           NET_CONF="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-custom-network"
           [ -f "${NET_CONF}" ] || {
             echo "ERROR: 缺少 ${NET_CONF}（应来自 files/${TARGET_DEVICE}/）"; exit 1; }
-          chmod 755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
+
+          chmod 0755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
           [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && \
-            chmod 755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
+            chmod 0755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
           [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && \
-            chmod 755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
+            chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
+
+          # ---- 构建期门控：只有开启 Docker 才把 docker 防火墙脚本打包进固件 ----
+          UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
+          if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null \
+             || grep -qxF 'CONFIG_PACKAGE_docker' "${SOURCE_DIR}/tmp/injected-plugins.txt" 2>/dev/null; then
+            echo ">>> ENABLE_DOCKER=1 → 打包 99-docker-firewall"
+          else
+            rm -f "${UCI_DOCKER}"
+            echo ">>> 未启用 docker → 已从固件中移除 99-docker-firewall"
+          fi
 
           echo ">>> 网络配置预览:"
           cat "${NET_CONF}"
