@@ -2,20 +2,27 @@
 # ============================================================
 #  第三方 apk "安装后配置修正"
 #
-#  调用方：/etc/third-party/install_third_party_apk.sh
-#          （开机 S99 安装完成后调用；每次开机也会先调用一次）
-#  手动跑：/bin/sh /etc/third-party/post-install-config.sh
+#    每一段用【永久 id】记录在 $DONE_FILE 里。
+#    一旦某段应用过一次，之后【永远不会再碰】对应配置 ——
+#    想重新应用某段：删掉 $DONE_FILE 里那一行（如 mosdns）再重启。
 #
-#  设计约定（以后新增第三方包，照着加一段即可）
-#   1) 每段独立判断"包在不在"，不在就跳过 → 段与段之间互不影响
-#   2) 每段带一个 TAG，应用成功后写进 $DONE_FILE；
+#  调用方：/etc/third-party/install_third_party_apk.sh
+#          （开机 S99 安装完成后调用；每次开机调用一次）
+#
+# ============================================================
+# 常用命令备忘
+#   查看已应用段：  cat /etc/third-party-config.done
+#   重新应用某段：  sed -i '/^mosdns$/d' /etc/third-party-config.done && reboot
+#   手动回滚备份：  cp /etc/third-party-config.bak/mosdns /etc/config/mosdns
+#                   /etc/init.d/mosdns restart
+# ============================================================
 #      已应用过的段不再执行 → 不会覆盖你后来在 LuCI 里手动改的配置
-#      想重新应用：删掉 $DONE_FILE 里那一行，或把 TAG 升版本（v1 → v2）
-#   3) 只有"包存在 + 未应用过"才动手；这次没装上，下次开机自动补
-#   4) 幂等：uci 操作用 set / delete + add_list，重复执行结果一致
+#      只有"包存在 + 未应用过"才动手；这次没装上，下次开机自动补
+#      幂等：uci 操作用 set / delete + add_list，重复执行结果一致
 # ============================================================
 
 DONE_FILE="/etc/third-party-config.done"
+BAK_DIR="/etc/third-party-config.bak"
 LOG_TAG="third-party-cfg"
 
 log() { echo "[${LOG_TAG}] $*"; logger -t "${LOG_TAG}" "$*" 2>/dev/null || true; }
@@ -38,20 +45,39 @@ mark_done() {
     grep -qxF "$1" "${DONE_FILE}" 2>/dev/null || echo "$1" >> "${DONE_FILE}"
 }
 
+# 应用成功后备一份配置：只作为你手动回滚的后路，脚本自己绝不会去恢复它
+backup_cfg() {                  # $1 = config 名（即 /etc/config/<name>）
+    [ -f "/etc/config/$1" ] || return 0
+    mkdir -p "${BAK_DIR}" 2>/dev/null
+    if cp -f "/etc/config/$1" "${BAK_DIR}/$1" 2>/dev/null; then
+        log "已备份 /etc/config/$1 → ${BAK_DIR}/$1"
+    fi
+}
+
 log "===== 第三方 apk 配置修正开始 ($(date '+%F %T')) ====="
+
+# ---------------------------------------------------------------- 保留加固
+# 让 .done 在 sysupgrade（保留设置）时也被保留下来。
+# 否则刷机后标记丢失 → 已应用过的段会重新应用 → 覆盖你手动改过的配置。
+if [ -f /etc/sysupgrade.conf ] && ! grep -qxF "${DONE_FILE}" /etc/sysupgrade.conf 2>/dev/null; then
+    echo "${DONE_FILE}" >> /etc/sysupgrade.conf
+    log "已把 ${DONE_FILE} 加入 /etc/sysupgrade.conf（sysupgrade 时保留）"
+fi
+# 想让备份目录也跨 sysupgrade 保留，就再加一行：
+#   grep -qxF "${BAK_DIR}" /etc/sysupgrade.conf 2>/dev/null || echo "${BAK_DIR}" >> /etc/sysupgrade.conf
 
 # ============================================================
 #  段 1：luci-app-quickfile —— 修正 nginx 配置
-#  探测方式：/usr/bin/quickfile（该 apk 的二进制）
+#  永久 id：quickfile-nginx
 # ============================================================
 fix_quickfile_nginx() {
-    local TAG="quickfile-nginx-v1"
+    local SECTION="quickfile-nginx"
 
     [ -f /usr/bin/quickfile ] || { log "quickfile: 未安装，跳过"; return 0; }
-    done_already "${TAG}" && { log "quickfile: 已应用过（${TAG}），跳过"; return 0; }
+    done_already "${SECTION}" && { log "quickfile: 已应用过（${SECTION}），永不再动"; return 0; }
 
     if [ ! -f /etc/config/nginx ]; then
-        log "quickfile: 暂无可用的 /etc/config/nginx，本次跳过（下次开机再试）"
+        log "quickfile: 暂无 /etc/config/nginx，本次跳过（下次开机再试）"
         return 0
     fi
 
@@ -77,20 +103,21 @@ fix_quickfile_nginx() {
 
     [ -x /etc/init.d/nginx ] && /etc/init.d/nginx restart >/dev/null 2>&1 || true
 
-    mark_done "${TAG}"
-    log "quickfile: nginx 配置完成"
+    backup_cfg nginx
+    mark_done "${SECTION}"
+    log "quickfile: nginx 配置完成（已记录 ${SECTION}，之后永不再动）"
     return 0
 }
 
 # ============================================================
 #  段 2：mosdns —— 预设 DNS 分流配置
-#  探测方式：apk/opkg 元数据（内置编译的也能识别）
+#  永久 id：mosdns
 # ============================================================
 fix_mosdns() {
-    local TAG="mosdns-config-v1"
+    local SECTION="mosdns"
 
     pkg_installed mosdns || { log "mosdns: 未安装，跳过"; return 0; }
-    done_already "${TAG}" && { log "mosdns: 已应用过（${TAG}），跳过"; return 0; }
+    done_already "${SECTION}" && { log "mosdns: 已应用过（${SECTION}），永不再动"; return 0; }
 
     if [ ! -f /etc/config/mosdns ]; then
         log "mosdns: 暂无 /etc/config/mosdns，本次跳过（下次开机再试）"
@@ -103,7 +130,7 @@ fix_mosdns() {
     uci set mosdns.config.custom_local_dns='1'
     uci set mosdns.config.dns_leak='1'
 
-    # 先清空再写，保证幂等（也避免多次执行时 list 里堆重复项）
+    # 先清空再写，保证幂等（避免重复执行时 list 里堆重复项）
     uci -q delete mosdns.config.local_dns  2>/dev/null || true
     uci -q delete mosdns.config.remote_dns 2>/dev/null || true
 
@@ -124,14 +151,17 @@ fix_mosdns() {
 
     [ -x /etc/init.d/mosdns ] && /etc/init.d/mosdns restart >/dev/null 2>&1 || true
 
-    mark_done "${TAG}"
-    log "mosdns: 配置完成"
+    backup_cfg mosdns
+    mark_done "${SECTION}"
+    log "mosdns: 配置完成（已记录 ${SECTION}，之后永不再动）"
     return 0
 }
 
 # ============================================================
-#  段 3：以后新增第三方包，照上面的格式加一个函数，
-#        然后在下面"- 各段调用 -"里加一行即可
+#  段 3：以后新增第三方包，照上面格式加函数
+#        要点：SECTION 用永久 id（不要带版本号）；
+#              探测包是否存在 → done_already → 改配置 → commit →
+#              重启对应服务 → backup_cfg → mark_done
 # ============================================================
 
 # ---------------------------- 各段调用 ----------------------------
