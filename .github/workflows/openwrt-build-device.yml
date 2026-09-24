@@ -221,6 +221,27 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
+          # ------------------------------------------------------------------
+          # video feed 按源区分处理（两个源的上游发布行为不同）
+          #   openwrt     : 上游官方发布会发布 video feed，镜像上该目录存在
+          #                 → 保持启用，才与官方 OpenWrt 一致
+          #   immortalwrt : 官方 25.12.2 固件/下载站都没有 video 目录
+          #                 官方基线 .config 未选任何 video 包，该 feed 对固件内容
+          #                 零贡献 → 与官方对齐，禁用它。
+          # 以后若需要 video feed 里的包（ffmpeg/qt5/weston 等），去掉这个 if 即可恢复。
+          # ------------------------------------------------------------------
+          if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
+            for f in feeds.conf feeds.conf.default; do
+              if [ -f "$f" ]; then
+                sed -i -E 's|^([[:space:]]*)(src-git[^[:space:]]*[[:space:]]+video[[:space:]]+)|\1#\2|' "$f"
+              fi
+            done
+            echo ">>> [immortalwrt] feeds 里的 video 行（应为注释状态）:"
+            grep -n 'video' feeds.conf feeds.conf.default 2>/dev/null || echo "  (无 video)"
+          else
+            echo ">>> [${SOURCE_TYPE}] feeds 保持原样（上游会发布 video feed，与官方一致）"
+            grep -n 'video' feeds.conf feeds.conf.default 2>/dev/null || echo "  (无 video)"
+          fi
           rm -rf ./feeds ./data/feeds-*.tmp ./package/feeds
           for i in 1 2 3; do
             ./scripts/feeds update -a && break || { echo "feeds update 失败，重试 ${i}/3"; sleep 5; }
@@ -342,12 +363,13 @@ jobs:
 
       - name: Check APK package mirror
         # 本地断言 + 远端真探活：所有 apk 源必须 200（一个源 404 → 整个 apk 事务失败）
+        # 两个源共用本步骤：探活范围由"实际启用的 feeds/*"驱动，自动适配
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
 
-          # ---- 0) 与上一步一致性断言（防止两处 MIRROR 又写歪）----
+          # ---- 0) 与 Modify 步骤的一致性断言（防止两处 MIRROR 写歪）----
           case "${SOURCE_TYPE}" in
             immortalwrt) EXPECT="https://mirror.nju.edu.cn/immortalwrt" ;;
             openwrt)     EXPECT="https://mirror.nju.edu.cn/openwrt" ;;
@@ -384,48 +406,41 @@ jobs:
                package/base-files/Makefile package/system/apk/Makefile 2>/dev/null || true
 
           # ---- 2) 远端真探活 ----
-          # 说明：distfeeds.list 由若干"feed 目录"组成，任何一个 404 都会让整个 apk 事务失败。
-          #       这里按目录探活（200/403 都算存在；403 = 目录在但禁止列目录），
-          #       比猜具体的索引文件名更可靠。
           proberc=0
-          probe() {                       # $1=url  $2=label  $3=dir（可选）
-            url="$1"; label="$2"; want="${3:-200}"
+          probe() {                       # $1=url  $2=label
+            url="$1"; label="$2"
             code="$(curl -s -o /dev/null -w '%{http_code}' -L --retry 3 --max-time 60 "${url}" || echo 000)"
-            if [ "${want}" = "dir" ]; then
-              case "${code}" in
-                200|403) echo "OK   [${code}] ${label}: ${url}" ;;
-                *)       echo "FAIL [${code}] ${label}: ${url}"; proberc=1 ;;
-              esac
+            if [ "${code}" = "200" ]; then
+              echo "OK   [${code}] ${label}: ${url}"
             else
-              if [ "${code}" = "${want}" ]; then
-                echo "OK   [${code}] ${label}: ${url}"
-              else
-                echo "FAIL [${code}] ${label}: ${url}"
-                proberc=1
-              fi
+              echo "FAIL [${code}] ${label}: ${url}"
+              proberc=1
             fi
           }
 
           ARCH_PACKAGES="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           echo ">>> CONFIG_TARGET_ARCH_PACKAGES=${ARCH_PACKAGES:-<none>}"
 
-          # 基线（prepare_base_config.sh 用的就是这个文件），必须真存在
+          # a) 基线（prepare_base_config.sh 用的就是这个文件）
           probe "${RELEASE_BASE}/config.buildinfo" "target 基线 buildinfo"
 
-          # distfeeds.list 里的 feed 目录（存在即通过）
-          probe "${RELEASE_BASE}/packages" "target core feed" dir
-          if [ -n "${ARCH_PACKAGES}" ]; then
-            for feed in base luci packages routing telephony; do
-              probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/${feed}" \
-                    "arch feed ${ARCH_PACKAGES}/${feed}" dir
-            done
-          fi
+          # b) 目标核心 feed 索引（设备上拉的就是这个文件）
+          probe "${RELEASE_BASE}/packages/packages.adb" "target core feed 索引"
 
-          # kmods：先确认目录在，再拿目录名校验它的索引文件
-          probe "${RELEASE_BASE}/kmods" "kmods 目录" dir
-                    KMODS_INDEX="/tmp/kmods-index.html"
-          curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" \
-            -o "${KMODS_INDEX}" 2>/dev/null || true
+          # c) 架构 feed：以"我们实际启用的 feeds/*"为准，自动适配两个源
+          #    ① 探"索引文件"而非目录 —— 目录存在 ≠ 索引可用
+          #    ② 自动抓出"我们启用了、但镜像上没发布"的 feed（这正是 video 的教训）
+          probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/base/packages.adb" "feed base 索引"
+          for d in feeds/*/; do
+            [ -d "$d" ] || continue
+            n="$(basename "$d")"
+            case "$n" in targets|emortal) continue ;; esac
+            probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/${n}/packages.adb" "feed ${n} 索引"
+          done
+
+          # d) kmods（先落文件再解析，避免 set -x 把整页 HTML 打进日志）
+          KMODS_INDEX="/tmp/kmods-index.html"
+          curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" -o "${KMODS_INDEX}" 2>/dev/null || true
           KMODS_DIR="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[0-9a-f]{32,}' "${KMODS_INDEX}" 2>/dev/null \
             | sort -u | tail -n1 || true)"
           if [ -n "${KMODS_DIR}" ]; then
@@ -433,7 +448,7 @@ jobs:
             echo "KMODS_DIR=${KMODS_DIR}" >> "$GITHUB_ENV"
             echo ">>> 镜像内核 = ${KMODS_DIR%%-*}；设备 uname -r 应与此一致，否则 98-drop-kmods-repo 会删掉该源"
           else
-            echo "::warning::未能从 ${RELEASE_BASE}/kmods/ 解析内核目录（空列表或未开启目录索引），跳过 kmods 索引探活"
+            echo "::warning::未能解析 kmods 内核目录，跳过 kmods 索引探活"
           fi
 
           [ "${proberc}" = "0" ] || {
