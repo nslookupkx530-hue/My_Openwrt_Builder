@@ -429,12 +429,24 @@ jobs:
 
           # c) 架构 feed：以"我们实际启用的 feeds/*"为准，自动适配两个源
           #    ① 探"索引文件"而非目录 —— 目录存在 ≠ 索引可用
-          #    ② 自动抓出"我们启用了、但镜像上没发布"的 feed（这正是 video 的教训）
+          #    ② 自动抓出"我们启用了、但镜像上没发布"的 feed（video 的教训）
+          #    ③ 跳过 feeds 的临时目录（如 telephony.tmp）与非包 feed —— 它们不是 feed
+          rm -rf feeds/*.tmp 2>/dev/null || true
+
           probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/base/packages.adb" "feed base 索引"
+
+          ARCH_FEEDS=""
           for d in feeds/*/; do
             [ -d "$d" ] || continue
             n="$(basename "$d")"
-            case "$n" in targets|emortal) continue ;; esac
+            case "$n" in
+              *.*|targets|emortal) continue ;;    # *.tmp / .* = 临时目录；targets/emortal 非包 feed
+            esac
+            ARCH_FEEDS="${ARCH_FEEDS}${n} "
+          done
+          echo ">>> 待校验的架构 feed: ${ARCH_FEEDS:-<无>}"
+
+          for n in ${ARCH_FEEDS}; do
             probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/${n}/packages.adb" "feed ${n} 索引"
           done
 
