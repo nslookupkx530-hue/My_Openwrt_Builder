@@ -1,0 +1,154 @@
+#!/bin/sh
+# ============================================================
+#  99-third-party-config   （uci-defaults，首启执行一次，成功后自动移除）
+#
+#  用途：集中放"某个第三方包装上之后需要修正它的 UCI 配置"的逻辑。
+#        一个包一个独立块，块内自己判断"装了才执行"，没装就直接跳过。
+#
+#  为什么放这里：第三方 apk 是打包进固件的，它们自带的默认配置不一定
+#        适合我们的场景；在这里统一改，比逐个改包简单可控。
+#
+#  === 以后新增一个包，只要四步（模板见文件末尾）===
+#     1) 复制一个块
+#     2) 改判断条件：have_file <关键文件> 或 pkg_installed <包名>
+#     3) 写 uci set / add_list / commit
+#     4) 收尾留一行 log
+#
+#  幂等约定：列表项一律"先 uci -q delete 再 add_list"，
+#            这样脚本万一重跑也不会把配置越加越多。
+#
+#  看日志：logread | grep third-party-config
+# ============================================================
+
+LOG_TAG="third-party-config"
+
+log() {
+    echo "[${LOG_TAG}] $*"
+    logger -t "${LOG_TAG}" "$*" 2>/dev/null || true
+}
+
+# ---------- 判断包是否安装（apk / opkg 通用）----------
+pkg_installed() {
+    if command -v apk >/dev/null 2>&1; then
+        apk info -e "$1" >/dev/null 2>&1 && return 0
+        apk list --installed 2>/dev/null | grep -q "^${1}-" && return 0
+        return 1
+    fi
+    if command -v opkg >/dev/null 2>&1; then
+        opkg list-installed 2>/dev/null | grep -q "^${1} "
+        return $?
+    fi
+    return 1
+}
+
+# ---------- 判断"关键文件是否存在"（比查包名更快、更准）----------
+have_file() {
+    [ -e "$1" ]
+}
+
+# ---------- 需要时重启服务 ----------
+#   首启（uci-defaults）阶段服务通常还没起来，restart 等于"提前启动"；
+#   等 rcS 走到它自己的 S 序号时，procd 发现已在运行，不会重复启动。
+svc_restart() {
+    if [ -x "/etc/init.d/$1" ]; then
+        "/etc/init.d/$1" restart >/dev/null 2>&1 \
+            || log "WARN: /etc/init.d/$1 restart 失败（不影响配置写入）"
+    fi
+}
+
+RC=0
+
+# ==================================================================
+# 1) luci-app-quickfile  →  修正 nginx 默认配置
+#    默认配置会把 80 端口跳去 SSL / 缺 default_server，导致打不开首页
+# ==================================================================
+if have_file /usr/bin/quickfile || pkg_installed luci-app-quickfile; then
+    log "检测到 quickfile，修正 nginx 配置"
+
+    uci set nginx.global.uci_enable='true'
+    uci -q delete nginx._lan
+    uci -q delete nginx._redirect2ssl
+
+    # 等价于原来的 `uci add nginx server` + `uci rename ...='_lan'`，
+    # 但用 `uci set <名字>=<类型>` 建命名节更直接，也天然幂等
+    uci set nginx._lan='server'
+    uci set nginx._lan.server_name='_lan'
+    uci add_list nginx._lan.listen='80 default_server'
+    uci add_list nginx._lan.listen='[::]:80 default_server'
+    uci add_list nginx._lan.include='conf.d/*.locations'
+    uci set nginx._lan.access_log='off; # logd openwrt'
+
+    if uci commit nginx; then
+        log "quickfile nginx 配置已修正"
+        svc_restart nginx
+    else
+        log "ERROR: uci commit nginx 失败"
+        RC=1
+    fi
+else
+    log "未检测到 quickfile，跳过"
+fi
+
+# ==================================================================
+# 2) mosdns  →  启用 + 国内外 DNS 分流 + 防泄露
+# ==================================================================
+if pkg_installed mosdns || have_file /etc/init.d/mosdns; then
+    log "检测到 mosdns，修正配置"
+
+    uci set mosdns.config.enabled='1'
+    uci set mosdns.config.custom_local_dns='1'
+    uci set mosdns.config.dns_leak='1'
+
+    uci -q delete mosdns.config.local_dns
+    uci add_list mosdns.config.local_dns='https://dns.alidns.com/dns-query'
+    uci add_list mosdns.config.local_dns='https://1.12.12.12/dns-query'
+
+    uci -q delete mosdns.config.remote_dns
+    uci add_list mosdns.config.remote_dns='tls://1.1.1.1'
+    uci add_list mosdns.config.remote_dns='tls://8.8.8.8'
+    uci add_list mosdns.config.remote_dns='tls://9.9.9.9'
+    uci add_list mosdns.config.remote_dns='tls://208.67.222.222'
+
+    uci set mosdns.config.bootstrap_dns='114.114.114.114'
+
+    if uci commit mosdns; then
+        log "mosdns 配置已修正"
+        svc_restart mosdns
+    else
+        log "ERROR: uci commit mosdns 失败"
+        RC=1
+    fi
+else
+    log "未检测到 mosdns，跳过"
+fi
+
+# ==================================================================
+# 3) 以后新增的包，按下面模板复制一份，改好粘在这里
+# ==================================================================
+# if pkg_installed <包名> || have_file <关键文件路径>; then
+#     log "检测到 <包名>，修正配置"
+#
+#     uci set <配置节>.<选项>='<值>'
+#
+#     uci -q delete <配置节>.<列表选项>          # 列表项：先删
+#     uci add_list <配置节>.<列表选项>='<值1>'   # 再加（保证可重跑）
+#     uci add_list <配置节>.<列表选项>='<值2>'
+#
+#     if uci commit <配置名>; then
+#         log "<包名> 配置已修正"
+#         svc_restart <服务名>                   # 需要才写
+#     else
+#         log "ERROR: uci commit <配置名> 失败"
+#         RC=1
+#     fi
+# else
+#     log "未检测到 <包名>，跳过"
+# fi
+
+# ==================================================================
+if [ "${RC}" = "0" ]; then
+    log "第三方包配置修正完成"
+else
+    log "有配置提交失败，脚本保留，下次开机重试"
+fi
+exit "${RC}"
