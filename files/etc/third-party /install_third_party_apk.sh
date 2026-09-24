@@ -146,7 +146,18 @@ wait_network() {
     return 1
 }
 
-# ----------   LuCI 刷新  ----------
+# ----------   第三方 apk 配置修正钩子   ----------
+# 由 main() 调用；脚本不存在就直接返回
+CFG_SCRIPT="/etc/third-party/post-install-config.sh"
+
+run_post_config() {
+    [ -f "$CFG_SCRIPT" ] || return 0
+    log "-- 调用配置修正脚本: ${CFG_SCRIPT}"
+    /bin/sh "$CFG_SCRIPT" || log "-- 配置修正脚本返回非 0（不影响 apk 安装结果）"
+    return 0
+}
+
+# ----------   LuCI 刷新   ----------
 refresh_luci() {
     rm -f  /tmp/luci-indexcache*   2>/dev/null
     rm -rf /tmp/luci-modulecache   2>/dev/null
@@ -155,9 +166,18 @@ refresh_luci() {
     log "已清理 LuCI 缓存并重启 rpcd/uhttpd"
 }
 
-# ----------   main  ----------
+# ----------   main   ----------
 main() {
     log "===== 第三方 apk 安装开始 ($(date '+%F %T')) ====="
+
+    # ---- 先抢锁：把"配置修正 + apk 安装"整体串行，避免并发改 /etc/config ----
+    acquire_lock || return 0
+    start_keepalive
+
+    # ---- ① 开机"检查"一次配置修正 ----
+    #   return 0，配置脚本永远不会再被调用。
+    #   注意：这里只是"检查"，已应用过的段会在脚本内部秒退，不会重复写配置。
+    run_post_config
 
     if [ ! -d "$APK_DIR" ]; then
         log "$APK_DIR 不存在，跳过"
@@ -176,16 +196,16 @@ main() {
         return 0
     fi
 
-    acquire_lock || return 0
-    start_keepalive
     detect_apk_opts
 
     QUEUE=""
     for f in $PKGS; do QUEUE="$QUEUE $APK_DIR/$f"; done
     log "待安装 $(printf '%s\n' "$PKGS" | wc -l) 个包"
 
+    # ---- ② 装完后立刻再跑一次：让"本次刚装上的包"当场配上 ----
     if install_queue "$QUEUE"; then
         log "全部安装成功（md5=${MANIFEST}）"
+        run_post_config
         printf '%s\n' "$MANIFEST" > "$STAMP_FILE"
         refresh_luci
         return 0
@@ -194,12 +214,14 @@ main() {
     log "首轮未全部成功，等网络后整体重试:${FAILED_LIST}"
     if wait_network && install_queue "$QUEUE"; then
         log "重试后全部安装成功（md5=${MANIFEST}）"
+        run_post_config
         printf '%s\n' "$MANIFEST" > "$STAMP_FILE"
         refresh_luci
         return 0
     fi
 
     log "仍有包未装成功，不写 stamp，下次开机重试:${FAILED_LIST}"
+    run_post_config
     return 1
 }
 
