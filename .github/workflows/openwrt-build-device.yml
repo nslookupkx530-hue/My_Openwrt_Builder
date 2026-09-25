@@ -614,31 +614,6 @@ jobs:
           echo ">>> init 服务链接:"
           ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
 
-      - name: DEBUG luci i18n / lang symbols
-        #临时增加：验证猜想
-        if: always()
-        shell: bash
-        run: |
-          set -x
-          cd "${WORKSPACE}/src"
-
-          echo "=== 1) .config 里有没有语言开关（完整符号表）"
-          grep -n 'LUCI_LANG' .config || echo "(无 LUCI_LANG)"
-
-          echo "=== 2) .config 里 i18n 相关符号的状态"
-          grep -nE 'CONFIG_PACKAGE_luci-i18n-(base|ttyd|sqm)' .config || echo "(无)"
-
-          echo "=== 3) kconfig 里 i18n 符号到底叫什么、依赖是什么"
-          grep -nE 'config PACKAGE_luci-i18n-(base|ttyd|sqm)' tmp/.config-package.in || echo "(无这些符号)"
-          grep -A10 -E 'config PACKAGE_luci-i18n-ttyd' tmp/.config-package.in | head -40 || true
-
-          echo "=== 4) luci feed 里有哪些语言的 po 目录"
-          ls feeds/luci/applications/luci-app-ttyd/po/ 2>/dev/null || true
-          ls feeds/luci/modules/luci-base/po/ 2>/dev/null || true
-
-          echo "=== 5) luci.mk 里的语言/gating 逻辑"
-          grep -rn 'LUCI_LANG\|LUCI_LANGUAGES' feeds/luci/ 2>/dev/null | head -20 || true
-
       - name: Finalize Configuration (defconfig + 校验注入)
         shell: bash
         run: |
@@ -700,8 +675,27 @@ jobs:
           echo ">>> ip 相关:"
           grep -E '^CONFIG_PACKAGE_ip-(full|tiny)=|^# CONFIG_PACKAGE_ip-(full|tiny) is not set' .config || true
 
-          [ -z "${MISSING_OPT}" ] || {
-            echo "ERROR: 以下插件没进固件，请核对 configs/plugins.cfg 里的包名:${MISSING_OPT}"; exit 1; }
+          if [ -n "${MISSING_OPT}" ]; then
+            if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
+              echo "ERROR: 以下插件没进固件，请核对 configs/plugins.cfg 里的包名:${MISSING_OPT}"
+              exit 1
+            fi
+            echo "::warning::[${SOURCE_TYPE}] 以下插件在本源码树不存在或未生效，已跳过:${MISSING_OPT}"
+            echo "（openwrt 上游的 luci/packages 比 immortalwrt 少，属正常差异；不拦构建）"
+
+            # 顺手把它们从注入清单里剔掉，保证 Release 包清单 = 固件实际内容
+            TMPF="$(mktemp)"
+            while read -r opt; do
+              [ -n "${opt}" ] || continue
+              case " ${MISSING_OPT} " in
+                *" ${opt} "*) continue ;;
+              esac
+              echo "${opt}" >> "${TMPF}"
+            done < tmp/injected-plugins.txt
+            mv "${TMPF}" tmp/injected-plugins.txt
+            echo ">>> 已从注入清单剔除未生效项，剩余 $(wc -l < tmp/injected-plugins.txt) 项"
+          fi
+          
           [ -z "${BAD_TRIM}" ] || {
             echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
           echo ">>> 注入/裁剪校验通过"
