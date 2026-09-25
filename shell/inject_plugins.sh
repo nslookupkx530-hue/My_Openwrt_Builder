@@ -121,7 +121,7 @@ for entry in "${PLUGIN_MAP[@]}"; do
 done
 
 # ------------------------------------------------------------
-# 仅 openwrt：自动补 LuCI 中文语言包
+# 仅 openwrt：补齐 Lua CBI 运行库 + 中文语言包
 #   immortalwrt 官方基线自带中文语言包 → 直接跳过，不做任何改动
 #   openwrt 上游官方基线只有 en → 界面是英文，这里按需补：
 #     ① luci-i18n-base-zh-cn
@@ -130,7 +130,7 @@ done
 # ------------------------------------------------------------
 ZH_ADDED=""
 
-add_zh_cn() {                        # $1 = 包名（不带 CONFIG_PACKAGE_ 前缀）
+add_pkg() {                          # $1 = 包名（不带 CONFIG_PACKAGE_ 前缀）
     local name="$1"
     pkg_symbol_exists "$name" || { echo ">>> 跳过 ${name}（本源码树没有）"; return 0; }
     if grep -qE "^CONFIG_PACKAGE_${name}=y$" "$CONFIG_FILE"; then
@@ -142,20 +142,36 @@ add_zh_cn() {                        # $1 = 包名（不带 CONFIG_PACKAGE_ 前�
 }
 
 if [ "${SOURCE_TYPE:-immortalwrt}" = "openwrt" ]; then
-    echo ">>> [openwrt] 开始补 LuCI 中文语言包"
+    echo ">>> [openwrt] 开始补齐 Lua CBI 运行库与中文语言包"
+
+    # ⓿ Zh_Hans 开关（若文件别处已有，这段删掉）
+    #    openwrt 官方只有 en；开关不开，下面补的 zh-cn 会被 defconfig 全部丢掉
+    if grep -qE '^# CONFIG_LUCI_LANG_zh_Hans is not set$' "$CONFIG_FILE"; then
+        sed -i 's|^# CONFIG_LUCI_LANG_zh_Hans is not set$|CONFIG_LUCI_LANG_zh_Hans=y|' "$CONFIG_FILE"
+        echo ">>> [openwrt] 已打开 CONFIG_LUCI_LANG_zh_Hans"
+    elif ! grep -qE '^CONFIG_LUCI_LANG_zh_Hans=y$' "$CONFIG_FILE"; then
+        printf 'CONFIG_LUCI_LANG_zh_Hans=y\n' >> "$CONFIG_FILE"
+        echo ">>> [openwrt] 已追加 CONFIG_LUCI_LANG_zh_Hans=y"
+    fi
 
     # ① 界面本体（核心模块的中文都在这个包里）
-    add_zh_cn "luci-i18n-base-zh-cn"
+    add_pkg "luci-i18n-base-zh-cn"
 
-    # ② 给所有已启用的 luci-app-* 配它的中文翻译包
+    # ② Lua CBI 运行库：openwrt 基线缺这两个，immortalwrt 自带
+    #    第三方 Lua 类 app（argon-config / diskman / ramfree / quickstart…）
+    #    缺它们会在 LuCI 里白板或直接报错
+    add_pkg "luci-lua-runtime"
+    add_pkg "luci-compat"
+
+    # ③ 给所有已启用的 luci-app-* 配它的中文翻译包
     ENABLED_LUCI_APPS="$(awk '/^CONFIG_PACKAGE_luci-app-[^=]*=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' "$CONFIG_FILE" | sort -u)"
     for p in $ENABLED_LUCI_APPS; do
-        add_zh_cn "luci-i18n-${p#luci-app-}-zh-cn"
+        add_pkg "luci-i18n-${p#luci-app-}-zh-cn"
     done
 
-    echo ">>> [openwrt] 已补充中文语言包:${ZH_ADDED:-<无>}"
+    echo ">>> [openwrt] 已补充:${ZH_ADDED:-<无>}"
 else
-    echo ">>> [${SOURCE_TYPE:-immortalwrt}] 官方基线自带中文语言包，跳过补充"
+    echo ">>> [${SOURCE_TYPE:-immortalwrt}] 官方基线自带中文语言包与 Lua CBI 运行库，跳过补充"
 fi
 
 # ------------------------------------------------------------ 按需开语言开关
