@@ -738,6 +738,7 @@ jobs:
           #     看起来装了 passwall / rclone 的假条目
           grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
             | grep -v '_INCLUDE_' \
+            | grep -vx 'CONFIG_PACKAGE_luci' \
             | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' >> "${PLIST}" || true
 
           # 2.2 注入清单里的非 luci 项（如 irqbalance / smartdns）
