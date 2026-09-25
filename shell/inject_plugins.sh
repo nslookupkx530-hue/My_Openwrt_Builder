@@ -120,6 +120,44 @@ for entry in "${PLUGIN_MAP[@]}"; do
     fi
 done
 
+# ------------------------------------------------------------
+# 仅 openwrt：自动补 LuCI 中文语言包
+#   immortalwrt 官方基线自带中文语言包 → 直接跳过，不做任何改动
+#   openwrt 上游官方基线只有 en → 界面是英文，这里按需补：
+#     ① luci-i18n-base-zh-cn
+# 
+#     ② 对 .config 里已启用的每个 luci-app-*，补 luci-i18n-<name>-zh-cn
+# ------------------------------------------------------------
+ZH_ADDED=""
+
+add_zh_cn() {                        # $1 = 包名（不带 CONFIG_PACKAGE_ 前缀）
+    local name="$1"
+    pkg_symbol_exists "$name" || { echo ">>> 跳过 ${name}（本源码树没有）"; return 0; }
+    if grep -qE "^CONFIG_PACKAGE_${name}=y$" "$CONFIG_FILE"; then
+        echo ">>> ${name} 基线已启用，无需补充"
+        return 0
+    fi
+    set_opt_on "$name"
+    ZH_ADDED="${ZH_ADDED} ${name}"
+}
+
+if [ "${SOURCE_TYPE:-immortalwrt}" = "openwrt" ]; then
+    echo ">>> [openwrt] 开始补 LuCI 中文语言包"
+
+    # ① 界面本体（核心模块的中文都在这个包里）
+    add_zh_cn "luci-i18n-base-zh-cn"
+
+    # ② 给所有已启用的 luci-app-* 配它的中文翻译包
+    ENABLED_LUCI_APPS="$(awk '/^CONFIG_PACKAGE_luci-app-[^=]*=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' "$CONFIG_FILE" | sort -u)"
+    for p in $ENABLED_LUCI_APPS; do
+        add_zh_cn "luci-i18n-${p#luci-app-}-zh-cn"
+    done
+
+    echo ">>> [openwrt] 已补充中文语言包:${ZH_ADDED:-<无>}"
+else
+    echo ">>> [${SOURCE_TYPE:-immortalwrt}] 官方基线自带中文语言包，跳过补充"
+fi
+
 # ------------------------------------------------------------ 按需开语言开关
 if grep -q -- '-zh-cn' "$OUT_FILE" 2>/dev/null; then enable_luci_lang zh_Hans; fi
 if grep -q -- '-zh-tw' "$OUT_FILE" 2>/dev/null; then enable_luci_lang zh_Hant; fi
