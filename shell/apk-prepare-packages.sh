@@ -23,6 +23,26 @@ MATCH_OVERRIDE="${MATCH_OVERRIDE:-}"
 ALLOW_MISSING="${ALLOW_MISSING:-0}"
 APK_MATCH_STRICT="${APK_MATCH_STRICT:-0}"
 
+# ---------- 新增：apk 仓库分支优先级（My 优先，master 次选）----------
+BRANCHES="${BRANCHES:-My master}"                    # 从左到右依次尝试，可再加 main
+CLONE_DIR="${CLONE_DIR:-/tmp/wukongdaily-apk}"       # ★ 必须与你脚本里 clone 用的目录一致
+BRANCH_USED=""
+
+clone_repo() {
+    rm -rf "${CLONE_DIR}"
+    for br in ${BRANCHES}; do
+        echo ">>> 尝试 clone 分支: ${br}"
+        if git clone --depth 1 --single-branch -b "${br}" "${REPO}" "${CLONE_DIR}" 2>/dev/null; then
+            BRANCH_USED="${br}"
+            echo ">>> 使用分支: ${br}  commit=$(git -C "${CLONE_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+            return 0
+        fi
+        rm -rf "${CLONE_DIR}"
+    done
+    echo "ERROR: 分支依次尝试均失败（${BRANCHES}）" >&2
+    return 1
+}
+
 echo "=========================================="
 echo " Prepare third-party APK packages"
 echo " SOURCE_DIR=${SOURCE_DIR}"
