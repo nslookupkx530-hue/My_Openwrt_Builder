@@ -23,7 +23,7 @@ MATCH_OVERRIDE="${MATCH_OVERRIDE:-}"
 ALLOW_MISSING="${ALLOW_MISSING:-0}"
 APK_MATCH_STRICT="${APK_MATCH_STRICT:-0}"
 
-# ---------- 新增：apk 仓库分支优先级（My 优先，master 次选）----------
+# ---------- apk 仓库分支优先级（My 优先，master 次选）----------
 BRANCHES="${BRANCHES:-My master}"                    # 从左到右依次尝试，可再加 main
 CLONE_DIR="${CLONE_DIR:-/tmp/wukongdaily-apk}"       # ★ 必须与你脚本里 clone 用的目录一致
 BRANCH_USED=""
@@ -58,14 +58,24 @@ fi
 rm -rf "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
-# --- 克隆仓库 ---
+# --- 克隆仓库（My 优先，master 次选）---
 APK_REPO_DIR="/tmp/wukongdaily-apk"
-rm -rf "${APK_REPO_DIR}"
-for i in 1 2 3; do
-    git clone --depth=1 "${REPO}" "${APK_REPO_DIR}" && break \
-        || { echo "clone 失败，重试 ${i}/3"; rm -rf "${APK_REPO_DIR}"; sleep 5; }
+BRANCH_USED=""
+for round in 1 2 3; do
+    for br in ${BRANCHES}; do
+        rm -rf "${APK_REPO_DIR}"
+        echo ">>> 尝试 clone 分支: ${br} （第 ${round}/3 轮）"
+        if git clone --depth=1 --single-branch -b "${br}" "${REPO}" "${APK_REPO_DIR}"; then
+            BRANCH_USED="${br}"
+            break 2
+        fi
+    done
+    echo "    候选分支 ${BRANCHES} 本轮都没成功，${round}/3 轮后重试"
+    sleep 5
 done
-[ -d "${APK_REPO_DIR}/.git" ] || { echo "ERROR: 克隆 ${REPO} 失败"; exit 1; }
+[ -n "${BRANCH_USED}" ] || { echo "ERROR: 克隆 ${REPO} 失败（候选分支：${BRANCHES}）"; exit 1; }
+[ -d "${APK_REPO_DIR}/.git" ] || { echo "ERROR: 克隆结果异常：${APK_REPO_DIR}"; exit 1; }
+echo ">>> apk 仓库: 分支=${BRANCH_USED} commit=$(git -C "${APK_REPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # --- 架构检测 ---
 echo "Detecting Architecture..."
