@@ -1,0 +1,265 @@
+name: Detect Device Architecture
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "设备型号（configs/device_mapping.conf 里的键，如 x86 / AXT-1800 / Cudy-TR3000-256MB）"
+        required: true
+        default: "x86"
+        type: string
+      target_path:
+        description: "直接指定 target 路径（如 mediatek/filogic）；留空则从 device_mapping.conf 查"
+        required: false
+        default: ""
+        type: string
+      arch_override:
+        description: "强制指定架构（如 aarch64_cortex-a53）；留空则从镜像 config.buildinfo 读取"
+        required: false
+        default: ""
+        type: string
+      immortalwrt_version:
+        description: "immortalwrt 版本（第三方 apk 的来源，决定 BASE）"
+        required: true
+        default: "25.12.2"
+        type: string
+      openwrt_version:
+        description: "openwrt 版本（仅用于交叉核对）"
+        required: false
+        default: "25.12.5"
+        type: string
+      repo_prefix:
+        description: "apk 仓库里架构目录之前的前缀，如 openwrt；没有就留空"
+        required: false
+        default: ""
+        type: string
+      verify_mirror:
+        description: "是否探活镜像 luci 目录并逐个核对清单里的包"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect ${{ github.event.inputs.device }}
+    runs-on: ubuntu-22.04
+
+    env:
+      MIRROR_IMM: https://mirror.nju.edu.cn/immortalwrt
+      MIRROR_OWRT: https://mirror.nju.edu.cn/openwrt
+      SUBDIR: luci-third-party-openwrt
+      PKG_LIST: configs/third-party-openwrt.config
+
+      IN_DEVICE: ${{ github.event.inputs.device }}
+      IN_TARGET_PATH: ${{ github.event.inputs.target_path }}
+      IN_ARCH_OVERRIDE: ${{ github.event.inputs.arch_override }}
+      IN_IMM_VER: ${{ github.event.inputs.immortalwrt_version }}
+      IN_OWRT_VER: ${{ github.event.inputs.openwrt_version }}
+      IN_REPO_PREFIX: ${{ github.event.inputs.repo_prefix }}
+      IN_VERIFY: ${{ github.event.inputs.verify_mirror }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          die() { echo "::error::$*" >&2; exit 1; }
+          hdr() { echo; echo "======== $* ========"; }
+
+          DEVICE="${IN_DEVICE:-x86}"
+          TP_IN="${IN_TARGET_PATH:-}"
+          ARCH_OVERRIDE="${IN_ARCH_OVERRIDE:-}"
+          REPO_PREFIX="${IN_REPO_PREFIX:-}"
+          REPO_PREFIX="${REPO_PREFIX#/}"; REPO_PREFIX="${REPO_PREFIX%/}"
+          IMM_VER="${IN_IMM_VER:-25.12.2}"
+          OWRT_VER="${IN_OWRT_VER:-25.12.5}"
+          VERIFY="${IN_VERIFY:-true}"
+
+          # ==================================================================
+          # 1) 解析 target 路径（优先用输入，其次查 device_mapping.conf，
+          #    解析规则与主 workflow 完全一致）
+          # ==================================================================
+          TARGET_PATH="${TP_IN}"
+          if [ -z "${TARGET_PATH}" ]; then
+            MAP="configs/device_mapping.conf"
+            [ -f "${MAP}" ] || die "找不到 ${MAP}（请确认仓库里有这个文件）"
+            LINE="$(grep -E "^[[:space:]]*${DEVICE}=" "${MAP}" | head -n1 || true)"
+            if [ -n "${LINE}" ]; then
+              TARGET_PATH="${LINE#*=}"
+              TARGET_PATH="${TARGET_PATH%%|*}"
+              TARGET_PATH="$(printf '%s' "${TARGET_PATH}" | tr -d '[:space:]')"
+              TARGET_PATH="${TARGET_PATH%/}"
+              TARGET_PATH="${TARGET_PATH#targets/}"
+              echo ">>> 从 ${MAP} 解析: ${DEVICE} → ${TARGET_PATH}"
+            else
+              echo ">>> ${MAP} 里没有 '${DEVICE}'，现有可用的键:"
+              grep -oE '^[[:space:]]*[^#=[:space:]]+' "${MAP}" \
+                | tr -d '[:space:]' | sort -u | sed 's/^/        /' || true
+              die "无法定位 ${DEVICE} 的 target 路径；请用 target_path 输入直接指定（例如 mediatek/filogic）"
+            fi
+          else
+            echo ">>> 使用输入指定的 target 路径: ${TARGET_PATH}"
+          fi
+          TARGET_PATH="${TARGET_PATH#targets/}"; TARGET_PATH="${TARGET_PATH%/}"
+          [ -n "${TARGET_PATH}" ] || die "target 路径为空"
+          case "${TARGET_PATH}" in
+            */-) die "target 路径不合法: '${TARGET_PATH}'" ;;
+          esac
+
+          # ==================================================================
+          # 2) 取 ARCH_PACKAGES：镜像上该 target 的 config.buildinfo
+          #    （与主 workflow 的 Check APK package mirror 用的是同一个文件）
+          # ==================================================================
+          arch_from_buildinfo() {   # $1=mirror  $2=version
+            local url="${1}/releases/${2}/targets/${TARGET_PATH}/config.buildinfo"
+            curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 "${url}" 2>/dev/null \
+              | sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' | head -n1
+          }
+
+          fallback_arch() {         # 已知设备的兜底表，只在取不到 buildinfo 时用
+            case "$1" in
+              x86|"x86/64")      echo "x86_64" ;;
+              mediatek/filogic)  echo "aarch64_cortex-a53" ;;
+              *)                 echo "" ;;
+            esac
+          }
+
+          MIRROR_ARCH="${ARCH_OVERRIDE}"
+          ARCH_SRC="输入指定(arch_override)"
+
+          if [ -z "${MIRROR_ARCH}" ]; then
+            hdr "读取 immortalwrt ${IMM_VER} / targets/${TARGET_PATH} / config.buildinfo"
+            MIRROR_ARCH="$(arch_from_buildinfo "${MIRROR_IMM}" "${IMM_VER}" || true)"
+            ARCH_SRC="immortalwrt ${IMM_VER} config.buildinfo"
+          fi
+
+          if [ -z "${MIRROR_ARCH}" ]; then
+            echo "::warning::immortalwrt ${IMM_VER} 上没有该 target 的 config.buildinfo（该源可能不支持此设备）"
+            hdr "回退读取 openwrt ${OWRT_VER} / targets/${TARGET_PATH} / config.buildinfo"
+            MIRROR_ARCH="$(arch_from_buildinfo "${MIRROR_OWRT}" "${OWRT_VER}" || true)"
+            ARCH_SRC="openwrt ${OWRT_VER} config.buildinfo（immortalwrt 侧缺失，已回退）"
+          fi
+
+          if [ -z "${MIRROR_ARCH}" ]; then
+            F="$(fallback_arch "${TARGET_PATH}")"
+            [ -n "${F}" ] || die "无法获取 ARCH_PACKAGES。请用 arch_override 手动指定（如 aarch64_cortex-a53）"
+            echo "::warning::镜像上取不到 buildinfo，使用内置兜底表: ${TARGET_PATH} → ${F}（请人工确认后写进仓库文档）"
+            MIRROR_ARCH="${F}"
+            ARCH_SRC="内置兜底表"
+          fi
+
+          echo ">>> ARCH_PACKAGES = ${MIRROR_ARCH}   （来源: ${ARCH_SRC}）"
+
+          # ---- 两源交叉核对（不一致必须人工看） ----
+          if [ "${ARCH_SRC}" = "immortalwrt ${IMM_VER} config.buildinfo" ]; then
+            OTHER="$(arch_from_buildinfo "${MIRROR_OWRT}" "${OWRT_VER}" || true)"
+            if [ -n "${OTHER}" ] && [ "${OTHER}" != "${MIRROR_ARCH}" ]; then
+              echo "::warning::openwrt ${OWRT_VER} 的 ARCH_PACKAGES=${OTHER}，与 ${MIRROR_ARCH} 不一致；第三方 apk 的 BASE 仍以 immortalwrt 侧为准"
+            elif [ -n "${OTHER}" ]; then
+              echo ">>> 交叉核对通过：openwrt ${OWRT_VER} 也是 ${OTHER}"
+            fi
+          fi
+
+          # ==================================================================
+          # 3) 映射到 apk 仓库里的目录名
+          #    改这里必须同步改 shell/fetch-openwrt-third-party.sh 的 exact_arch_dir()
+          # ==================================================================
+          repo_arch_dir() {
+            case "$1" in
+              x86_64|x86_64_*)                          echo "x86_64" ;;
+              aarch64_cortex-a53|aarch64_cortex-a53_*)   echo "arm64-a53" ;;
+              aarch64*|arm64*)                          echo "arm64" ;;
+              *)                                        echo "" ;;
+            esac
+          }
+          ARCH_DIR="$(repo_arch_dir "${MIRROR_ARCH}")"
+          [ -n "${ARCH_DIR}" ] || die "未映射的架构 ${MIRROR_ARCH}：请补 repo_arch_dir()，并同步 fetch-openwrt-third-party.sh 里的 exact_arch_dir()"
+
+          DEST="${REPO_PREFIX:+${REPO_PREFIX}/}${ARCH_DIR}/${SUBDIR}"
+          BASE="${MIRROR_IMM}/releases/${IMM_VER}/packages/${MIRROR_ARCH}/luci"
+
+          # ==================================================================
+          # 4) 输出（第一段原样保留 ${MIRROR_ARCH}，可直接粘进下包脚本）
+          # ==================================================================
+          hdr "结果（可直接粘贴到下包脚本）"
+          {
+            echo "MIRROR_ARCH=\"${MIRROR_ARCH}\""
+            echo "DEST=\"${DEST}\""
+            echo "BASE=\"${MIRROR_IMM}/releases/${IMM_VER}/packages/\${MIRROR_ARCH}/luci\""
+          } | tee /tmp/detect-result.txt
+
+          hdr "展开后的实际值"
+          echo "设备型号      : ${DEVICE}"
+          echo "target 路径   : ${TARGET_PATH}"
+          echo "ARCH_PACKAGES : ${MIRROR_ARCH}"
+          echo "仓库目录名    : ${ARCH_DIR}"
+          [ -n "${REPO_PREFIX}" ] && echo "仓库前缀      : ${REPO_PREFIX}"
+          echo "DEST          : ${DEST}"
+          echo "BASE(实际)    : ${BASE}"
+
+          # ==================================================================
+          # 5) 探活镜像 + 逐个核对清单里的包
+          # ==================================================================
+          if [ "${VERIFY}" = "true" ]; then
+            hdr "探活 ${BASE}/"
+            CODE="$(curl -s -o /tmp/luci-index.html -w '%{http_code}' -L \
+                    --retry 3 --connect-timeout 20 --max-time 60 "${BASE}/" || echo 000)"
+            if [ "${CODE}" = "200" ]; then
+              echo "OK   [200] ${BASE}/"
+            else
+              echo "FAIL [${CODE}] ${BASE}/"
+              die "镜像上没有该架构的 luci 目录 —— 这批 apk 取不到，请核对架构名 / 版本号"
+            fi
+
+            if [ -f "${PKG_LIST}" ]; then
+              hdr "逐个核对 ${PKG_LIST} 里的包"
+              MISS=""
+              while IFS= read -r p; do
+                [ -n "${p}" ] || continue
+                p="${p%%=*}"
+                if grep -qE "${p}[-_][^\"/]*\.apk" /tmp/luci-index.html; then
+                  echo "  有   ${p}"
+                else
+                  echo "  缺   ${p}"
+                  MISS="${MISS} ${p}"
+                fi
+              done < <(grep -vE '^[[:space:]]*(#|$)' "${PKG_LIST}" | tr -d '\r' || true)
+              [ -z "${MISS}" ] || die "镜像上缺少这些包:${MISS}"
+              echo ">>> 清单里的包在该架构下齐全"
+            else
+              echo "::warning::找不到 ${PKG_LIST}，跳过逐包核对"
+            fi
+          else
+            echo ">>> verify_mirror=false，跳过探活"
+          fi
+
+          # ==================================================================
+          # 6) 写进 Job Summary，方便复制
+          # ==================================================================
+          {
+            echo "### 架构检测：\`${DEVICE}\`"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| target 路径 | \`${TARGET_PATH}\` |"
+            echo "| ARCH_PACKAGES | \`${MIRROR_ARCH}\` |"
+            echo "| 仓库目录 | \`${DEST}\` |"
+            echo "| BASE | ${BASE} |"
+            echo "| ARCH 来源 | ${ARCH_SRC} |"
+            echo ""
+            echo '```'
+            cat /tmp/detect-result.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo
+          echo ">>> 检测完成"
