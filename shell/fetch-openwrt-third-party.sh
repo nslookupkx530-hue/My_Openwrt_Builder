@@ -23,7 +23,7 @@ PKG_LIST="${PKG_LIST:-configs/third-party-openwrt.config}"
 APK_REPO="${APK_REPO:-nslookupkx530-hue/apk}"
 BRANCHES="${BRANCHES:-My master}"
 DEFAULT_SUBDIR="luci-third-party-openwrt"
-APK_REPO_PREFIX="${APK_REPO_PREFIX:-}"      # 仓库里如果还有一层前缀（如 run），写这里
+APK_REPO_PREFIX="${APK_REPO_PREFIX:-openwrt}"   # 仓库里"架构目录"之前的前缀层（实测仓库是 openwrt/<arch>/...）
 
 OUT_DIR="${OUT_DIR:-${SRC_DIR}/files/usr/share/third-party}"
 MANIFEST="${MANIFEST:-${SRC_DIR}/tmp/openwrt-third-party.txt}"
@@ -82,7 +82,14 @@ ARCH_CANDIDATES="${ARCH_EXACT}"
 [ -n "${ARCH_GENERIC}" ] && [ "${ARCH_GENERIC}" != "${ARCH_EXACT}" ] && \
     ARCH_CANDIDATES="${ARCH_CANDIDATES} ${ARCH_GENERIC}"
 
-log "ARCH_PACKAGES=${ARCH_PACKAGES}  候选目录=${ARCH_CANDIDATES}"
+# sparse checkout 的路径必须带上仓库前缀（openwrt/），否则永远命中不了，
+# 每次都退化成完整 clone（仓库里现在有三套 apk + run/，白下不少东西）
+SPARSE_DIRS=""
+for d in ${ARCH_CANDIDATES}; do
+    SPARSE_DIRS="${SPARSE_DIRS}${SPARSE_DIRS:+ }${APK_REPO_PREFIX:+${APK_REPO_PREFIX}/}${d}"
+done
+
+log "ARCH_PACKAGES=${ARCH_PACKAGES}  候选目录=${SPARSE_DIRS}"
 
 # ---------- 2. 克隆 apk 仓库（My 优先，失败回退） ----------
 try_clone() {
@@ -94,8 +101,8 @@ try_clone() {
             --filter=blob:none --sparse \
             "https://github.com/${APK_REPO}.git" "$WORK/apk" >/dev/null 2>&1; then
         # shellcheck disable=SC2086
-        git -C "$WORK/apk" sparse-checkout set --no-cone ${ARCH_CANDIDATES} >/dev/null 2>&1 \
-          || git -C "$WORK/apk" sparse-checkout set ${ARCH_CANDIDATES} >/dev/null 2>&1 \
+        git -C "$WORK/apk" sparse-checkout set --no-cone ${SPARSE_DIRS} >/dev/null 2>&1 \
+          || git -C "$WORK/apk" sparse-checkout set ${SPARSE_DIRS} >/dev/null 2>&1 \
           || true
         local d
         for d in ${ARCH_CANDIDATES}; do
