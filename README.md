@@ -32,11 +32,11 @@
 
 - `.github/workflows/`：GitHub Actions 构建与发布入口；`_openwrt-build-device.yml` 是共享的可复用长构建流程。
 - `.github/actions/`：发布阶段使用的本地 composite actions。
-- `config/`：各设备的 OpenWrt `.config` 配置片段。
-- `sh/scripts-part1.sh`：feeds 更新前执行的设备特定源码修改。
-- `sh/scripts-part2.sh`：feeds 安装后执行的自定义包注入与冲突包清理。
-- `default-settings-m0eak/`：自定义默认设置包。
-- `files/`：OpenWrt rootfs overlay，会被复制到构建树的 `openwrt/files`。
+- `Third-Party/third-party.config`：第三方源/插件相关配置。
+- `configs/`：各设备的 OpenWrt `.config` 配置片段 / 设备映射 / 官方与第三方插件配置。
+- `files/<设备名>/etc/uci-defaults/…`：每台设备独立的默认配置（如网络），会被复制到构建树的 `src/files/etc/。
+- `files/etc/`：首次启动时装第三方包，会被复制到构建树的 `src/files/etc/`。
+- `shell/`：拼 .config、注入插件、准备包清单。
 
 ## 构建流程
 
@@ -48,15 +48,6 @@
 6. 执行 `sh/scripts-part2.sh`，清理冲突 Makefile 并克隆第三方自定义包。
 7. `make defconfig`、下载依赖、编译固件并上传产物。
 
-
-## 本地检查
-
-在有 Bash 的环境中，可以先做脚本语法检查：
-
-```bash
-bash -n sh/scripts-part1.sh
-bash -n sh/scripts-part2.sh
-```
 
 完整固件构建建议在 GitHub Actions 中验证。
 
