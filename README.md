@@ -33,8 +33,8 @@
 - `.github/workflows/`：GitHub Actions 构建与发布入口；`_openwrt-build-device.yml` 是共享的可复用长构建流程。
 - `.github/actions/`：发布阶段使用的本地 composite actions。
 - `Third-Party/third-party.config`：第三方源/插件相关配置。
-- `configs/`：各设备的 OpenWrt `.config` 配置片段 / 设备映射 / 官方与第三方插件配置。
-- `files/<设备名>/etc/uci-defaults/…`：每台设备独立的默认配置（如网络），会被复制到构建树的 `src/files/etc/。
+- `configs/`：各设备的 .config 配置片段 / 设备映射 / 官方与第三方插件配置。
+- `files/<设备名>/etc/uci-defaults/…`：每台设备独立的默认配置（如网络），会被复制到构建树的 `src/files/etc/`。
 - `files/etc/`：首次启动时装第三方包，会被复制到构建树的 `src/files/etc/`。
 - `shell/`：拼 .config、注入插件、准备包清单。
 
