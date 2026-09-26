@@ -144,7 +144,7 @@ add_pkg() {                          # $1 = 包名（不带 CONFIG_PACKAGE_ 前�
 if [ "${SOURCE_TYPE:-immortalwrt}" = "openwrt" ]; then
     echo ">>> [openwrt] 开始补齐 Lua CBI 运行库与中文语言包"
 
-    # ⓿ Zh_Hans 开关（若文件别处已有，这段删掉）
+    # ⓿ Zh_Hans 开关
     #    openwrt 官方只有 en；开关不开，下面补的 zh-cn 会被 defconfig 全部丢掉
     if grep -qE '^# CONFIG_LUCI_LANG_zh_Hans is not set$' "$CONFIG_FILE"; then
         sed -i 's|^# CONFIG_LUCI_LANG_zh_Hans is not set$|CONFIG_LUCI_LANG_zh_Hans=y|' "$CONFIG_FILE"
