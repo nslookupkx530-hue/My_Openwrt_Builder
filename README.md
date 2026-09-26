@@ -33,7 +33,7 @@
 - `.github/workflows/`：GitHub Actions 构建与发布入口；`_openwrt-build-device.yml` 是共享的可复用长构建流程。
 - `.github/actions/`：发布阶段使用的本地 composite actions。
 - `Third-Party/third-party.config`：第三方源/插件相关配置。
-- `configs/`：各设备的 .config 配置片段 / 设备映射 / 官方与第三方插件配置。
+- `configs/`：各设备的 .config 配置片段 / 设备映射 / 官方与引入官方插件配置。
 - `files/<设备名>/etc/uci-defaults/…`：每台设备独立的默认配置（如网络），会被复制到构建树的 `src/files/etc/`。
 - `files/etc/`：首次启动时装第三方包，会被复制到构建树的 `src/files/etc/`。
 - `shell/`：拼 .config、注入插件、准备包清单。
@@ -42,18 +42,15 @@
 
 1. GitHub Actions 根据 workflow matrix 选择设备和配置文件。
 2. 克隆对应 OpenWrt/ImmortalWrt 源码。
-3. 执行 `sh/scripts-part1.sh`，处理源码级补丁、默认 IP 等前置修改。
+3. 合并所有.config 配置片段，设置默认 IP 等前置修改。
 4. 更新并安装 feeds。
-5. 注入 `default-settings-m0eak`、`files/` 和设备 `.config`。
-6. 执行 `sh/scripts-part2.sh`，清理冲突 Makefile 并克隆第三方自定义包。
-7. `make defconfig`、下载依赖、编译固件并上传产物。
+5. `make defconfig`、下载依赖、编译固件并上传产物。
 
 
 完整固件构建建议在 GitHub Actions 中验证。
 
 ## 致谢
 
-- [P3TERX/Actions-OpenWrt](https://github.com/P3TERX/Actions-OpenWrt)
 - [OpenWrt](https://github.com/openwrt/openwrt)
 - [ImmortalWrt](https://github.com/immortalwrt/immortalwrt)
 
