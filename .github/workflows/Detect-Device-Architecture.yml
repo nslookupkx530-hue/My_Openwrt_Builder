@@ -4,27 +4,35 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: "设备型号（configs/device_mapping.conf 里的键，如 x86 / AXT-1800 / Cudy-TR3000-256MB）"
+        description: "设备型号（configs/device_mapping.conf 里的键）"
         required: true
         default: "x86"
         type: string
       target_path:
-        description: "直接指定 target 路径（如 mediatek/filogic）；留空则从 device_mapping.conf 查"
+        description: "直接指定 target 路径（如 qualcommax/ipq60xx）；留空则从 device_mapping.conf 查"
         required: false
         default: ""
         type: string
       arch_override:
-        description: "强制指定架构（如 aarch64_cortex-a53）；留空则从镜像 config.buildinfo 读取"
+        description: "强制指定架构（如 aarch64_cortex-a53）；留空则自动推导"
         required: false
         default: ""
         type: string
+      source_type:
+        description: "要编译的源码类型（决定优先用哪个源的 profiles.json）"
+        required: true
+        default: "immortalwrt"
+        type: choice
+        options:
+          - immortalwrt
+          - openwrt
       immortalwrt_version:
         description: "immortalwrt 版本（第三方 apk 的来源，决定 BASE）"
         required: true
         default: "25.12.2"
         type: string
       openwrt_version:
-        description: "openwrt 版本（仅用于交叉核对）"
+        description: "openwrt 版本（交叉核对用）"
         required: false
         default: "25.12.5"
         type: string
@@ -56,6 +64,7 @@ jobs:
       IN_DEVICE: ${{ github.event.inputs.device }}
       IN_TARGET_PATH: ${{ github.event.inputs.target_path }}
       IN_ARCH_OVERRIDE: ${{ github.event.inputs.arch_override }}
+      IN_SOURCE_TYPE: ${{ github.event.inputs.source_type }}
       IN_IMM_VER: ${{ github.event.inputs.immortalwrt_version }}
       IN_OWRT_VER: ${{ github.event.inputs.openwrt_version }}
       IN_REPO_PREFIX: ${{ github.event.inputs.repo_prefix }}
@@ -78,101 +87,43 @@ jobs:
           DEVICE="${IN_DEVICE:-x86}"
           TP_IN="${IN_TARGET_PATH:-}"
           ARCH_OVERRIDE="${IN_ARCH_OVERRIDE:-}"
+          SOURCE_TYPE="${IN_SOURCE_TYPE:-immortalwrt}"
           REPO_PREFIX="${IN_REPO_PREFIX:-}"
           REPO_PREFIX="${REPO_PREFIX#/}"; REPO_PREFIX="${REPO_PREFIX%/}"
           IMM_VER="${IN_IMM_VER:-25.12.2}"
           OWRT_VER="${IN_OWRT_VER:-25.12.5}"
           VERIFY="${IN_VERIFY:-true}"
 
-          # ==================================================================
-          # 1) 解析 target 路径（优先用输入，其次查 device_mapping.conf，
-          #    解析规则与主 workflow 完全一致）
-          # ==================================================================
-          TARGET_PATH="${TP_IN}"
-          if [ -z "${TARGET_PATH}" ]; then
-            MAP="configs/device_mapping.conf"
-            [ -f "${MAP}" ] || die "找不到 ${MAP}（请确认仓库里有这个文件）"
-            LINE="$(grep -E "^[[:space:]]*${DEVICE}=" "${MAP}" | head -n1 || true)"
-            if [ -n "${LINE}" ]; then
-              TARGET_PATH="${LINE#*=}"
-              TARGET_PATH="${TARGET_PATH%%|*}"
-              TARGET_PATH="$(printf '%s' "${TARGET_PATH}" | tr -d '[:space:]')"
-              TARGET_PATH="${TARGET_PATH%/}"
-              TARGET_PATH="${TARGET_PATH#targets/}"
-              echo ">>> 从 ${MAP} 解析: ${DEVICE} → ${TARGET_PATH}"
-            else
-              echo ">>> ${MAP} 里没有 '${DEVICE}'，现有可用的键:"
-              grep -oE '^[[:space:]]*[^#=[:space:]]+' "${MAP}" \
-                | tr -d '[:space:]' | sort -u | sed 's/^/        /' || true
-              die "无法定位 ${DEVICE} 的 target 路径；请用 target_path 输入直接指定（例如 mediatek/filogic）"
-            fi
-          else
-            echo ">>> 使用输入指定的 target 路径: ${TARGET_PATH}"
-          fi
-          TARGET_PATH="${TARGET_PATH#targets/}"; TARGET_PATH="${TARGET_PATH%/}"
-          [ -n "${TARGET_PATH}" ] || die "target 路径为空"
-          case "${TARGET_PATH}" in
-            */-) die "target 路径不合法: '${TARGET_PATH}'" ;;
-          esac
-
-          # ==================================================================
-          # 2) 取 ARCH_PACKAGES：镜像上该 target 的 config.buildinfo
-          #    （与主 workflow 的 Check APK package mirror 用的是同一个文件）
-          # ==================================================================
-          arch_from_buildinfo() {   # $1=mirror  $2=version
-            local url="${1}/releases/${2}/targets/${TARGET_PATH}/config.buildinfo"
-            curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 "${url}" 2>/dev/null \
+          probe() {   # $1=url → 打印 http code
+            curl -s -o /dev/null -w '%{http_code}' -L --retry 2 --connect-timeout 15 --max-time 45 "$1" 2>/dev/null || echo 000
+          }
+          # ---- 权威来源①：profiles.json 的 arch_packages 字段 ----
+          arch_from_profiles() {   # $1=mirror $2=version
+            curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 \
+                 "${1}/releases/${2}/targets/${TARGET_PATH}/profiles.json" 2>/dev/null \
+              | grep -oE '"arch_packages"[[:space:]]*:[[:space:]]*"[^"]+"' \
+              | sed -E 's/.*:[[:space:]]*"([^"]+)"$/\1/' | head -n1
+          }
+          # ---- 来源②：config.buildinfo（精简文件，可能没有该符号） ----
+          arch_from_buildinfo() {  # $1=mirror $2=version
+            curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 \
+                 "${1}/releases/${2}/targets/${TARGET_PATH}/config.buildinfo" 2>/dev/null \
               | sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' | head -n1
           }
-
-          fallback_arch() {         # 已知设备的兜底表，只在取不到 buildinfo 时用
+          # ---- 来源③：内置兜底表（务必与 fetch-openwrt-third-party.sh 的 exact_arch_dir 保持一致） ----
+          fallback_arch() {
             case "$1" in
-              x86|"x86/64")      echo "x86_64" ;;
-              mediatek/filogic)  echo "aarch64_cortex-a53" ;;
-              *)                 echo "" ;;
+              x86|"x86/64")         echo "x86_64" ;;
+              qualcommax/ipq60xx)   echo "aarch64_cortex-a53" ;;
+              qualcommax/ipq807x)   echo "aarch64_cortex-a53" ;;
+              qualcommax/ipq50xx)   echo "aarch64_cortex-a53" ;;
+              mediatek/filogic)     echo "aarch64_cortex-a53" ;;
+              mediatek/mt7622)      echo "aarch64_cortex-a53" ;;
+              mediatek/mt7623)      echo "aarch64_cortex-a53" ;;
+              *)                    echo "" ;;
             esac
           }
-
-          MIRROR_ARCH="${ARCH_OVERRIDE}"
-          ARCH_SRC="输入指定(arch_override)"
-
-          if [ -z "${MIRROR_ARCH}" ]; then
-            hdr "读取 immortalwrt ${IMM_VER} / targets/${TARGET_PATH} / config.buildinfo"
-            MIRROR_ARCH="$(arch_from_buildinfo "${MIRROR_IMM}" "${IMM_VER}" || true)"
-            ARCH_SRC="immortalwrt ${IMM_VER} config.buildinfo"
-          fi
-
-          if [ -z "${MIRROR_ARCH}" ]; then
-            echo "::warning::immortalwrt ${IMM_VER} 上没有该 target 的 config.buildinfo（该源可能不支持此设备）"
-            hdr "回退读取 openwrt ${OWRT_VER} / targets/${TARGET_PATH} / config.buildinfo"
-            MIRROR_ARCH="$(arch_from_buildinfo "${MIRROR_OWRT}" "${OWRT_VER}" || true)"
-            ARCH_SRC="openwrt ${OWRT_VER} config.buildinfo（immortalwrt 侧缺失，已回退）"
-          fi
-
-          if [ -z "${MIRROR_ARCH}" ]; then
-            F="$(fallback_arch "${TARGET_PATH}")"
-            [ -n "${F}" ] || die "无法获取 ARCH_PACKAGES。请用 arch_override 手动指定（如 aarch64_cortex-a53）"
-            echo "::warning::镜像上取不到 buildinfo，使用内置兜底表: ${TARGET_PATH} → ${F}（请人工确认后写进仓库文档）"
-            MIRROR_ARCH="${F}"
-            ARCH_SRC="内置兜底表"
-          fi
-
-          echo ">>> ARCH_PACKAGES = ${MIRROR_ARCH}   （来源: ${ARCH_SRC}）"
-
-          # ---- 两源交叉核对（不一致必须人工看） ----
-          if [ "${ARCH_SRC}" = "immortalwrt ${IMM_VER} config.buildinfo" ]; then
-            OTHER="$(arch_from_buildinfo "${MIRROR_OWRT}" "${OWRT_VER}" || true)"
-            if [ -n "${OTHER}" ] && [ "${OTHER}" != "${MIRROR_ARCH}" ]; then
-              echo "::warning::openwrt ${OWRT_VER} 的 ARCH_PACKAGES=${OTHER}，与 ${MIRROR_ARCH} 不一致；第三方 apk 的 BASE 仍以 immortalwrt 侧为准"
-            elif [ -n "${OTHER}" ]; then
-              echo ">>> 交叉核对通过：openwrt ${OWRT_VER} 也是 ${OTHER}"
-            fi
-          fi
-
-          # ==================================================================
-          # 3) 映射到 apk 仓库里的目录名
-          #    改这里必须同步改 shell/fetch-openwrt-third-party.sh 的 exact_arch_dir()
-          # ==================================================================
+          # ---- 架构名 → apk 仓库目录名（改这里必须同步 fetch-openwrt-third-party.sh） ----
           repo_arch_dir() {
             case "$1" in
               x86_64|x86_64_*)                          echo "x86_64" ;;
@@ -181,15 +132,113 @@ jobs:
               *)                                        echo "" ;;
             esac
           }
+          list_dirs() {   # $1=url → 列出该页面的子目录名
+            curl -fsSL --retry 2 --connect-timeout 15 --max-time 45 "$1" 2>/dev/null \
+              | grep -oE 'href="[^"]+/"' | sed 's/href="//;s|/"||' \
+              | grep -vE '^\.|^/' | sort -u | sed 's/^/        /'
+          }
+
+          # ================================================================
+          # 1) 解析 target 路径
+          # ================================================================
+          TARGET_PATH="${TP_IN}"
+          if [ -z "${TARGET_PATH}" ]; then
+            MAP="configs/device_mapping.conf"
+            [ -f "${MAP}" ] || die "找不到 ${MAP}"
+            LINE="$(grep -E "^[[:space:]]*${DEVICE}=" "${MAP}" | head -n1 || true)"
+            if [ -n "${LINE}" ]; then
+              TARGET_PATH="${LINE#*=}"; TARGET_PATH="${TARGET_PATH%%|*}"
+              TARGET_PATH="$(printf '%s' "${TARGET_PATH}" | tr -d '[:space:]')"
+              TARGET_PATH="${TARGET_PATH%/}"; TARGET_PATH="${TARGET_PATH#targets/}"
+              echo ">>> 从 ${MAP} 解析: ${DEVICE} → ${TARGET_PATH}"
+            else
+              echo ">>> ${MAP} 里没有 '${DEVICE}'，可用键:"
+              grep -oE '^[[:space:]]*[^#=[:space:]]+' "${MAP}" | tr -d '[:space:]' | sort -u | sed 's/^/        /' || true
+              die "无法定位 ${DEVICE} 的 target 路径；请用 target_path 输入直接指定"
+            fi
+          else
+            echo ">>> 使用输入指定的 target 路径: ${TARGET_PATH}"
+          fi
+          TARGET_PATH="${TARGET_PATH#targets/}"; TARGET_PATH="${TARGET_PATH%/}"
+          [ -n "${TARGET_PATH}" ] || die "target 路径为空"
+          GROUP="${TARGET_PATH%%/*}"
+
+          # ================================================================
+          # 2) 两源四种来源全部查一遍（全打印出来，便于对照）
+          # ================================================================
+          hdr "查询 ${TARGET_PATH} 的架构"
+          A_IMM_P="$(arch_from_profiles   "${MIRROR_IMM}"  "${IMM_VER}"  || true)"
+          A_IMM_B="$(arch_from_buildinfo  "${MIRROR_IMM}"  "${IMM_VER}"  || true)"
+          A_OW_P="$(arch_from_profiles    "${MIRROR_OWRT}" "${OWRT_VER}" || true)"
+          A_OW_B="$(arch_from_buildinfo   "${MIRROR_OWRT}" "${OWRT_VER}" || true)"
+          echo "  immortalwrt ${IMM_VER} : profiles.json=${A_IMM_P:-<无>}   config.buildinfo=${A_IMM_B:-<无>}"
+          echo "  openwrt     ${OWRT_VER} : profiles.json=${A_OW_P:-<无>}   config.buildinfo=${A_OW_B:-<无>}"
+
+          IMM_ARCH="${A_IMM_P:-${A_IMM_B}}"
+          OWRT_ARCH="${A_OW_P:-${A_OW_B}}"
+
+          if [ -n "${IMM_ARCH}" ] && [ -n "${OWRT_ARCH}" ] && [ "${IMM_ARCH}" != "${OWRT_ARCH}" ]; then
+            echo "::warning::两源架构不一致：immortalwrt=${IMM_ARCH}  openwrt=${OWRT_ARCH}（BASE 以 immortalwrt 侧为准）"
+          fi
+
+          # ================================================================
+          # 3) 定最终架构：覆盖 > profiles > buildinfo > 兜底表
+          # ================================================================
+          MIRROR_ARCH=""; ARCH_SRC=""
+          if [ -n "${ARCH_OVERRIDE}" ]; then
+            MIRROR_ARCH="${ARCH_OVERRIDE}"; ARCH_SRC="输入指定(arch_override)"
+          elif [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
+            if [ -n "${IMM_ARCH}" ]; then MIRROR_ARCH="${IMM_ARCH}"; ARCH_SRC="immortalwrt profiles/buildinfo"
+            elif [ -n "${OWRT_ARCH}" ]; then
+              echo "::warning::immortalwrt ${IMM_VER} 上没有 ${TARGET_PATH}（该源不支持此设备）；改用 openwrt 侧的架构"
+              MIRROR_ARCH="${OWRT_ARCH}"; ARCH_SRC="openwrt profiles/buildinfo（回退）"
+            fi
+          else
+            if [ -n "${OWRT_ARCH}" ]; then MIRROR_ARCH="${OWRT_ARCH}"; ARCH_SRC="openwrt profiles/buildinfo"
+            elif [ -n "${IMM_ARCH}" ]; then MIRROR_ARCH="${IMM_ARCH}"; ARCH_SRC="immortalwrt profiles/buildinfo（回退）"
+            fi
+          fi
+
+          if [ -z "${MIRROR_ARCH}" ]; then
+            F="$(fallback_arch "${TARGET_PATH}")"
+            if [ -n "${F}" ]; then
+              echo "::warning::镜像上取不到架构信息，使用内置兜底表: ${TARGET_PATH} → ${F}（请人工确认）"
+              MIRROR_ARCH="${F}"; ARCH_SRC="内置兜底表"
+            fi
+          fi
+
+          # ================================================================
+          # 4) 失败 → 打完整诊断再退出
+          # ================================================================
+          if [ -z "${MIRROR_ARCH}" ]; then
+            hdr "诊断：各 URL 的 HTTP 状态"
+            echo "  [$(probe "${MIRROR_IMM}/releases/${IMM_VER}/targets/${TARGET_PATH}/profiles.json")]     immortalwrt profiles.json"
+            echo "  [$(probe "${MIRROR_IMM}/releases/${IMM_VER}/targets/${TARGET_PATH}/config.buildinfo")] immortalwrt config.buildinfo"
+            echo "  [$(probe "${MIRROR_IMM}/releases/${IMM_VER}/targets/${TARGET_PATH}/")]                  immortalwrt target 目录"
+            echo "  [$(probe "${MIRROR_IMM}/releases/${IMM_VER}/targets/${GROUP}/")]                        immortalwrt group 目录"
+            echo "  [$(probe "${MIRROR_OWRT}/releases/${OWRT_VER}/targets/${TARGET_PATH}/profiles.json")]     openwrt profiles.json"
+            echo "  [$(probe "${MIRROR_OWRT}/releases/${OWRT_VER}/targets/${TARGET_PATH}/")]                  openwrt target 目录"
+            echo "  [$(probe "${MIRROR_OWRT}/releases/${OWRT_VER}/targets/${GROUP}/")]                        openwrt group 目录"
+
+            hdr "immortalwrt ${IMM_VER} / targets/${GROUP}/ 下实际有哪些 subtarget"
+            list_dirs "${MIRROR_IMM}/releases/${IMM_VER}/targets/${GROUP}/" || echo "        <列不出来>"
+            hdr "openwrt ${OWRT_VER} / targets/${GROUP}/ 下实际有哪些 subtarget"
+            list_dirs "${MIRROR_OWRT}/releases/${OWRT_VER}/targets/${GROUP}/" || echo "        <列不出来>"
+
+            die "无法推导 ARCH_PACKAGES。请用 arch_override 手动指定（如 aarch64_cortex-a53），并把映射补进 fallback_arch()"
+          fi
+
+          echo ">>> ARCH_PACKAGES = ${MIRROR_ARCH}   （来源: ${ARCH_SRC}）"
+
+          # ================================================================
+          # 5) 映射到仓库目录 + 拼 BASE（BASE 只依赖架构，不依赖 target 是否被支持）
+          # ================================================================
           ARCH_DIR="$(repo_arch_dir "${MIRROR_ARCH}")"
-          [ -n "${ARCH_DIR}" ] || die "未映射的架构 ${MIRROR_ARCH}：请补 repo_arch_dir()，并同步 fetch-openwrt-third-party.sh 里的 exact_arch_dir()"
+          [ -n "${ARCH_DIR}" ] || die "未映射的架构 ${MIRROR_ARCH}：请补 repo_arch_dir()，并同步 fetch-openwrt-third-party.sh 的 exact_arch_dir()"
 
           DEST="${REPO_PREFIX:+${REPO_PREFIX}/}${ARCH_DIR}/${SUBDIR}"
           BASE="${MIRROR_IMM}/releases/${IMM_VER}/packages/${MIRROR_ARCH}/luci"
 
-          # ==================================================================
-          # 4) 输出（第一段原样保留 ${MIRROR_ARCH}，可直接粘进下包脚本）
-          # ==================================================================
           hdr "结果（可直接粘贴到下包脚本）"
           {
             echo "MIRROR_ARCH=\"${MIRROR_ARCH}\""
@@ -199,29 +248,32 @@ jobs:
 
           hdr "展开后的实际值"
           echo "设备型号      : ${DEVICE}"
-          echo "target 路径   : ${TARGET_PATH}"
+          echo "target 路径   : ${TARGET_PATH}（group=${GROUP}）"
+          echo "source_type   : ${SOURCE_TYPE}"
           echo "ARCH_PACKAGES : ${MIRROR_ARCH}"
           echo "仓库目录名    : ${ARCH_DIR}"
           [ -n "${REPO_PREFIX}" ] && echo "仓库前缀      : ${REPO_PREFIX}"
           echo "DEST          : ${DEST}"
           echo "BASE(实际)    : ${BASE}"
 
-          # ==================================================================
-          # 5) 探活镜像 + 逐个核对清单里的包
-          # ==================================================================
+          # ================================================================
+          # 6) 探活 BASE + 逐包核对
+          # ================================================================
           if [ "${VERIFY}" = "true" ]; then
             hdr "探活 ${BASE}/"
-            CODE="$(curl -s -o /tmp/luci-index.html -w '%{http_code}' -L \
-                    --retry 3 --connect-timeout 20 --max-time 60 "${BASE}/" || echo 000)"
+            CODE="$(probe "${BASE}/")"
             if [ "${CODE}" = "200" ]; then
               echo "OK   [200] ${BASE}/"
             else
               echo "FAIL [${CODE}] ${BASE}/"
-              die "镜像上没有该架构的 luci 目录 —— 这批 apk 取不到，请核对架构名 / 版本号"
+              hdr "immortalwrt ${IMM_VER} 上实际存在的架构目录"
+              list_dirs "${MIRROR_IMM}/releases/${IMM_VER}/packages/" || echo "        <列不出来>"
+              die "镜像上没有 ${MIRROR_ARCH} 的 luci 目录 —— 这批 apk 取不到，请核对架构名 / 版本号"
             fi
 
             if [ -f "${PKG_LIST}" ]; then
               hdr "逐个核对 ${PKG_LIST} 里的包"
+              curl -fsSL --retry 3 --max-time 60 "${BASE}/" -o /tmp/luci-index.html 2>/dev/null || true
               MISS=""
               while IFS= read -r p; do
                 [ -n "${p}" ] || continue
@@ -242,15 +294,16 @@ jobs:
             echo ">>> verify_mirror=false，跳过探活"
           fi
 
-          # ==================================================================
-          # 6) 写进 Job Summary，方便复制
-          # ==================================================================
+          # ================================================================
+          # 7) Job Summary
+          # ================================================================
           {
             echo "### 架构检测：\`${DEVICE}\`"
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
             echo "| target 路径 | \`${TARGET_PATH}\` |"
+            echo "| source_type | \`${SOURCE_TYPE}\` |"
             echo "| ARCH_PACKAGES | \`${MIRROR_ARCH}\` |"
             echo "| 仓库目录 | \`${DEST}\` |"
             echo "| BASE | ${BASE} |"
