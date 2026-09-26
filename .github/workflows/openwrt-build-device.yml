@@ -573,6 +573,7 @@ jobs:
           cd "${WORKSPACE}"
           SRC_DIR="${WORKSPACE}/src" \
           OUT_DIR="${WORKSPACE}/src/packages" \
+          APK_REPO_PREFIX="openwrt" \
           bash shell/fetch-openwrt-third-party.sh
 
       - name: Install Third-Party APKs into image
