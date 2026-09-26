@@ -30,7 +30,7 @@
 
 ## 目录结构
 
-- `.github/workflows/`：GitHub Actions 构建与发布入口；`_openwrt-build-device.yml` 是共享的可复用长构建流程。
+- `.github/workflows/`：GitHub Actions 构建与发布入口；`openwrt-build-device.yml` 是共享的可复用长构建流程。
 - `.github/actions/`：发布阶段使用的本地 composite actions。
 - `Third-Party/third-party.config`：第三方源/插件相关配置。
 - `configs/`：各设备的 .config 配置片段 / 设备映射 / 官方与引入官方插件配置。
