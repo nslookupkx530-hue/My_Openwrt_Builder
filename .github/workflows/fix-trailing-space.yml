@@ -1,0 +1,60 @@
+name: Fix trailing-space paths
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Remove trailing spaces in path components
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo ">>> 修复前，含"某一段以空格结尾"的已跟踪文件："
+          git ls-files | awk -F/ '{for(i=1;i<=NF;i++) if ($i ~ / $/) {print "    ["$0"]"; break}}' || true
+
+          FIXED=0
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            # 逐路径段去掉尾随空格/制表符
+            q="$(printf '%s' "$p" | awk -F/ '{for(i=1;i<=NF;i++) gsub(/[ \t]+$/,"",$i); OFS="/"; print}')"
+            if [ "$p" != "$q" ]; then
+              echo "MOVE: [$p]  ->  [$q]"
+              mkdir -p "$(dirname "$q")"
+              if git mv "$p" "$q" 2>/dev/null; then
+                :
+              else
+                git rm -q --cached "$p"
+                mv "$p" "$q"
+                git add "$q"
+              fi
+              FIXED=$((FIXED+1))
+            fi
+          done < <(git ls-files)
+
+          if [ "${FIXED}" = "0" ]; then
+            echo ">>> 没有需要修复的路径，退出"
+            exit 0
+          fi
+
+          echo ">>> 共修复 ${FIXED} 个文件"
+          echo ">>> 残留检查（应为空）："
+          git ls-files | awk -F/ '{for(i=1;i<=NF;i++) if ($i ~ / $/) {print "    残留: ["$0"]"; break}}' || true
+
+          git add -A
+          git commit -m "fix: 去掉 uci-defaults 目录名的尾随空格（ARM 设备）"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+          echo ">>> 已推送，commit = $(git rev-parse --short HEAD)"
