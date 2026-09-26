@@ -521,8 +521,26 @@ jobs:
           fi
 
           NET_CONF="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-custom-network"
-          [ -f "${NET_CONF}" ] || {
-            echo "ERROR: 缺少 ${NET_CONF}（应来自 files/${TARGET_DEVICE}/）"; exit 1; }
+          if [ ! -f "${NET_CONF}" ]; then
+            echo "=============================================================="
+            echo "ERROR: 缺少 ${NET_CONF}（应来自 files/${TARGET_DEVICE}/）"
+            echo "--- 本次 checkout 的 ref / commit ---"
+            echo "  ref    = $(git -C "${WORKSPACE}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '<unknown>')"
+            echo "  commit = $(git -C "${WORKSPACE}" rev-parse HEAD 2>/dev/null || echo '<unknown>')"
+            echo "  remote = $(git -C "${WORKSPACE}" config --get remote.origin.url 2>/dev/null || echo '<unknown>')"
+            echo "--- 仓库里 files/${TARGET_DEVICE}/ 的实际内容（含类型）---"
+            find "${REPO_FILES_DIR}/${TARGET_DEVICE}" -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort \
+              || echo "  <目录不存在>"
+            echo "--- 全仓库里叫 99-custom-network* 的东西 ---"
+            find "${REPO_FILES_DIR}" -name '99-custom-network*' -printf '%y %p\n' 2>/dev/null \
+              || echo "  <一个都没有>"
+            echo "--- 拷贝后的 src/files/etc/uci-defaults/ ---"
+            ls -la "${FIRMWARE_FILES_DIR}/etc/uci-defaults/" 2>/dev/null || echo "  <目录不存在>"
+            echo "--- git 跟踪的 files/${TARGET_DEVICE}/ 文件 ---"
+            git -C "${WORKSPACE}" ls-files "files/${TARGET_DEVICE}/" 2>/dev/null || true
+            echo "=============================================================="
+            exit 1
+          fi
 
           chmod 0755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
           [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && \
