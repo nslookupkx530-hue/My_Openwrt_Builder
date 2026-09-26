@@ -797,32 +797,47 @@ jobs:
             printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
 
             # ================== 新增：openwrt 第三方旁路包 ==================
-            # 来源：apk 仓库 run/<arch>/luci-third-party-openwrt/（immortalwrt 预编译）
-            # 由 shell/fetch-openwrt-third-party.sh 生成清单
+            # 来源：apk 仓库 <arch目录>/luci-third-party-openwrt/（immortalwrt 预编译）
+            # 由 shell/fetch-openwrt-third-party.sh 生成清单与元信息
+            # 本步骤已 cd 到 ${WORKSPACE}/src，清单落在 src/tmp/ 下
             TP_TXT=""
-            for p in "src/tmp/openwrt-third-party.txt" "tmp/openwrt-third-party.txt"; do
-              [ -f "$p" ] && { TP_TXT="$p"; break; }
+            for p in "tmp/openwrt-third-party.txt" "${WORKSPACE}/src/tmp/openwrt-third-party.txt"; do
+              if [ -f "$p" ]; then TP_TXT="$p"; break; fi
             done
 
             if [ -n "${TP_TXT}" ]; then
               TP_META="${TP_TXT%.txt}.meta"
+              TP_ARCH=""
+              TP_ARCHDIR=""
+              TP_SRC=""
+              if [ -f "${TP_META}" ]; then
+                TP_ARCH="$(sed -n 's/^arch_packages=//p' "${TP_META}" | head -n1)"
+                TP_ARCHDIR="$(sed -n 's/^apk_arch_dir=//p' "${TP_META}" | head -n1)"
+                TP_SRC="$(sed -n 's/^apk_source=//p'     "${TP_META}" | head -n1)"
+              fi
               echo
               echo "Third-Party APK (openwrt only, prebuilt)"
               echo
               echo "${TARGET_DEVICE}"
               echo
               awk -F'\t' '{printf "- %s (`%s`)\n", $1, $2}' "${TP_TXT}"
+              echo
+              if [ -n "${TP_ARCHDIR}" ]; then
+                echo "Arch:    ${TP_ARCH:-<unknown>} → ${TP_ARCHDIR}"
+              fi
+              if [ -n "${TP_SRC}" ]; then
+                echo "Source:  ${TP_SRC}"
+              fi
               if [ -f "${TP_META}" ]; then
-                echo
-                echo "Source: $(sed -n 's/^apk_source=//p' "${TP_META}")"
-                echo "Repo:   $(sed -n 's/^apk_repo=//p' "${TP_META}")@$(sed -n 's/^apk_branch=//p' "${TP_META}") ($(sed -n 's/^apk_commit=//p' "${TP_META}"))"
+                echo "Repo:    $(sed -n 's/^apk_repo=//p' "${TP_META}")@$(sed -n 's/^apk_branch=//p' "${TP_META}") ($(sed -n 's/^apk_commit=//p' "${TP_META}"))"
               fi
             elif [ "${SOURCE_TYPE:-}" = "openwrt" ]; then
-              # openwrt 源却没有清单 → 说明拉取步骤没跑或被跳过，必须显眼
+              # openwrt 源却没有清单 → 拉取步骤没跑或被跳过，必须显眼（正文 + CI 注解）
               echo
               echo "Third-Party APK (openwrt only, prebuilt)"
               echo
               echo "WARNING: 清单缺失，第三方 apk 未记录（请检查 Fetch 步骤是否执行）"
+              echo "::warning::openwrt 构建缺少第三方 apk 清单（tmp/openwrt-third-party.txt）"
             fi
             # ==============================================================
           } > "${WORKSPACE}/release-notes.md"
