@@ -692,6 +692,22 @@ jobs:
           cd "${WORKSPACE}/src"
           make defconfig
 
+          # ================================================================
+          # 【新增】收窄自检：这次 defconfig 不能把"只编一台设备"打破
+          #   只在"本设备在 device_mapping.conf 里填了 profile"时才断言，
+          #   这样 x86（不填 profile）不会被误杀
+          # ================================================================
+          MAP="${WORKSPACE}/configs/device_mapping.conf"
+          HAS_PROFILE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 | grep -c '|' || true)"
+          DEV_ON="$(grep -E "^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$" .config | wc -l)"
+          echo ">>> Finalize 后已启用 device 选项数: ${DEV_ON}（本设备填了 profile: ${HAS_PROFILE}）"
+          grep -E "^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$" .config | sed 's/^/    /' || true
+          if [ "${HAS_PROFILE}" = "1" ] && [ "${DEV_ON}" != "1" ]; then
+            echo "ERROR: 收窄被第二次 defconfig 打破了（现在 ${DEV_ON} 台）—— 会编全 target 镜像并超时"
+            echo "       处理：检查 .config 里是否又出现了别的 DEVICE_*=y；把它们的 'is not set' 显式写进 prepare_base_config.sh"
+            exit 1
+          fi
+          
           echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config || echo '<无>')"
           echo ">>> ARCH_PACKAGES     : $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
 
