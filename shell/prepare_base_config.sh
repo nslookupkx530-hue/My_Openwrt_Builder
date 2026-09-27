@@ -178,53 +178,85 @@ if [ "$LIST_PROFILES" = "1" ]; then
     exit 0
 fi
 
-# --- 5. 重建配置文件 ---
+# --- 5. 重建配置文件（收窄到单设备）---
 PROFILE_SYMBOL=""
 if [ -n "$PROFILE" ]; then
     echo ">>> 解析 profile: ${PROFILE}"
     PROFILE_SYMBOL="$(resolve_profile "$BOARD" "$SUBTARGET" "$PROFILE" || true)"
     if [ -z "$PROFILE_SYMBOL" ]; then
         echo "ERROR: 当前源码里找不到与 '${PROFILE}' 匹配的 device 选项"
-        echo ">>> 可选项（把 key 或显示名填进 configs/device_mapping.conf 第二段）："
         show_profiles
         exit 1
     fi
     echo ">>> 命中选项: ${PROFILE_SYMBOL}"
 
-    sed -i "/^CONFIG_TARGET_DEVICE_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=/d" .config
-    sed -i "/^CONFIG_TARGET_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=/d" .config
+    # 该 board/subtarget 下所有 device 符号（两种命名前缀都取）
+    ALL_SYMS="$(dev_symbols | grep -E "^(TARGET_DEVICE_|TARGET_)${BOARD}_${SUBTARGET}_DEVICE_" | sort -u)"
+    [ -n "$ALL_SYMS" ] || {
+        echo "ERROR: 在 tmp/.config-target.in 里找不到 ${BOARD}_${SUBTARGET} 的 device 符号"; exit 1; }
+
+    # 5.1 删掉这些符号的旧行（=y 与 is not set 都删）
+    while read -r s; do
+        [ -n "$s" ] || continue
+        sed -i -e "/^CONFIG_${s}=/d" -e "/^# CONFIG_${s} is not set$/d" .config
+    done <<< "${ALL_SYMS}"
+
+    # 5.2 关掉"全 profile / 多 profile"（必须无条件显式写，
+    #     config.buildinfo 里可能压根没有这两行，原来"有才改"的写法会静默跳过）
     for s in CONFIG_TARGET_ALL_PROFILES CONFIG_TARGET_MULTI_PROFILE; do
-        if grep -q "^${s}=" .config; then
-            sed -i "s/^${s}=.*/${s}=n/" .config
-        fi
+        sed -i -e "/^${s}=/d" -e "/^# ${s} is not set$/d" .config
+        printf '# %s is not set\n' "${s}" >> .config
     done
-    echo "${PROFILE_SYMBOL}=y" >> .config
+
+    # 5.3 目标设备 =y，其余显式 "is not set"
+    #     关键：这些符号在 Kconfig 里是 default y，只删 =y 行的话 defconfig 会把它们全开回来
+    n_total=0; n_on=0
+    while read -r s; do
+        [ -n "$s" ] || continue
+        n_total=$((n_total+1))
+        if [ "CONFIG_${s}" = "${PROFILE_SYMBOL}" ]; then
+            printf 'CONFIG_%s=y\n' "${s}" >> .config
+            n_on=$((n_on+1))
+        else
+            printf '# CONFIG_%s is not set\n' "${s}" >> .config
+        fi
+    done <<< "${ALL_SYMS}"
+    echo ">>> 本 target 共 ${n_total} 个 device 符号：1 台 =y / $((n_total-1)) 台 is not set"
+    [ "${n_on}" = "1" ] || {
+        echo "ERROR: ${PROFILE_SYMBOL} 不在本 target 的 device 列表里（解析结果异常）"
+        show_profiles; exit 1; }
 fi
 
 # --- 6. 再次执行 make defconfig ---
-    # 这一步非常关键：
-    # 1. 使用 FORCE=1 是为了跳过 GitHub Actions 环境中可能存在的 host 架构不匹配检查
 echo ">>> make defconfig（第 2 次：应用 profile + 补依赖）"
 make defconfig
 
-# --- 7. 执行校验 ---    
+# --- 7. 执行校验 ---
 grep -q "^CONFIG_TARGET_${BOARD}_${SUBTARGET}=y" .config || {
     echo "ERROR: 目标 ${BOARD}/${SUBTARGET} 不在当前源码中"
     echo "       源码分支与基线 ${CHANNEL}${VERSION:+/$VERSION} 不配套，请检查 Clone 步骤日志里的 ref"
     exit 1
 }
 
+# 收窄后重新数一次：两种前缀都数，不满足 1 就硬失败
+DEV_ON="$(grep -E "^CONFIG_(TARGET_DEVICE_|TARGET_)${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]+=y$" .config | wc -l)"
+echo ">>> 收窄后已启用 device 选项数: ${DEV_ON}   (期望 1)"
+grep -E "^CONFIG_(TARGET_DEVICE_|TARGET_)${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]+=y$" .config \
+  | sed 's/^/    /' || true
+
 if [ -n "$PROFILE" ]; then
-    if ! grep -q "^${PROFILE_SYMBOL}=y" .config; then
-        echo "ERROR: ${PROFILE_SYMBOL} 未被 defconfig 保留"
-        echo ">>> 可选项："
-        show_profiles
-        exit 1
-    fi
-    echo ">>> profile 校验通过: ${PROFILE_SYMBOL}"
+    grep -q "^${PROFILE_SYMBOL}=y" .config || {
+        echo "ERROR: ${PROFILE_SYMBOL} 未被 defconfig 保留（可能被别的选项顶掉）"
+        show_profiles; exit 1; }
+    [ "${DEV_ON}" = "1" ] || {
+        echo "ERROR: 收窄失败，仍有 ${DEV_ON} 台设备被选中 —— 会编全 target 镜像并超时"
+        echo ">>> 把上面列出的符号也补进 is not set 列表，或检查 ALL_PROFILES 开关"
+        exit 1; }
+    echo ">>> profile 收窄校验通过：本 target 只编这 1 台"
+else
+    echo "::warning::未指定 profile → ${BOARD}/${SUBTARGET} 下 ${DEV_ON} 台设备的镜像都会被编（filogic 上必超时）"
 fi
 
-DEV_ON="$(grep -cE "^CONFIG_TARGET_DEVICE_${BOARD}_${SUBTARGET}_DEVICE_[A-Za-z0-9_.-]*=y$" .config || true)"
 echo "=============================================================="
 echo ">>> .config 摘要 (source=${SOURCE_TYPE} device=${TARGET_DEVICE} channel=${CHANNEL} version=${VERSION:-snapshot})"
 grep -E "^CONFIG_TARGET_${BOARD}_${SUBTARGET}(_DEVICE_[A-Za-z0-9_.-]+)?=y$" .config || true
