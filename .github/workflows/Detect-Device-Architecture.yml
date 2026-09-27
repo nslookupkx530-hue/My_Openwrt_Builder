@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: "设备型号（configs/device_mapping.conf 里的键）"
+        description: "设备型号（configs/device_mapping.conf 里的键，如 AXT-1800）"
         required: true
         default: "x86"
         type: string
@@ -19,7 +19,7 @@ on:
         default: ""
         type: string
       profile_keyword:
-        description: "【新】查 key 用的型号关键词（如 MT3600 / TR3000 / BE12PRO / AXT1800）；留空只做两源 key 数量对比"
+        description: "【可选】手工指定 key 匹配串（如 MT3600）；留空=用设备名自动解析（推荐留空）"
         required: false
         default: ""
         type: string
@@ -101,23 +101,27 @@ jobs:
           OWRT_VER="${IN_OWRT_VER:-25.12.5}"
           VERIFY="${IN_VERIFY:-true}"
 
+          # ================= 工具函数 =================
           probe() {   # $1=url → 打印 http code
             curl -s -o /dev/null -w '%{http_code}' -L --retry 2 --connect-timeout 15 --max-time 45 "$1" 2>/dev/null || echo 000
           }
-          # ---- 权威来源①：profiles.json 的 arch_packages 字段 ----
+
+          # 来源①：profiles.json 的 arch_packages（权威）
           arch_from_profiles() {   # $1=mirror $2=version
             curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 \
                  "${1}/releases/${2}/targets/${TARGET_PATH}/profiles.json" 2>/dev/null \
               | grep -oE '"arch_packages"[[:space:]]*:[[:space:]]*"[^"]+"' \
               | sed -E 's/.*:[[:space:]]*"([^"]+)"$/\1/' | head -n1
           }
-          # ---- 来源②：config.buildinfo（精简文件，可能没有该符号） ----
+
+          # 来源②：config.buildinfo（精简文件，可能没有该符号）
           arch_from_buildinfo() {  # $1=mirror $2=version
             curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 \
                  "${1}/releases/${2}/targets/${TARGET_PATH}/config.buildinfo" 2>/dev/null \
               | sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' | head -n1
           }
-          # ---- 来源③：内置兜底表（务必与 fetch-openwrt-third-party.sh 的 exact_arch_dir 保持一致） ----
+
+          # 来源③：内置兜底表（务必与 fetch-openwrt-third-party.sh 的 exact_arch_dir 保持一致）
           fallback_arch() {
             case "$1" in
               x86|"x86/64")         echo "x86_64" ;;
@@ -130,7 +134,8 @@ jobs:
               *)                    echo "" ;;
             esac
           }
-          # ---- 架构名 → apk 仓库目录名（改这里必须同步 fetch-openwrt-third-party.sh） ----
+
+          # 架构名 → apk 仓库目录名（改这里必须同步 fetch-openwrt-third-party.sh）
           repo_arch_dir() {
             case "$1" in
               x86_64|x86_64_*)                          echo "x86_64" ;;
@@ -139,12 +144,15 @@ jobs:
               *)                                        echo "" ;;
             esac
           }
-          list_dirs() {   # $1=url → 列出该页面的子目录名
+
+          # 列出某页面下的子目录名
+          list_dirs() {   # $1=url
             curl -fsSL --retry 2 --connect-timeout 15 --max-time 45 "$1" 2>/dev/null \
               | grep -oE 'href="[^"]+/"' | sed 's/href="//;s|/"||' \
               | grep -vE '^\.|^/' | sort -u | sed 's/^/        /'
           }
-          # 【新】从 profiles.json 抽取 "key <TAB> 标题"
+
+          # 从 profiles.json 抽取 "key <TAB> 标题"
           fetch_keys() {   # $1=profiles.json URL  $2=输出 TSV
             curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 "$1" 2>/dev/null \
               | python3 -c '
@@ -161,9 +169,24 @@ jobs:
               print("%s\t%s" % (k, t))
           ' > "$2" 2>/dev/null || true
           }
-          # 【新】在 TSV 里按关键词（不分大小写、固定字符串）过滤
-          hit_keys() {   # $1=TSV $2=关键词
-            awk -F'\t' -v k="$2" 'BEGIN{k=toupper(k)} index(toupper($0),k)>0 {print $1}' "$1" | sort -u
+
+          # 归一化：去掉 - _ . 空格等非字母数字，再转大写
+          #   AXT-1800 → AXT1800，与标题 "GL.iNet GL-AXT1800" / key glinet_gl-axt1800 都能对上
+          norm() { printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9' | LC_ALL=C tr 'a-z' 'A-Z'; }
+
+          # 按归一化子串匹配，输出 "分数<TAB>key<TAB>标题"，分数降序
+          #   标题完全相等=100 > 标题包含≈90 > key 包含≈80
+          match_keys() {   # $1=TSV  $2=归一化后的匹配串
+            awk -F'\t' -v n="$2" '
+              function norm(s){ gsub(/[^A-Za-z0-9]/,"",s); return toupper(s) }
+              {
+                nk = norm($1); nt = norm($2); sc = 0
+                if (nt == n || nk == n)    sc = 100
+                else if (index(nt, n) > 0) sc = 90 - length(nt)/1000
+                else if (index(nk, n) > 0) sc = 80 - length(nk)/1000
+                if (sc > 0) printf "%.3f\t%s\t%s\n", sc, $1, $2
+              }
+            ' "$1" | sort -rn -k1,1
           }
 
           # ================================================================
@@ -192,9 +215,8 @@ jobs:
           GROUP="${TARGET_PATH%%/*}"
 
           # ================================================================
-          # 2) 【新】两源 profile key 交叉核对
-          #    答两个问题：① 同一台设备的 key 在两源里一样吗？
-          #                ② 某台设备应该填什么 key
+          # 2) 两源 profile key 交叉核对 + 自动解析本设备的 key
+          #    只给设备名（如 AXT-1800），自动推出真正的 profile key
           # ================================================================
           hdr "两源 profile key 交叉核对：${TARGET_PATH}"
           N_IMM=0; N_OWRT=0; N_BOTH=0; N_OI=0; N_OO=0
@@ -217,7 +239,7 @@ jobs:
             N_OO="$(wc -l < /tmp/keys-only-owrt.txt)"
 
             if [ "${N_IMM}" = "0" ] && [ "${N_OWRT}" = "0" ]; then
-              echo "::warning::两源的 profiles.json 都取不到（target=${TARGET_PATH}），跳过 key 核对"
+              echo "::warning::两源的 profiles.json 都取不到（target=${TARGET_PATH}），跳过 key 核对与自动解析"
             else
               echo "  immortalwrt ${IMM_VER} : ${N_IMM} 个 key"
               echo "  openwrt     ${OWRT_VER} : ${N_OWRT} 个 key"
@@ -227,45 +249,71 @@ jobs:
               if [ "${N_OI}" -gt 0 ]; then
                 echo ">>> 只在 immortalwrt 存在的 key："
                 head -n 40 /tmp/keys-only-imm.txt | sed 's/^/    /'
-                [ "${N_OI}" -le 40 ] || echo "    ...（共 ${N_OI} 个，上面只列 40 个）"
+                if [ "${N_OI}" -gt 40 ]; then echo "    ...（共 ${N_OI} 个，上面只列 40 个）"; fi
               fi
               if [ "${N_OO}" -gt 0 ]; then
                 echo ">>> 只在 openwrt 存在的 key："
                 head -n 40 /tmp/keys-only-owrt.txt | sed 's/^/    /'
-                [ "${N_OO}" -le 40 ] || echo "    ...（共 ${N_OO} 个，上面只列 40 个）"
+                if [ "${N_OO}" -gt 40 ]; then echo "    ...（共 ${N_OO} 个，上面只列 40 个）"; fi
               fi
-            fi
 
-            # ---- 关键词过滤：给某台设备找 key ----
-            if [ -n "${PROFILE_KEYWORD}" ]; then
-              hdr "关键词 '${PROFILE_KEYWORD}' 的命中"
-              echo "  ---- immortalwrt ${IMM_VER} ----"
-              awk -F'\t' -v k="${PROFILE_KEYWORD}" 'BEGIN{k=toupper(k)} index(toupper($0),k)>0 {printf "    %-44s %s\n",$1,$2}' /tmp/keys-imm.tsv || true
-              echo "  ---- openwrt ${OWRT_VER} ----"
-              awk -F'\t' -v k="${PROFILE_KEYWORD}" 'BEGIN{k=toupper(k)} index(toupper($0),k)>0 {printf "    %-44s %s\n",$1,$2}' /tmp/keys-owrt.tsv || true
+              NEEDLE_SRC="${PROFILE_KEYWORD}"
+              [ -n "${NEEDLE_SRC}" ] || NEEDLE_SRC="${DEVICE}"
+              NEEDLE="$(norm "${NEEDLE_SRC}")"
 
-              HIT_IMM="$(hit_keys /tmp/keys-imm.tsv  "${PROFILE_KEYWORD}")"
-              HIT_OWRT="$(hit_keys /tmp/keys-owrt.tsv "${PROFILE_KEYWORD}")"
-              C_IMM="$(printf '%s\n' "${HIT_IMM}"  | grep -c . || true)"
-              C_OWRT="$(printf '%s\n' "${HIT_OWRT}" | grep -c . || true)"
-              echo "  >>> 命中数：immortalwrt=${C_IMM}  openwrt=${C_OWRT}"
-
-              if [ "${C_IMM}" = "1" ] && [ "${C_OWRT}" = "1" ] && [ "${HIT_IMM}" = "${HIT_OWRT}" ]; then
-                echo "  >>> 两源一致 ✅ 可以共用同一个 key"
-                KEY_HIT="${HIT_IMM}"
-              elif [ "${C_IMM}" = "1" ] && [ "${C_OWRT}" = "0" ]; then
-                echo "::warning::该 key 只在 immortalwrt 有 → 这台只能用 immortalwrt 源编"
-                KEY_HIT="${HIT_IMM}"
-              elif [ "${C_IMM}" = "0" ] && [ "${C_OWRT}" = "1" ]; then
-                echo "::warning::该 key 只在 openwrt 有 → 这台只能用 openwrt 源编"
-                KEY_HIT="${HIT_OWRT}"
-              elif [ "${C_IMM}" -eq 0 ] && [ "${C_OWRT}" -eq 0 ]; then
-                echo "::warning::两源都没命中 → 换关键词（用型号里的数字串），或该版本还没支持这台设备"
+              if [ "${DEVICE}" = "x86" ] && [ -z "${PROFILE_KEYWORD}" ]; then
+                echo
+                echo ">>> 设备是 x86（设备数少，不强制收窄）→ 跳过 key 自动解析；要查请填 profile_keyword"
               else
-                echo "::warning::命中多个，请换更精确的关键词（用型号里的数字串，如 MT3600 而不是 GL-）"
+                echo
+                echo ">>> key 自动解析：'${NEEDLE_SRC}' → 归一化 '${NEEDLE}'"
+
+                HITS_IMM="$(match_keys  /tmp/keys-imm.tsv  "${NEEDLE}" || true)"
+                HITS_OWRT="$(match_keys /tmp/keys-owrt.tsv "${NEEDLE}" || true)"
+                C_IMM="$(printf '%s\n' "${HITS_IMM}"   | grep -c . || true)"
+                C_OWRT="$(printf '%s\n' "${HITS_OWRT}" | grep -c . || true)"
+
+                echo "  ---- immortalwrt ${IMM_VER}：命中 ${C_IMM} 个 ----"
+                if [ "${C_IMM}" -gt 0 ]; then
+                  printf '%s\n' "${HITS_IMM}" | awk -F'\t' '{printf "    %-44s %s\n",$2,$3}' | head -n 5
+                fi
+                echo "  ---- openwrt ${OWRT_VER}：命中 ${C_OWRT} 个 ----"
+                if [ "${C_OWRT}" -gt 0 ]; then
+                  printf '%s\n' "${HITS_OWRT}" | awk -F'\t' '{printf "    %-44s %s\n",$2,$3}' | head -n 5
+                fi
+
+                KEY_IMM="$(printf '%s\n' "${HITS_IMM}"   | sed -n '1p' | cut -f2)"
+                KEY_OWRT="$(printf '%s\n' "${HITS_OWRT}" | sed -n '1p' | cut -f2)"
+
+                if [ "${C_IMM}" = "1" ] && [ "${C_OWRT}" = "1" ] && [ "${KEY_IMM}" = "${KEY_OWRT}" ]; then
+                  echo "  >>> 自动解析成功，且两源一致 → 可以共用同一个 key"
+                  KEY_HIT="${KEY_IMM}"
+                elif [ "${C_IMM}" = "1" ] && [ "${C_OWRT}" = "0" ]; then
+                  echo "::warning::解析到 ${KEY_IMM}，但它只在 immortalwrt 有 → 这台只能用 immortalwrt 源编"
+                  KEY_HIT="${KEY_IMM}"
+                elif [ "${C_IMM}" = "0" ] && [ "${C_OWRT}" = "1" ]; then
+                  echo "::warning::解析到 ${KEY_OWRT}，但它只在 openwrt 有 → 这台只能用 openwrt 源编"
+                  KEY_HIT="${KEY_OWRT}"
+                elif [ "${C_IMM}" = "0" ] && [ "${C_OWRT}" = "0" ]; then
+                  echo "::warning::自动解析没命中 —— 该版本可能还没支持这台设备，或官方写法差异较大"
+                  echo ">>> 兜底：按设备名里的各段再试一次（哪段命中，就把哪段手工填进 profile_keyword）"
+                  for tok in $(printf '%s' "${NEEDLE_SRC}" | LC_ALL=C tr -cs 'A-Za-z0-9' '\n'); do
+                    NT="$(norm "${tok}")"
+                    if [ "${#NT}" -lt 3 ]; then continue; fi
+                    echo "    片段 '${NT}'："
+                    for pair in "immortalwrt:/tmp/keys-imm.tsv" "openwrt:/tmp/keys-owrt.tsv"; do
+                      lbl="${pair%%:*}"; kf="${pair#*:}"
+                      cnt="$(match_keys "$kf" "${NT}" | grep -c . || true)"
+                      if [ "${cnt}" -gt 0 ]; then
+                        printf '      [%s] 命中 %s 个：\n' "${lbl}" "${cnt}"
+                        match_keys "$kf" "${NT}" | awk -F'\t' '{printf "          %-44s %s\n",$2,$3}' | head -n 8
+                      fi
+                    done
+                  done
+                else
+                  echo "::warning::命中多个 → 请从上面人工挑一个，或填 profile_keyword 收窄（片段越具体越好）"
+                fi
               fi
-            else
-              echo ">>> 未指定 profile_keyword：想查某台设备该填什么 key，重跑时填关键词（MT3600 / TR3000 / BE12PRO / AXT1800）"
             fi
           fi
 
@@ -294,14 +342,17 @@ jobs:
           if [ -n "${ARCH_OVERRIDE}" ]; then
             MIRROR_ARCH="${ARCH_OVERRIDE}"; ARCH_SRC="输入指定(arch_override)"
           elif [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
-            if [ -n "${IMM_ARCH}" ]; then MIRROR_ARCH="${IMM_ARCH}"; ARCH_SRC="immortalwrt profiles/buildinfo"
+            if [ -n "${IMM_ARCH}" ]; then
+              MIRROR_ARCH="${IMM_ARCH}"; ARCH_SRC="immortalwrt profiles/buildinfo"
             elif [ -n "${OWRT_ARCH}" ]; then
               echo "::warning::immortalwrt ${IMM_VER} 上没有 ${TARGET_PATH}（该源不支持此设备）；改用 openwrt 侧的架构"
               MIRROR_ARCH="${OWRT_ARCH}"; ARCH_SRC="openwrt profiles/buildinfo（回退）"
             fi
           else
-            if [ -n "${OWRT_ARCH}" ]; then MIRROR_ARCH="${OWRT_ARCH}"; ARCH_SRC="openwrt profiles/buildinfo"
-            elif [ -n "${IMM_ARCH}" ]; then MIRROR_ARCH="${IMM_ARCH}"; ARCH_SRC="immortalwrt profiles/buildinfo（回退）"
+            if [ -n "${OWRT_ARCH}" ]; then
+              MIRROR_ARCH="${OWRT_ARCH}"; ARCH_SRC="openwrt profiles/buildinfo"
+            elif [ -n "${IMM_ARCH}" ]; then
+              MIRROR_ARCH="${IMM_ARCH}"; ARCH_SRC="immortalwrt profiles/buildinfo（回退）"
             fi
           fi
 
@@ -337,7 +388,7 @@ jobs:
           echo ">>> ARCH_PACKAGES = ${MIRROR_ARCH}   （来源: ${ARCH_SRC}）"
 
           # ================================================================
-          # 6) 映射到仓库目录 + 拼 BASE
+          # 6) 映射到仓库目录 + 拼 BASE（BASE 只依赖架构，不依赖 target 是否被支持）
           # ================================================================
           ARCH_DIR="$(repo_arch_dir "${MIRROR_ARCH}")"
           [ -n "${ARCH_DIR}" ] || die "未映射的架构 ${MIRROR_ARCH}：请补 repo_arch_dir()，并同步 fetch-openwrt-third-party.sh 的 exact_arch_dir()"
@@ -366,11 +417,17 @@ jobs:
           echo "source_type   : ${SOURCE_TYPE}"
           echo "ARCH_PACKAGES : ${MIRROR_ARCH}"
           echo "仓库目录名    : ${ARCH_DIR}"
-          [ -n "${REPO_PREFIX}" ] && echo "仓库前缀      : ${REPO_PREFIX}"
+          if [ -n "${REPO_PREFIX}" ]; then echo "仓库前缀      : ${REPO_PREFIX}"; fi
           echo "DEST          : ${DEST}"
           echo "BASE(luci)    : ${LUCI_BASE}"
-          echo "BASE(packages): ${PKG_ROOT}"
-          [ -n "${KEY_HIT}" ] && echo "建议 mapping  : ${DEVICE}=targets/${TARGET_PATH}|${KEY_HIT}"
+          echo "BASE(架构根)  : ${PKG_ROOT}     ← 各 feed 子目录在这一层里面"
+          echo "  -> luci feed     : ${PKG_ROOT}/luci"
+          echo "  -> packages feed : ${PKG_ROOT}/packages   ← filebrowser 在这"
+          if [ -n "${KEY_HIT}" ]; then
+            echo "建议 mapping  : ${DEVICE}=targets/${TARGET_PATH}|${KEY_HIT}"
+          fi
+          echo ">>> 该架构根目录下实际存在的 feed 子目录："
+          list_dirs "${PKG_ROOT}/" || echo "        <列不出来>"
 
           # ================================================================
           # 7) 探活 luci 目录 + 逐包核对
@@ -423,10 +480,10 @@ jobs:
             echo "| ARCH_PACKAGES | \`${MIRROR_ARCH}\` |"
             echo "| 仓库目录 | \`${DEST}\` |"
             echo "| BASE (luci) | ${LUCI_BASE} |"
-            echo "| BASE (packages) | ${PKG_ROOT} |"
+            echo "| BASE (架构根) | ${PKG_ROOT} |"
             echo "| ARCH 来源 | ${ARCH_SRC} |"
-            echo "| 两源 key 数 | immortalwrt ${N_IMM} / openwrt ${N_OWRT}（共有 ${N_BOTH}） |"
-            echo "| 仅一边有的 key | immortalwrt ${N_OI} / openwrt ${N_OO} |"
+            echo "| 两源 key 数 | immortalwrt ${N_IMM:-0} / openwrt ${N_OWRT:-0}（共有 ${N_BOTH:-0}） |"
+            echo "| 仅一边有的 key | immortalwrt ${N_OI:-0} / openwrt ${N_OO:-0} |"
             echo ""
             if [ -n "${KEY_HIT}" ]; then
               echo "**建议写进 \`configs/device_mapping.conf\`：**"
@@ -436,12 +493,12 @@ jobs:
               echo '```'
               echo ""
             fi
-            if [ "${N_OI:-0}" -gt 0 ] || [ "${N_OO:-0}" -gt 0 ]; then
+            if [ -s /tmp/keys-only-imm.txt ] || [ -s /tmp/keys-only-owrt.txt ]; then
               echo "<details><summary>只在一边存在的 key（点开）</summary>"
               echo ""
               echo '```'
-              [ "${N_OI:-0}" -gt 0 ] && { echo "[仅 immortalwrt]"; cat /tmp/keys-only-imm.txt; }
-              [ "${N_OO:-0}" -gt 0 ] && { echo "[仅 openwrt]"; cat /tmp/keys-only-owrt.txt; }
+              if [ -s /tmp/keys-only-imm.txt ]; then echo "[仅 immortalwrt]"; cat /tmp/keys-only-imm.txt; fi
+              if [ -s /tmp/keys-only-owrt.txt ]; then echo "[仅 openwrt]";     cat /tmp/keys-only-owrt.txt; fi
               echo '```'
               echo "</details>"
               echo ""
