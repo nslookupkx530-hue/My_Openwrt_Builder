@@ -160,7 +160,21 @@ jobs:
           }
 
           rm -rf src
-          if [ -n "${SOURCE_REF}" ]; then
+          # ==================================================================
+          # 【新增】快照模式：只有显式指定 version=snapshot 才进入
+          #   用于官方只在 snapshot 里支持的设备（如 Tenda-BE12PRO）
+          #   影响面：仅此一条新分支；下面几个分支一行未动
+          #   （若你还想让 source_ref=main/master 也自动进快照模式，
+          #     把条件改成： [ "${INPUT_VERSION}" = "snapshot" ] || [ "${SOURCE_REF}" = "main" ] || [ "${SOURCE_REF}" = "master" ] ）
+          # ==================================================================
+          if [ "${INPUT_VERSION}" = "snapshot" ]; then
+              MODE="快照（主分支）"
+              VERSION="snapshot"
+              case "${SOURCE_TYPE}" in
+                immortalwrt) CANDIDATES="master" ;;
+                openwrt)     CANDIDATES="main" ;;
+              esac
+          elif [ -n "${SOURCE_REF}" ]; then
               MODE="指定 ref=${SOURCE_REF}"
               CANDIDATES="${SOURCE_REF}"
               case "${SOURCE_REF}" in
@@ -198,9 +212,14 @@ jobs:
           echo ">>> 当前分支: $(git -C src rev-parse --abbrev-ref HEAD)"
           echo ">>> git describe: $(git -C src describe --tags 2>/dev/null || echo '<无 tag>')"
 
+          # 【改动】导出 VERSION 时把 snapshot 的提示写清楚
           if [ -n "${VERSION}" ]; then
               echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-              echo ">>> 已导出 VERSION=${VERSION}（基线将用 releases/${VERSION}/ 的 buildinfo）"
+              if [ "${VERSION}" = "snapshot" ]; then
+                  echo ">>> 已导出 VERSION=snapshot（基线将用 snapshots/ 的 buildinfo）"
+              else
+                  echo ">>> 已导出 VERSION=${VERSION}（基线将用 releases/${VERSION}/ 的 buildinfo）"
+              fi
           else
               echo "::warning::无法推导版本号，prepare_base_config 会自行取最新稳定版，可能与源码 ref 不配套"
           fi
@@ -296,7 +315,12 @@ jobs:
             ""|*/-) echo "ERROR: ${TARGET_DEVICE} 的 target 路径不合法: '${TARGET_PATH}'"; exit 1 ;;
           esac
 
-          if [ -n "${VERSION}" ]; then REL_DIR="releases/${VERSION}"; else REL_DIR="snapshots"; fi
+          # 【改动】VERSION=snapshot 时也要走 snapshots/
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "snapshot" ]; then
+            REL_DIR="snapshots"
+          else
+            REL_DIR="releases/${VERSION}"
+          fi
           RELEASE_BASE="${MIRROR}/${REL_DIR}/targets/${TARGET_PATH}"
           echo ">>> TARGET_PATH=${TARGET_PATH}  REL_DIR=${REL_DIR}"
           echo ">>> RELEASE_BASE=${RELEASE_BASE}"
@@ -325,15 +349,20 @@ jobs:
               || { echo "ERROR: CONFIG_VERSION_REPO 替换失败"; exit 1; }
           elif [ -f package/base-files/image-config.in ] && \
                grep -qE 'default "https?://downloads\.(openwrt|immortalwrt)\.org' package/base-files/image-config.in; then
-            echo ">>> .config 无 CONFIG_VERSION_REPO，改 image-config.in 默认值兜底"
-            sed -i -E "s#(default \")https?://downloads\.(openwrt|immortalwrt)\.org#\1${MIRROR}#" package/base-files/image-config.in
-            grep -Fq "default \"${MIRROR}" package/base-files/image-config.in \
+            # 【改动】原来把整段 URL 换成 ${MIRROR}，把路径（/releases/x.y.z 或 /snapshots）丢了；
+            #         现在保留 ${REL_DIR}，release 和 snapshot 都拼得对
+            echo ">>> .config 无 CONFIG_VERSION_REPO，改 image-config.in 默认值兜底（保留 /${REL_DIR}）"
+            sed -i -E "s#(default \")https?://downloads\.(openwrt|immortalwrt)\.org[^\"]*#\1${MIRROR}/${REL_DIR}#" \
+              package/base-files/image-config.in
+            grep -Fq "default \"${MIRROR}/${REL_DIR}\"" package/base-files/image-config.in \
               || { echo "ERROR: image-config.in 兜底失败"; exit 1; }
           else
             echo "::warning::未找到 CONFIG_VERSION_REPO（.config / image-config.in），运行时由 apk_mirror 兜底"
           fi
 
           # ===== 4) immortalwrt：只改 apk_mirror 的"默认值"一行 =====
+          #      注意：这里只换主机、不换路径 —— 所以 snapshot 构建会自动变成
+          #      https://mirror.nju.edu.cn/immortalwrt/snapshots/...，无需额外改动
           if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
             F="package/emortal/default-settings/files/99-default-settings-chinese"
             [ -f "${F}" ] || { echo "ERROR: 找不到 ${F}"; exit 1; }
