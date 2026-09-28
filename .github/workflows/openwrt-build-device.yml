@@ -285,7 +285,10 @@ jobs:
                    package/feeds/luci/luci-app-librespeed \
                    package/feeds/packages/bmx7-dnsupdate \
                    package/feeds/packages/prometheus-node-exporter-lua \
-                   package/boot/arm-trusted-firmware-microchipsw; do
+                   package/boot/arm-trusted-firmware-microchipsw \
+                   package/feeds/telephony/rtpengine \
+                   package/feeds/telephony/dahdi-linux \
+                   package/feeds/telephony/oslec; do
             [ -e "$p" ] && rm -rf "$p"
           done
           ./scripts/feeds install -a
@@ -721,6 +724,15 @@ jobs:
             echo "       处理：检查 .config 里是否又出现了别的 DEVICE_*=y；把它们的 'is not set' 显式写进 prepare_base_config.sh"
             exit 1
           fi
+
+          # ================================================================
+          # 【新增】诊断：编译范围到底有多大（不用本地环境，日志里直接看）
+          #   "已选包数"接近"菜单可见包数" → 说明 CONFIG_ALL=y，在编整个 feed
+          # ================================================================
+          echo ">>> [诊断] ALL 系列开关:"
+          grep -E '^CONFIG_(ALL|ALL_KMODS|ALL_NONSHARED)=' .config || echo "        (未启用)"
+          echo ">>> [诊断] 已选包数: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)   菜单可见包数: $(grep -c '^config PACKAGE_' tmp/.config-package.in || true)"
+          echo ">>> [诊断] rtpengine: $(grep -m1 '^CONFIG_PACKAGE_rtpengine' .config || echo '<未选中>')"
           
           echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config || echo '<无>')"
           echo ">>> ARCH_PACKAGES     : $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
