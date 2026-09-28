@@ -58,7 +58,8 @@ if [ -z "$DEVICE_LINE" ]; then
 fi
 
 case "$DEVICE_LINE" in
-    *"|"*) DEVICE_PATH="${DEVICE_LINE#*=}"; DEVICE_PATH="${DEVICE_PATH%%|*}"; PROFILE="${DEVICE_LINE#*|}" ;;
+    *"|"*) DEVICE_PATH="${DEVICE_LINE#*=}"; DEVICE_PATH="${DEVICE_PATH%%|*}"
+           PROFILE="${DEVICE_LINE#*|}"; PROFILE="${PROFILE%%|*}" ;;
     *)     DEVICE_PATH="${DEVICE_LINE#*=}"; PROFILE="" ;;
 esac
 
