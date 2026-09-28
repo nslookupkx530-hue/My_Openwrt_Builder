@@ -84,8 +84,19 @@ CHANNEL=""
 if [ "$VERSION" = "snapshot" ]; then
     CHANNEL="snapshot"
     VERSION=""
-    FINAL_URL="${SITE}/snapshots/${DEVICE_PATH}/config.buildinfo"
-    echo ">>> 模式: 开发快照(snapshot) → ${FINAL_URL}"
+    # 【改】快照通道不直接用官方 snapshots 的 buildinfo：
+    #   那是 buildbot 用来"生成软件包仓库"的全量配置（几千个包 → 耗时长，且常有用不到的包编不过）。
+    #   改用"最近稳定版"的 buildinfo 当起始 .config —— 源码仍是主分支，
+    #   设备符号（tenda_be12-pro）由本脚本后面的收窄逻辑单独写入，不受影响。
+    STABLE_VER="$(curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true)"
+    if [ -n "${STABLE_VER}" ]; then
+        FINAL_URL="${SITE}/releases/${STABLE_VER}/${DEVICE_PATH}/config.buildinfo"
+        echo ">>> 模式: 主分支源码 + 稳定版基线 ${STABLE_VER}（规避 snapshots 全量配置）→ ${FINAL_URL}"
+    else
+        FINAL_URL="${SITE}/snapshots/${DEVICE_PATH}/config.buildinfo"
+        echo ">>> 模式: 开发快照(snapshot) → ${FINAL_URL}"
+    fi
 elif [ -n "$VERSION" ]; then
     CHANNEL="release"
     FINAL_URL="${SITE}/releases/${VERSION}/${DEVICE_PATH}/config.buildinfo"
