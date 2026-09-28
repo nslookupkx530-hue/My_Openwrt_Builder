@@ -859,6 +859,15 @@ jobs:
             echo
             echo "${TARGET_DEVICE}"
             echo "${SOURCE_TYPE} ${VERSION:-snapshot}"
+
+            # 编译通道（稳定版 / 快照）—— VERSION 或 REL_DIR 任一能判断即可（双保险）
+            #   REL_DIR 由 Modify APK/OPKG mirror 步骤导出：releases/<版本> 或 snapshots
+            if [ "${VERSION:-}" = "snapshot" ] || [ "${REL_DIR:-}" = "snapshots" ]; then
+              echo "编译通道：快照（主分支）"
+            else
+              echo "编译通道：稳定版 ${VERSION:-}（releases/${VERSION:-}）"
+            fi
+
             echo
             echo "Run ID:"
             echo
