@@ -728,11 +728,19 @@ jobs:
           # ================================================================
           # 【新增】诊断：编译范围到底有多大（不用本地环境，日志里直接看）
           #   "已选包数"接近"菜单可见包数" → 说明 CONFIG_ALL=y，在编整个 feed
+          #   参照值：例GL-MT3600BE（release 基线）≈ 207 个包
           # ================================================================
+          SEL_ON="$(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
+          MENU_ON="$(grep -cE '^[[:space:]]*config[[:space:]]+PACKAGE_' tmp/.config-package.in || true)"
+          echo ">>> [诊断] 已选包数: ${SEL_ON}   菜单可见包数: ${MENU_ON}"          
           echo ">>> [诊断] ALL 系列开关:"
           grep -E '^CONFIG_(ALL|ALL_KMODS|ALL_NONSHARED)=' .config || echo "        (未启用)"
-          echo ">>> [诊断] 已选包数: $(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)   菜单可见包数: $(grep -c '^config PACKAGE_' tmp/.config-package.in || true)"
           echo ">>> [诊断] rtpengine: $(grep -m1 '^CONFIG_PACKAGE_rtpengine' .config || echo '<未选中>')"
+          if [ "${SEL_ON}" -gt 1500 ]; then
+            echo "::warning::已选包数 ${SEL_ON} 偏多（参照值约 207）—— 基线可能仍是 buildbot 全量配置，会编全 feed（耗时长、易撞编不过的包）"
+          else
+            echo ">>> [诊断] 编译范围正常（参照值约 207）"
+          fi
           
           echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config || echo '<无>')"
           echo ">>> ARCH_PACKAGES     : $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
