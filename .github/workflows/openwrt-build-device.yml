@@ -161,13 +161,27 @@ jobs:
 
           rm -rf src
           # ==================================================================
-          # 【新增】快照模式：只有显式指定 version=snapshot 才进入
+          # 通道（release / snapshot）
+          #   优先级：显式 version 输入 > 默认 release
           #   用于官方只在 snapshot 里支持的设备（如 Tenda-BE12PRO）
-          #   影响面：仅此一条新分支；下面几个分支一行未动
-          #   （若你还想让 source_ref=main/master 也自动进快照模式，
-          #     把条件改成： [ "${INPUT_VERSION}" = "snapshot" ] || [ "${SOURCE_REF}" = "main" ] || [ "${SOURCE_REF}" = "master" ] ）
           # ==================================================================
+          MAP="${WORKSPACE}/configs/device_mapping.conf"
+          DEV_CHAN="release"
+          if [ -f "${MAP}" ] && [ -n "${TARGET_DEVICE:-}" ]; then
+              MAP_LINE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 || true)"
+              if [ -n "${MAP_LINE}" ]; then
+                  _c="$(printf '%s' "${MAP_LINE#*=}" | awk -F'|' '{print $3}' | tr -d '[:space:]')"
+                  if [ -n "${_c}" ]; then DEV_CHAN="${_c}"; fi
+              fi
+          fi
           if [ "${INPUT_VERSION}" = "snapshot" ]; then
+              DEV_CHAN="snapshot"
+          elif [ -n "${INPUT_VERSION}" ]; then
+              DEV_CHAN="release"     # 显式给了具体版本号 → 强制走 release
+          fi
+          echo ">>> 通道: ${DEV_CHAN}（version 输入 或 device_mapping.conf 第三段 决定）"
+
+          if [ "${DEV_CHAN}" = "snapshot" ]; then
               MODE="快照（主分支）"
               VERSION="snapshot"
               case "${SOURCE_TYPE}" in
