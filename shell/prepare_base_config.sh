@@ -129,7 +129,10 @@ dev_symbols() {
     if [ ! -f tmp/.config-target.in ]; then
         return 0
     fi
-    grep -oE 'TARGET_(DEVICE_)?[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+' tmp/.config-target.in | sort -u
+    # 排除 TARGET_DEVICE_PACKAGES_* 这类"附加包列表"符号（它们是 string 选项，不是设备）
+    grep -oE 'TARGET_(DEVICE_)?[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+' tmp/.config-target.in \
+      | grep -vE '^TARGET_DEVICE_PACKAGES_' \
+      | sort -u
 }
 
 profile_key() {
@@ -137,18 +140,24 @@ profile_key() {
 }
 
 profile_prompt() {
-    grep -A1 -E "^[[:space:]]*config[[:space:]]+$1\$" tmp/.config-target.in 2>/dev/null \
-        | sed -n '2p' \
+    grep -A2 -E "^[[:space:]]*config[[:space:]]+$1\$" tmp/.config-target.in 2>/dev/null \
+        | grep -m1 -E '^[[:space:]]*bool[[:space:]]*"' \
         | sed -e 's/^[[:space:]]*bool[[:space:]]*//' -e 's/^"//' -e 's/"[[:space:]]*$//'
 }
 
 show_profiles() {
-    local sym key prompt
-    dev_symbols | while read -r sym; do
+    local sym key prompt syms
+    syms="$(dev_symbols | grep -E "^(TARGET_DEVICE_|TARGET_)${BOARD}_${SUBTARGET}_DEVICE_" || true)"
+    if [ -z "${syms}" ]; then
+        echo "  （没有解析出 ${BOARD}/${SUBTARGET} 的设备符号，请检查 tmp/.config-target.in）"
+        return 0
+    fi
+    while read -r sym; do
+        [ -n "${sym}" ] || continue
         key="$(profile_key "$sym")"
         prompt="$(profile_prompt "$sym")"
         printf '  key=%-45s %s\n' "$key" "$prompt"
-    done
+    done <<< "${syms}"
 }
 
 resolve_profile() {
