@@ -997,6 +997,7 @@ jobs:
           set -uo pipefail
           cd "${WORKSPACE}/src"
           echo ">>> 本次构建: device=${TARGET_DEVICE} source=${SOURCE_TYPE} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
+          echo ">>> 磁盘（编译前）:"; df -h / /home 2>/dev/null || true
           export MAKEFLAGS="-j$(nproc)"
           # 需要看完整编译细节时把下面的 make 换成 make V=s（日志会非常大）
           # 若 host 侧告警导致失败，可启用（OpenWrt 用的变量名是 HOST_CFLAGS）
@@ -1014,6 +1015,10 @@ jobs:
             grep -E "make\[[0-9]+\]: \*\*\*" build.log | tail -50 || true
             echo "========== COMPILER FATAL =========="
             grep -E "fatal error:|error:" build.log | tail -50 || true
+            echo "========== 磁盘（编译后）=========="
+            df -h / /home 2>/dev/null || true
+            echo "========== 复现失败点：target/linux install (V=s) =========="
+            make target/linux/install V=s 2>&1 | tail -250 || true
             echo "========== LAST 200 LINES =========="
             tail -200 build.log
             exit "${BUILD_RC}"
