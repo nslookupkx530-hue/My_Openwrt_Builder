@@ -279,19 +279,47 @@ jobs:
             ./scripts/feeds update -a && break || { echo "feeds update 失败，重试 ${i}/3"; sleep 5; }
           done
           ./scripts/feeds install -a
+
           # 清理已知会引发 WARNING 的冷门包（保留原有行为，可整段删掉）
           for p in package/feeds/luci/luci-app-bmx7 \
                    package/feeds/luci/luci-app-babeld \
                    package/feeds/luci/luci-app-librespeed \
                    package/feeds/packages/bmx7-dnsupdate \
                    package/feeds/packages/prometheus-node-exporter-lua \
-                   package/boot/arm-trusted-firmware-microchipsw \
-                   package/feeds/telephony/rtpengine \
-                   package/feeds/telephony/dahdi-linux \
-                   package/feeds/telephony/oslec; do
+                   package/boot/arm-trusted-firmware-microchipsw; do
             [ -e "$p" ] && rm -rf "$p"
           done
           ./scripts/feeds install -a
+          # ↑↑↑ 这是第二个、也是最后一个 install -a
+
+          # ===============================================================
+          # 【新增】编译范围收尾清理 —— 必须放在最后一次 feeds install -a 之后！
+          #   原因：feeds install -a 会把 package/feeds/<feed>/<pkg> 的符号链接重新创建，
+          #         放在它前面删 = 白删（这就是你之前加 rtpengine/dahdi/oslec 没起作用的原因）。
+          #   ① package/devel/perf     ← 核心树，Tenda(master) 上编不过
+          #   ② package/feeds/...      ← feeds install 生成的符号链接
+          #   ③ feeds/...              ← 构建实际引用的路径（日志里 "make[3] -C feeds/..."）
+          #   注：[ -e ] 对"悬空符号链接"返回假，所以用 [ -L ] 兜一下
+          # ===============================================================
+          for p in \
+            package/devel/perf \
+            package/feeds/telephony/rtpengine \
+            feeds/telephony/net/rtpengine \
+            package/feeds/telephony/dahdi-linux \
+            feeds/telephony/libs/dahdi-linux \
+            package/feeds/telephony/oslec \
+            feeds/telephony/libs/oslec \
+            package/feeds/packages/net/batctl \
+            feeds/packages/net/batctl \
+            package/feeds/packages/libs/libpfring \
+            feeds/packages/libs/libpfring \
+            package/feeds/packages/admin/netatop \
+            feeds/packages/admin/netatop ; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              echo ">>> 移除: $p"
+              rm -rf "$p"
+            fi
+          done          
 
       - name: Prepare Base Configuration
         shell: bash
@@ -971,6 +999,7 @@ jobs:
         run: |
           set -uo pipefail
           cd "${WORKSPACE}/src"
+          echo ">>> 本次构建: device=${TARGET_DEVICE} source=${SOURCE_TYPE} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
           export MAKEFLAGS="-j$(nproc)"
           # 需要看完整编译细节时把下面的 make 换成 make V=s（日志会非常大）
           # 若 host 侧告警导致失败，可启用（OpenWrt 用的变量名是 HOST_CFLAGS）
