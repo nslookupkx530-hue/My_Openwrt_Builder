@@ -1000,7 +1000,7 @@ jobs:
           # 如果在 GitHub Actions 上遇到内存不足（OOM）导致崩溃，
           # 可以将 -j$(nproc) 修改为 -j2 
           # 默认 -j$(nproc) = 4（并行时内存峰值容易触顶）
-          export MAKEFLAGS="-j$(nproc)"
+          export MAKEFLAGS="--j2"
           
           echo ">>> 开始编译 (CPU=$(nproc))"
           set +e
