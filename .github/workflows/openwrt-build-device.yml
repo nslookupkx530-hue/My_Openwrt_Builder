@@ -1020,28 +1020,154 @@ jobs:
         # 完全不受 Build 步骤内部 set -e / 自身退出码的影响
         # ================================================================
         if: failure()
+        continue-on-error: true
         shell: bash
+        timeout-minutes: 45
+        env:
+          WS: ${{ github.workspace }}
         run: |
           set +e
-          cd "${WORKSPACE}/src" 2>/dev/null || cd "${WORKSPACE}"
-          echo "========== 磁盘 =========="
-          df -h / /home
-          echo "========== 内存 =========="
+          shopt -s nullglob
+
+          # ---------- 0. 定位源码根（不再盲信 $WORKSPACE）----------
+          SRC=""
+          for d in "${WS}/src" "${WORKSPACE:-/nonexistent}/src" "${WS}" "${WORKSPACE:-/nonexistent}"; do
+            if [ -n "$d" ] && [ -f "$d/Makefile" ] && [ -d "$d/target" ] && [ -d "$d/scripts" ]; then
+              SRC="$d"; break
+            fi
+          done
+          if [ -z "$SRC" ]; then
+            echo ">>> 未找到源码根（判据：同时存在 Makefile / target/ / scripts/）"
+            find "${WS}" -maxdepth 2 -name Makefile -printf '%h\n' 2>/dev/null | head
+            exit 0
+          fi
+          cd "$SRC" || exit 0
+          echo ">>> WS  = $WS"
+          echo ">>> SRC = $SRC"
+
+          # ---------- 1. 磁盘 / inode / 内存 / OOM ----------
+          echo "::group::磁盘 / inode / 内存"
+          df -h / /home /tmp 2>/dev/null
+          echo "----- inode -----"
+          df -i / /home /tmp 2>/dev/null
           free -h
-          echo "========== dmesg 里的 OOM 记录 =========="
-          sudo dmesg 2>/dev/null | grep -iE 'out of memory|killed process' | tail -20 || echo "(无)"
-          echo "========== 失败的目标/包 =========="
-          grep -E "ERROR: (package|target)/|failed to build" build.log | tail -30
-          echo "========== make 报错行 =========="
-          grep -E "make\[[0-9]+\]: \*\*\*" build.log | tail -50
-          echo "========== 复现：target/linux install (V=s) =========="
-          make target/linux/install V=s > /tmp/img-vs.log 2>&1
+          echo "----- dmesg: OOM / 被杀进程（sudo -n，绝不挂住）-----"
+          sudo -n dmesg 2>/dev/null | grep -iE 'out of memory|killed process|oom-kill' | tail -20 || echo "(无)"
+          echo "::endgroup::"
+
+          # ---------- 2. 日志清点：Build 到底把日志写哪了 ----------
+          echo "::group::日志清点"
+          LOG=""
+          for f in "$SRC/build.log" "$WS/build.log" \
+                   "$SRC/build-full.log" "$WS/build-full.log" \
+                   "$SRC/build_img.log"  "$WS/build_img.log" "$SRC/tmp/build.log"; do
+            if [ -s "$f" ]; then
+              printf '行数=%-8s  %s\n' "$(wc -l < "$f")" "$f"
+              [ -z "$LOG" ] && LOG="$f"
+            fi
+          done
+          echo ">>> 主日志 LOG = ${LOG:-<不存在>}"
+          [ -n "$LOG" ] || echo ">>> Build 步骤可能只 tee 到 stdout 未落盘，只能靠下面的复现日志"
+          echo "::endgroup::"
+
+          # ---------- 3. 主日志报错扫描（全用同一份 LOG，绝不混用）----------
+          if [ -n "$LOG" ]; then
+            echo "::group::主日志报错扫描"
+            echo "##### 失败的目标/包 #####"
+            grep -nE "ERROR: (package|target)/|failed to build|Collected errors" "$LOG" | tail -30 || echo "(无)"
+            echo "##### make 报错行 #####"
+            grep -nE "make\[[0-9]+\]: \*\*\*" "$LOG" | tail -50 || echo "(无)"
+            echo "##### 编译器 fatal #####"
+            grep -nE "error:|fatal error:|undefined reference|collect2:" "$LOG" | tail -30 || echo "(无)"
+            echo "##### 主日志最后 80 行 #####"
+            tail -80 "$LOG"
+            echo "::endgroup::"
+
+            # ---------- 4. 失败性质判定：没报错 ≠ 编译错误 ----------
+            echo "::group::失败性质判定"
+            if grep -qE "Error [0-9]+|make\[[0-9]+\]: \*\*\*|error:|failed to build" "$LOG"; then
+              echo ">>> 日志中有明确报错  =>  真正的编译/组装错误，看上面三段"
+            else
+              echo ">>> 日志从头到尾无报错、末尾停在半路  =>  进程被【外部】杀死，不是编译错误"
+              echo ">>> 候选：job/step 超时(SIGTERM，dmesg 无痕迹) | OOM(SIGKILL，dmesg 有痕迹) | runner 掉线"
+              echo ">>> 对策：给 Build 步骤设 timeout-minutes 并让它自己落盘完整日志；MAKEFLAGS 降到 -j2 / -j1"
+            fi
+            echo "::endgroup::"
+          fi
+
+          # ---------- 5. 复现：target/linux/install（带 timeout，别把 job 吃干净）----------
+          echo "::group::复现 make -j1 target/linux/install V=s"
+          if [ -f .config ]; then
+            echo ">>> CONFIG_TARGET_BOARD = $(grep -m1 '^CONFIG_TARGET_BOARD=' .config 2>/dev/null)"
+          else
+            echo ">>> 警告：$SRC/.config 不存在，复现无意义（配置已被清掉）"
+          fi
+          timeout --signal=TERM 1500 make -j1 target/linux/install V=s > /tmp/img-vs.log 2>&1
           RC=$?
-          echo ">>> make target/linux/install V=s 退出码 = ${RC}     （0 = 单独跑竟然成功）"
-          echo "---------- 搜错误关键字 ----------"
-          grep -nE "Error [0-9]|error:|No such file|cannot stat|Permission denied|Killed|No space|too big|Assertion|Traceback" /tmp/img-vs.log | tail -40
-          echo "========== build.log 最后 120 行 =========="
-          tail -120 /tmp/img-vs.log
+          echo ">>> =================================================="
+          echo ">>> make -j1 target/linux/install V=s 退出码 RC = ${RC}"
+          echo ">>>    0   = 单独跑竟然成功 => 原失败是【并行竞态】，改 MAKEFLAGS=-j2 重跑即可出固件"
+          echo ">>>    1   = 命令失败，看 'Error 1' 上面那条被回显的命令"
+          echo ">>>    2   = make 用法/依赖错误"
+          echo ">>>    124 = 被 timeout 杀掉（超时）"
+          echo ">>>    137 = SIGKILL => 极可能 OOM 或 job 被强制终止"
+          echo ">>> =================================================="
+          echo "##### 错误关键字 #####"
+          grep -nE "Error [0-9]|error:|No such file|cannot stat|Permission denied|Killed|No space|too big|Assertion|Traceback|Segmentation|inode|Cannot allocate" /tmp/img-vs.log | tail -40 || echo "(无)"
+          echo "##### 复现日志最后 60 行（V=s 下元凶在末尾）#####"
+          tail -60 /tmp/img-vs.log
+          echo "::endgroup::"
+          cp -f /tmp/img-vs.log "${WS}/img-vs.log" 2>/dev/null || true
+
+          # ---------- 6. 产物 / 暂存 / 包级日志 ----------
+          echo "::group::产物与暂存目录"
+          du -sh bin build_dir staging_dir tmp 2>/dev/null
+          echo "##### bin/targets 最近 60 分钟生成的文件 #####"
+          find bin/targets -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM %10s  %p\n' 2>/dev/null | tail -30 || echo "(无)"
+          ls -la bin/targets/*/*/ 2>/dev/null | tail -40
+          echo "::endgroup::"
+
+          if [ -d logs ]; then
+            echo "::group::logs/ 下的包级日志"
+            find logs -type f -mmin -180 -printf '%TY-%Tm-%Td %TH:%TM  %p\n' 2>/dev/null | sort | tail -20
+            echo "##### logs/ 中含报错的日志（尾部 25 行）#####"
+            grep -rIlE "Error [0-9]+|error:|\*\*\*" logs/ 2>/dev/null | head -8 | while read -r f; do
+              echo "### $f"; tail -25 "$f"
+            done
+            echo "::endgroup::"
+          fi
+
+          # ---------- 7. 写进 Job Summary，省得翻网页日志 ----------
+          {
+            echo "## 构建失败诊断"
+            echo ""
+            echo "- 源码根: $SRC"
+            echo "- 主日志: ${LOG:-未落盘}"
+            echo "- 复现退出码 RC=${RC:-未执行}   (0=并行竞态 / 124=超时 / 137=SIGKILL)"
+            echo ""
+            echo '```'
+            free -h
+            df -h / /home
+            df -i / /home
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Upload build logs on failure
+        # ==================================================================
+        # 收尾：把日志挂成 artifact，方便下载逐行看
+        # ==================================================================
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            ${{ github.workspace }}/build.log
+            ${{ github.workspace }}/src/build.log
+            ${{ github.workspace }}/img-vs.log
+            ${{ github.workspace }}/src/logs/**
 
       - name: Verify Images
         if: success()
