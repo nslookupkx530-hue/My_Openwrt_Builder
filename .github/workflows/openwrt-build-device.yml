@@ -843,6 +843,80 @@ jobs:
             echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
           echo ">>> 注入/裁剪校验通过"
 
+      - name: Enable filogic u-boot providers (仅 Tenda-BE12PRO)
+        # ==================================================================
+        # 只给 Tenda-BE12PRO 用。其它型号（x86 / AXT-1800 / GL-MT3600BE /
+        # Cudy-TR3000-256MB）由下面 YAML 级 if 直接跳过，零耗时、零影响。
+        #
+        # 为什么只有 Tenda 需要：
+        #   immortalwrt master 的 mediatek/filogic，`make target/linux/install`
+        #   会给【整个 subtarget 近百台设备】组装 <dev>-kernel.bin，不受
+        #   CONFIG_TARGET_..._DEVICE_* 收窄约束。其中 -ubootmod / ke 类设备的
+        #   内核要把外部 u-boot 二进制
+        #     staging_dir/target-*/image/<soc>_<dev>-u-boot.bin
+        #   拼进去，而该文件由设备相关的 uboot-mediatek-* 包产出。收窄到单设备后
+        #   这些包没被选中 → 文件不存在 →
+        #     Error: can not open input file ... -u-boot.bin（80 秒即挂）
+        #
+        # 以后若新增同样受影响的型号，把设备名加进【下面两处】即可。
+        # ==================================================================
+        if: ${{ github.event.inputs.target_device == 'Tenda-BE12PRO' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+
+          # ---------- 0) 设备守卫（双保险：即使 if 被绕过也只对 Tenda 生效）----------
+          case "${TARGET_DEVICE:-}" in
+            Tenda-BE12PRO) : ;;
+            *) echo ">>> TARGET_DEVICE=${TARGET_DEVICE:-<空>} 不是 Tenda-BE12PRO，跳过本步骤"; exit 0 ;;
+          esac
+
+          # ---------- 1) 符号来源 ----------
+          [ -s tmp/.config-package.in ] || {
+            echo "ERROR: tmp/.config-package.in 不存在（本步骤必须在 make defconfig 之后运行）"; exit 1; }
+
+          # 注意：.config-package.in 里是 "config PACKAGE_xxx"，不是 "CONFIG_PACKAGE_xxx"
+          SYMS="$(sed -n -E 's/^[[:space:]]*config[[:space:]]+(PACKAGE_uboot-mediatek[A-Za-z0-9._-]*)$/\1/p' \
+                  tmp/.config-package.in | sort -u)"
+          CNT="$(printf '%s\n' "${SYMS}" | sed '/^$/d' | wc -l)"
+          echo ">>> 候选 u-boot 提供者包: ${CNT} 个"
+          printf '%s\n' "${SYMS}" | sed 's/^/    /'
+          [ "${CNT}" -gt 0 ] || { echo "ERROR: 没匹配到任何 uboot-mediatek 包符号，匹配规则需调整"; exit 1; }
+
+          # ---------- 2) 打开（=y 才会把 u-boot 拷进 staging_dir/.../image/）----------
+          for s in ${SYMS}; do
+            ./scripts/config --enable "CONFIG_${s}"
+          done
+          make defconfig
+
+          # ---------- 3) 断言 ----------
+          DEV_ON="$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)"
+          UB_ON="$(grep -cE '^CONFIG_PACKAGE_uboot-mediatek.*=y$' .config || true)"
+          echo ">>> DEV_ON=${DEV_ON}   UBOOT_ON=${UB_ON}"
+          grep -E '^CONFIG_PACKAGE_uboot-mediatek.*=y$' .config | sed 's/^/    /' || true
+          [ "${UB_ON}" -gt 0 ] || { echo "ERROR: uboot-mediatek 包没进 .config（被 defconfig 丢掉了？）"; exit 1; }
+          [ "${DEV_ON}" = "1" ] || { echo "ERROR: 收窄被打破（现在 ${DEV_ON} 台），会编全 target 镜像"; exit 1; }
+
+          # ---------- 4) 被丢掉的候选（mt7622/mt7623/mt7629 的属正常丢弃）----------
+          echo ">>> defconfig 后被丢掉的候选:"
+          _dropped=0
+          for s in ${SYMS}; do
+            grep -qxF "CONFIG_${s}=y" .config && continue
+            echo "    DROPPED CONFIG_${s}"; _dropped=1
+          done
+          [ "${_dropped}" = "0" ] && echo "    (无)"
+
+          # ---------- 5) 排查用 ----------
+          if [ -f target/linux/mediatek/image/Makefile ]; then
+            echo ">>> image Makefile 引用的 STAGING_DIR_IMAGE 工件（前 40）:"
+            grep -rhoE '\$\(STAGING_DIR_IMAGE\)/[A-Za-z0-9_.@+-]+' target/linux/mediatek/image/Makefile \
+              | sort -u | head -40 | sed 's/^/    /' || true
+          fi
+          echo ">>> mt7981_keenetic_kn-1012-u-boot.bin 的提供者（能命中=包名匹配对了）:"
+          grep -rl -- 'mt7981_keenetic_kn-1012-u-boot.bin' package/ 2>/dev/null | head -5 \
+            || echo "    (未命中属正常：文件名可能是变量拼的)"
+
       - name: Generate release notes
         id: notes
         shell: bash
@@ -1001,6 +1075,9 @@ jobs:
 
           # 所有变量都兜底：set -u 下少传一个 env 就会在此行崩，日志里只留一行 unbound variable
           echo ">>> 本次构建: device=${TARGET_DEVICE:-?} source=${SOURCE_TYPE:-?} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
+          echo ">>> [诊断] DEV_ON=$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)   UBOOT_ON=$(grep -cE '^CONFIG_PACKAGE_uboot-mediatek.*=y$' .config || true)"
+          echo ">>> [诊断] 相关开关:"; grep -E '^CONFIG_TARGET_(ALL_PROFILES|MULTI_PROFILE|PER_DEVICE_ROOTFS|PROFILE)' .config || echo "        (无相关开关)"
+          echo ">>> [诊断] 已选包数 SEL_ON=$(grep -cE '^CONFIG_PACKAGE_.*=y$' .config || true)"
           echo ">>> 磁盘（编译前）:"; df -h / /home 2>/dev/null || true
           echo ">>> inode（编译前）:"; df -i / /home 2>/dev/null || true
           
@@ -1157,6 +1234,13 @@ jobs:
           echo "##### bin/targets 最近 60 分钟生成的文件 #####"
           find bin/targets -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM %10s  %p\n' 2>/dev/null | tail -30 || echo "(无)"
           ls -la bin/targets/*/*/ 2>/dev/null | tail -40
+          
+          echo "##### staging_dir 下的 u-boot / fip / preloader 产出 #####"
+          find staging_dir -path '*/image/*' -type f \
+            \( -iname '*u-boot*' -o -iname '*fip*' -o -iname '*preloader*' \) \
+            2>/dev/null | head -60 || true
+          echo "----- 那些 staging image 目录里一共多少文件（0 = 一个工件都没生成过）-----"
+          find staging_dir -path '*/image/*' -type f 2>/dev/null | wc -l
           echo "::endgroup::"
 
           if [ -d logs ]; then
