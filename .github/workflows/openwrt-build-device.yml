@@ -990,23 +990,55 @@ jobs:
 
       - name: Build firmware
         shell: bash
+        # 关键：step 超时 < job 超时。
+        # step 超时 => 状态是 "failed"，后面 if: failure() 的诊断步骤会跑；
+        # job 超时 => 状态是 "cancelled"，if: failure() 的步骤【不会】跑。
+        # 默认 job 超时就是 360 分钟。
+        timeout-minutes: 300
         run: |
           set -uo pipefail
-          cd "${WORKSPACE}/src"
-          echo ">>> 本次构建: device=${TARGET_DEVICE} source=${SOURCE_TYPE} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
+          cd "${WORKSPACE}/src" || { echo "::error::源码目录 ${WORKSPACE}/src 不存在"; exit 1; }
+
+          # 所有变量都兜底：set -u 下少传一个 env 就会在此行崩，日志里只留一行 unbound variable
+          echo ">>> 本次构建: device=${TARGET_DEVICE:-?} source=${SOURCE_TYPE:-?} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
           echo ">>> 磁盘（编译前）:"; df -h / /home 2>/dev/null || true
+          echo ">>> inode（编译前）:"; df -i / /home 2>/dev/null || true
           
-          # 使用所有可用核心进行并行编译
-          # 如果在 GitHub Actions 上遇到内存不足（OOM）导致崩溃，
+          # 默认 -j$(nproc) 使用所有可用核心进行并行编译，内存峰值容易触顶、内存不足（OOM）导致崩溃
+          # 表现为"镜像组装阶段无任何报错就失败"（竞态，不是编译错误）
           # 可以将 -j$(nproc) 修改为 -j2 
-          # 默认 -j$(nproc) = 4（并行时内存峰值容易触顶）
-          export MAKEFLAGS="--j2"
+          export MAKEFLAGS="-j2" 
+
+          # 花 1 秒验证 MAKEFLAGS 能被 make 接受，避免白跑几小时
+          printf 'all:\n\t@echo "MAKEFLAGS=${MAKEFLAGS} OK"\n' > /tmp/mf-check.mk
+          if ! make -f /tmp/mf-check.mk all; then
+            echo "::error::MAKEFLAGS='${MAKEFLAGS}' 被 make 拒绝，检查拼写（应为 -j2 / -j 2 / --jobs=2）"
+            exit 2
+          fi
           
-          echo ">>> 开始编译 (CPU=$(nproc))"
+          echo ">>> 开始编译 (CPU=$(nproc), MAKEFLAGS=${MAKEFLAGS})"
           set +e
+          rm -f build.log                # 清掉上次残留，诊断步骤才不会读到旧日志
+          set +e
+
+          # ---------- 第一遍：2 路并行 ----------
           make 2>&1 | tee build.log
           BUILD_RC=${PIPESTATUS[0]}
+
+          # ---------- 第二遍：降级串行重试 ----------
+          # 失败点通常在收尾的 target/linux install（镜像组装），此时 99% 的包已编好，
+          # -j1 重跑只剩几分钟，竞态型失败基本必自愈。
+          if [ "${BUILD_RC}" -ne 0 ]; then
+            echo "::warning::并行构建失败（exit ${BUILD_RC}），自动降级 -j1 串行重试..."
+            echo "===== 以下为 -j1 重试 $(date -u +%F' '%TZ) =====" >> build.log
+            export MAKEFLAGS="-j1"
+            make V=s 2>&1 | tee -a build.log
+            BUILD_RC=${PIPESTATUS[0]}
+            echo ">>> -j1 重试退出码 = ${BUILD_RC}"
+          fi
+
           set -e
+          echo ">>> build.log 行数=$(wc -l < build.log)  大小=$(du -h build.log | cut -f1)"
           echo "make exit code: ${BUILD_RC}"
           if [ "${BUILD_RC}" -ne 0 ]; then
             echo "::error::编译失败（exit ${BUILD_RC}），详细原因见下一步 Diagnose build failure"
