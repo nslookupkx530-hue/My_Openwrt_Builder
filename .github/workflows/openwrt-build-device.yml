@@ -998,7 +998,8 @@ jobs:
           
           # 使用所有可用核心进行并行编译
           # 如果在 GitHub Actions 上遇到内存不足（OOM）导致崩溃，
-          # 可以将 -j$(nproc) 修改为 -j2 或 -j4
+          # 可以将 -j$(nproc) 修改为 -j2 
+          # 默认 -j$(nproc) = 4（并行时内存峰值容易触顶）
           export MAKEFLAGS="-j$(nproc)"
           
           echo ">>> 开始编译 (CPU=$(nproc))"
