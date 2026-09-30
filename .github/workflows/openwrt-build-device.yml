@@ -1038,29 +1038,34 @@ jobs:
           if [ "${BUILD_RC}" -ne 0 ]; then
 
             if [ "${TARGET_DEVICE:-}" = "Tenda-BE12PRO" ]; then
-              # ---------- 仅 Tenda：未选中设备缺 staging 工件 → 0 字节占位 + 增量重试 ----------
-              # 背景：filogic 的 make target/linux/install 会给整个 subtarget 近百台设备组装
-              #       <dev>-kernel.bin，其中 -ubootmod/ke 类设备需要外部 u-boot 二进制
-              #       staging_dir/target-*/image/<soc>_<dev>-u-boot.bin。这些设备没被选中
-              #       → 工件不存在 → "Error: can not open input file ..."（80 秒即挂）。
-              #       这些设备的镜像我们不用，所以造 0 字节占位；目标设备自己的工件缺失时
-              #       【绝不占位】，直接失败退出。
+              export MAKEFLAGS="-j1"          # 组装阶段单线程，行为与 Diagnose 复现一致
               for i in $(seq 1 12); do
-                MISS="$(grep -oE 'can not open input file [^[:space:]]+' build.log | tail -n1 | awk '{print $NF}')"
-                [ -n "${MISS}" ] || { echo ">>> 不是'缺输入文件'型失败，跳出占位循环"; break; }
+                echo "::warning::第 ${i} 轮：重跑 target/linux/install (V=s) 以定位缺失工件"
+                echo "===== 组装重试 ${i} $(date -u +%F' '%TZ) =====" >> build.log
+                make -j1 target/linux/install V=s > "/tmp/asm-${i}.log" 2>&1
+                RC2=$?
+                cat "/tmp/asm-${i}.log" >> build.log      # 错误文本只在这份日志里，务必并进 build.log
+
+                if [ "${RC2}" -eq 0 ]; then
+                  echo ">>> 组装通过（第 ${i} 轮）"
+                  BUILD_RC=0; break
+                fi
+
+                MISS="$(grep -oE 'can not open input file [^[:space:]]+' "/tmp/asm-${i}.log" | tail -n1 | awk '{print $NF}')"
+                if [ -z "${MISS}" ]; then
+                  echo ">>> 第 ${i} 轮失败但不是'缺输入文件'型，停止占位循环（真错误见 build.log 末尾）"
+                  tail -40 "/tmp/asm-${i}.log" || true
+                  BUILD_RC="${RC2}"; break
+                fi
                 case "${MISS}" in
                   */staging_dir/*) : ;;
-                  *) echo "::error::缺失路径不在 staging_dir 下，拒绝占位: ${MISS}"; BUILD_RC=1; break ;;
+                  *) echo "::error::缺失路径不在 staging_dir 下，拒绝占位: ${MISS}"; BUILD_RC="${RC2}"; break ;;
                 esac
                 case "${MISS}" in
-                  *tenda*|*be12*) echo "::error::缺的是目标设备自己的工件，不能占位: ${MISS}"; BUILD_RC=1; break ;;
+                  *tenda*|*be12*) echo "::error::缺的是目标设备自己的工件，不能占位: ${MISS}"; BUILD_RC="${RC2}"; break ;;
                 esac
-                echo "::warning::第 ${i} 轮：缺 ${MISS} → 建 0 字节占位后增量重试"
-                mkdir -p "$(dirname "${MISS}")" && : > "${MISS}" || { BUILD_RC=1; break; }
-                echo "===== 占位重试 ${i} $(date -u +%F' '%TZ) : ${MISS} =====" >> build.log
-                make 2>&1 | tee -a build.log
-                BUILD_RC=${PIPESTATUS[0]}
-                if [ "${BUILD_RC}" -eq 0 ]; then echo ">>> 占位后组装通过（第 ${i} 轮）"; break; fi
+                echo ">>> 第 ${i} 轮缺失: ${MISS}  → 建 0 字节占位"
+                mkdir -p "$(dirname "${MISS}")" && : > "${MISS}" || { BUILD_RC="${RC2}"; break; }
               done
 
             else
