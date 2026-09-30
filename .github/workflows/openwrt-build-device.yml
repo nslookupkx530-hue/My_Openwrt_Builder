@@ -843,33 +843,43 @@ jobs:
             echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
           echo ">>> 注入/裁剪校验通过"
 
-      - name: Enable filogic u-boot providers (仅 Tenda-BE12PRO)
+      - name: Enable filogic u-boot providers (snapshot 通道的 mediatek 设备)
         # ==================================================================
-        # 只给 Tenda-BE12PRO 用。其它型号（x86 / AXT-1800 / GL-MT3600BE /
-        # Cudy-TR3000-256MB）由下面 YAML 级 if 直接跳过，零耗时、零影响。
+        # 是否执行由脚本内的【通道 + target】双守卫决定
+        #   · 通道 ≠ snapshot  → 跳过（x86 / AXT-1800 / GL-MT3600BE / Cudy 全在这里）
+        #   · target ≠ mediatek → 跳过（这类 target 根本没有 uboot-mediatek 包）
+        # 好处：以后新增 snapshot 设备自动生效，只需改一处（mapping 第三段）。
         #
-        # 为什么只有 Tenda 需要：
-        #   immortalwrt master 的 mediatek/filogic，`make target/linux/install`
-        #   会给【整个 subtarget 近百台设备】组装 <dev>-kernel.bin，不受
-        #   CONFIG_TARGET_..._DEVICE_* 收窄约束。其中 -ubootmod / ke 类设备的
-        #   内核要把外部 u-boot 二进制
-        #     staging_dir/target-*/image/<soc>_<dev>-u-boot.bin
-        #   拼进去，而该文件由设备相关的 uboot-mediatek-* 包产出。收窄到单设备后
-        #   这些包没被选中 → 文件不存在 →
-        #     Error: can not open input file ... -u-boot.bin（80 秒即挂）
-        #
-        # 以后若新增同样受影响的型号，把设备名加进【下面两处】即可。
+        # 为什么只有 snapshot 设备需要：见下方原注释（filogic 镜像组装会打包整个
+        # subtarget 近百台设备，其中 -ubootmod/ke 类设备需要外部 u-boot 二进制，
+        # 收窄到单设备后这些包没被选中 → can not open input file ... -u-boot.bin）
         # ==================================================================
-        if: ${{ github.event.inputs.target_device == 'Tenda-BE12PRO' }}
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
 
-          # ---------- 0) 设备守卫（双保险：即使 if 被绕过也只对 Tenda 生效）----------
-          case "${TARGET_DEVICE:-}" in
-            Tenda-BE12PRO) : ;;
-            *) echo ">>> TARGET_DEVICE=${TARGET_DEVICE:-<空>} 不是 Tenda-BE12PRO，跳过本步骤"; exit 0 ;;
+          # ---------- 0a) 通道守卫：只处理 snapshot ----------
+          DEV_CHAN="$(grep -E "^[[:space:]]*${TARGET_DEVICE:-}=" "${WORKSPACE}/configs/device_mapping.conf" 2>/dev/null \
+                      | head -n1 | awk -F'|' '{print $3}' | tr -d '[:space:]')"
+          [ -n "${DEV_CHAN}" ] || DEV_CHAN="release"
+          # 与 Clone Source Repository 的优先级保持一致：显式 version 输入 > mapping 第三段
+          [ "${INPUT_VERSION:-}" = "snapshot" ] && DEV_CHAN="snapshot"
+          case "${DEV_CHAN}" in
+            snapshot) echo ">>> ${TARGET_DEVICE} 通道=${DEV_CHAN}，继续" ;;
+            *) echo ">>> ${TARGET_DEVICE} 通道=${DEV_CHAN}（非 snapshot），跳过本步骤"; exit 0 ;;
+          esac
+
+          # ---------- 0b) target 守卫：只处理 mediatek ----------
+          TP="${TARGET_PATH:-}"
+          if [ -z "${TP}" ]; then
+            B="$(sed -n 's/^CONFIG_TARGET_BOARD="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+            S="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+            TP="${B}${S:+/$S}"
+          fi
+          case "${TP}" in
+            mediatek*) echo ">>> target=${TP}，继续" ;;
+            *) echo ">>> target=${TP:-<未知>} 非 mediatek，跳过本步骤（无 uboot-mediatek 包）"; exit 0 ;;
           esac
 
           # ---------- 1) 符号来源 ----------
