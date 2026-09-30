@@ -651,9 +651,6 @@ jobs:
       #     x86_64 → x86_64/     aarch64_cortex-a53 → arm64-a53/     其它 arm64 → arm64/
       #   输出到 src/packages/ → 交给下面现成的 "Install Third-Party APKs
       #   into image" 步骤统一拷进固件（计数/自检/首启服务都在那步）
-      #
-      # 目前 apk 仓库只有 run/x86_64/luci-third-party-openwrt/，所以暂时只对
-      # x86 启用。将来补齐各架构目录后，把下面的 if 整行删掉即可全设备启用。
       # =====================================================================
         if: ${{ github.event.inputs.source_type == 'openwrt' }}
         shell: bash
