@@ -998,7 +998,12 @@ jobs:
           cd "${WORKSPACE}/src"
           echo ">>> 本次构建: device=${TARGET_DEVICE} source=${SOURCE_TYPE} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
           echo ">>> 磁盘（编译前）:"; df -h / /home 2>/dev/null || true
+          
+          # 使用所有可用核心进行并行编译
+          # 如果在 GitHub Actions 上遇到内存不足（OOM）导致崩溃，
+          # 可以将 -j$(nproc) 修改为 -j2 或 -j4
           export MAKEFLAGS="-j$(nproc)"
+          
           echo ">>> 开始编译 (CPU=$(nproc))"
           set +e
           make 2>&1 | tee build.log
