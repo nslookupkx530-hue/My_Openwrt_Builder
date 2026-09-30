@@ -1008,6 +1008,7 @@ jobs:
           echo ">>> inode（编译前）:"; df -i / /home 2>/dev/null || true
           
           # 默认 -j$(nproc) 使用所有可用核心进行并行编译，内存峰值容易触顶、内存不足（OOM）导致崩溃
+          # -j3 通常能避开峰值
           # 表现为"镜像组装阶段无任何报错就失败"（竞态，不是编译错误）
           # 可以将 -j$(nproc) 修改为 -j2 
           export MAKEFLAGS="-j2" 
