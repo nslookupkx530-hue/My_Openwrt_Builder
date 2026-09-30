@@ -1037,9 +1037,13 @@ jobs:
           echo "========== make 报错行 =========="
           grep -E "make\[[0-9]+\]: \*\*\*" build.log | tail -50
           echo "========== 复现：target/linux install (V=s) =========="
-          make target/linux/install V=s 2>&1 | tail -250
-          echo "========== build.log 最后 100 行 =========="
-          tail -100 build.log
+          make target/linux/install V=s > /tmp/img-vs.log 2>&1
+          RC=$?
+          echo ">>> make target/linux/install V=s 退出码 = ${RC}     （0 = 单独跑竟然成功）"
+          echo "---------- 搜错误关键字 ----------"
+          grep -nE "Error [0-9]|error:|No such file|cannot stat|Permission denied|Killed|No space|too big|Assertion|Traceback" /tmp/img-vs.log | tail -40
+          echo "========== build.log 最后 120 行 =========="
+          tail -120 /tmp/img-vs.log
 
       - name: Verify Images
         if: success()
