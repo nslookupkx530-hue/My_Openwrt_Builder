@@ -843,90 +843,6 @@ jobs:
             echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
           echo ">>> 注入/裁剪校验通过"
 
-      - name: Enable filogic u-boot providers (snapshot 通道的 mediatek 设备)
-        # ==================================================================
-        # 是否执行由脚本内的【通道 + target】双守卫决定
-        #   · 通道 ≠ snapshot  → 跳过（x86 / AXT-1800 / GL-MT3600BE / Cudy 全在这里）
-        #   · target ≠ mediatek → 跳过（这类 target 根本没有 uboot-mediatek 包）
-        # 好处：以后新增 snapshot 设备自动生效，只需改一处（mapping 第三段）。
-        #
-        # 为什么只有 snapshot 设备需要：见下方原注释（filogic 镜像组装会打包整个
-        # subtarget 近百台设备，其中 -ubootmod/ke 类设备需要外部 u-boot 二进制，
-        # 收窄到单设备后这些包没被选中 → can not open input file ... -u-boot.bin）
-        # ==================================================================
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-
-          # ---------- 0a) 通道守卫：只处理 snapshot ----------
-          DEV_CHAN="$(grep -E "^[[:space:]]*${TARGET_DEVICE:-}=" "${WORKSPACE}/configs/device_mapping.conf" 2>/dev/null \
-                      | head -n1 | awk -F'|' '{print $3}' | tr -d '[:space:]')"
-          [ -n "${DEV_CHAN}" ] || DEV_CHAN="release"
-          # 与 Clone Source Repository 的优先级保持一致：显式 version 输入 > mapping 第三段
-          [ "${INPUT_VERSION:-}" = "snapshot" ] && DEV_CHAN="snapshot"
-          case "${DEV_CHAN}" in
-            snapshot) echo ">>> ${TARGET_DEVICE} 通道=${DEV_CHAN}，继续" ;;
-            *) echo ">>> ${TARGET_DEVICE} 通道=${DEV_CHAN}（非 snapshot），跳过本步骤"; exit 0 ;;
-          esac
-
-          # ---------- 0b) target 守卫：只处理 mediatek ----------
-          TP="${TARGET_PATH:-}"
-          if [ -z "${TP}" ]; then
-            B="$(sed -n 's/^CONFIG_TARGET_BOARD="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
-            S="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
-            TP="${B}${S:+/$S}"
-          fi
-          case "${TP}" in
-            mediatek*) echo ">>> target=${TP}，继续" ;;
-            *) echo ">>> target=${TP:-<未知>} 非 mediatek，跳过本步骤（无 uboot-mediatek 包）"; exit 0 ;;
-          esac
-
-          # ---------- 1) 符号来源 ----------
-          [ -s tmp/.config-package.in ] || {
-            echo "ERROR: tmp/.config-package.in 不存在（本步骤必须在 make defconfig 之后运行）"; exit 1; }
-
-          # 注意：.config-package.in 里是 "config PACKAGE_xxx"，不是 "CONFIG_PACKAGE_xxx"
-          SYMS="$(sed -n -E 's/^[[:space:]]*config[[:space:]]+(PACKAGE_uboot-mediatek[A-Za-z0-9._-]*)$/\1/p' \
-                  tmp/.config-package.in | sort -u)"
-          CNT="$(printf '%s\n' "${SYMS}" | sed '/^$/d' | wc -l)"
-          echo ">>> 候选 u-boot 提供者包: ${CNT} 个"
-          printf '%s\n' "${SYMS}" | sed 's/^/    /'
-          [ "${CNT}" -gt 0 ] || { echo "ERROR: 没匹配到任何 uboot-mediatek 包符号，匹配规则需调整"; exit 1; }
-
-          # ---------- 2) 打开（=y 才会把 u-boot 拷进 staging_dir/.../image/）----------
-          for s in ${SYMS}; do
-            ./scripts/config --enable "CONFIG_${s}"
-          done
-          make defconfig
-
-          # ---------- 3) 断言 ----------
-          DEV_ON="$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)"
-          UB_ON="$(grep -cE '^CONFIG_PACKAGE_uboot-mediatek.*=y$' .config || true)"
-          echo ">>> DEV_ON=${DEV_ON}   UBOOT_ON=${UB_ON}"
-          grep -E '^CONFIG_PACKAGE_uboot-mediatek.*=y$' .config | sed 's/^/    /' || true
-          [ "${UB_ON}" -gt 0 ] || { echo "ERROR: uboot-mediatek 包没进 .config（被 defconfig 丢掉了？）"; exit 1; }
-          [ "${DEV_ON}" = "1" ] || { echo "ERROR: 收窄被打破（现在 ${DEV_ON} 台），会编全 target 镜像"; exit 1; }
-
-          # ---------- 4) 被丢掉的候选（mt7622/mt7623/mt7629 的属正常丢弃）----------
-          echo ">>> defconfig 后被丢掉的候选:"
-          _dropped=0
-          for s in ${SYMS}; do
-            grep -qxF "CONFIG_${s}=y" .config && continue
-            echo "    DROPPED CONFIG_${s}"; _dropped=1
-          done
-          [ "${_dropped}" = "0" ] && echo "    (无)"
-
-          # ---------- 5) 排查用 ----------
-          if [ -f target/linux/mediatek/image/Makefile ]; then
-            echo ">>> image Makefile 引用的 STAGING_DIR_IMAGE 工件（前 40）:"
-            grep -rhoE '\$\(STAGING_DIR_IMAGE\)/[A-Za-z0-9_.@+-]+' target/linux/mediatek/image/Makefile \
-              | sort -u | head -40 | sed 's/^/    /' || true
-          fi
-          echo ">>> mt7981_keenetic_kn-1012-u-boot.bin 的提供者（能命中=包名匹配对了）:"
-          grep -rl -- 'mt7981_keenetic_kn-1012-u-boot.bin' package/ 2>/dev/null | head -5 \
-            || echo "    (未命中属正常：文件名可能是变量拼的)"
-
       - name: Generate release notes
         id: notes
         shell: bash
@@ -1113,15 +1029,49 @@ jobs:
           BUILD_RC=${PIPESTATUS[0]}
 
           # ---------- 第二遍：降级串行重试 ----------
-          # 失败点通常在收尾的 target/linux install（镜像组装），此时 99% 的包已编好，
-          # -j1 重跑只剩几分钟，竞态型失败基本必自愈。
+          # ==================================================================
+          # 失败处理：按设备分流，互不干扰
+          #   · Tenda-BE12PRO → 占位 + 增量重试（只处理"未选中设备缺工件"这一种失败）
+          #   · 其它所有型号   → 原样保留的 -j1 降级重试
+          # ==================================================================
           if [ "${BUILD_RC}" -ne 0 ]; then
-            echo "::warning::并行构建失败（exit ${BUILD_RC}），自动降级 -j1 串行重试..."
-            echo "===== 以下为 -j1 重试 $(date -u +%F' '%TZ) =====" >> build.log
-            export MAKEFLAGS="-j1"
-            make V=s 2>&1 | tee -a build.log
-            BUILD_RC=${PIPESTATUS[0]}
-            echo ">>> -j1 重试退出码 = ${BUILD_RC}"
+
+            if [ "${TARGET_DEVICE:-}" = "Tenda-BE12PRO" ]; then
+              # ---------- 仅 Tenda：未选中设备缺 staging 工件 → 0 字节占位 + 增量重试 ----------
+              # 背景：filogic 的 make target/linux/install 会给整个 subtarget 近百台设备组装
+              #       <dev>-kernel.bin，其中 -ubootmod/ke 类设备需要外部 u-boot 二进制
+              #       staging_dir/target-*/image/<soc>_<dev>-u-boot.bin。这些设备没被选中
+              #       → 工件不存在 → "Error: can not open input file ..."（80 秒即挂）。
+              #       这些设备的镜像我们不用，所以造 0 字节占位；目标设备自己的工件缺失时
+              #       【绝不占位】，直接失败退出。
+              for i in $(seq 1 12); do
+                MISS="$(grep -oE 'can not open input file [^[:space:]]+' build.log | tail -n1 | awk '{print $NF}')"
+                [ -n "${MISS}" ] || { echo ">>> 不是'缺输入文件'型失败，跳出占位循环"; break; }
+                case "${MISS}" in
+                  */staging_dir/*) : ;;
+                  *) echo "::error::缺失路径不在 staging_dir 下，拒绝占位: ${MISS}"; BUILD_RC=1; break ;;
+                esac
+                case "${MISS}" in
+                  *tenda*|*be12*) echo "::error::缺的是目标设备自己的工件，不能占位: ${MISS}"; BUILD_RC=1; break ;;
+                esac
+                echo "::warning::第 ${i} 轮：缺 ${MISS} → 建 0 字节占位后增量重试"
+                mkdir -p "$(dirname "${MISS}")" && : > "${MISS}" || { BUILD_RC=1; break; }
+                echo "===== 占位重试 ${i} $(date -u +%F' '%TZ) : ${MISS} =====" >> build.log
+                make 2>&1 | tee -a build.log
+                BUILD_RC=${PIPESTATUS[0]}
+                if [ "${BUILD_RC}" -eq 0 ]; then echo ">>> 占位后组装通过（第 ${i} 轮）"; break; fi
+              done
+
+            else
+              # ---------- 其它型号：降级串行重试 ----------
+              echo "::warning::并行构建失败（exit ${BUILD_RC}），自动降级 -j1 串行重试..."
+              echo "===== 以下为 -j1 重试 $(date -u +%F' '%TZ) =====" >> build.log
+              export MAKEFLAGS="-j1"
+              make V=s 2>&1 | tee -a build.log
+              BUILD_RC=${PIPESTATUS[0]}
+              echo ">>> -j1 重试退出码 = ${BUILD_RC}"
+            fi
+
           fi
 
           set -e
