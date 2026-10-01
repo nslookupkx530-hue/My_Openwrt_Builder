@@ -592,6 +592,42 @@ jobs:
           fi
           echo ">>> 编译成功"
 
+      - name: Compute vermagic & record kmods feed URL
+        id: km
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          KM_DIR="$(ls -d bin/targets/*/*/kmods/*/ 2>/dev/null | head -n1 || true)"
+          if [ -z "${KM_DIR}" ]; then
+            echo "::warning::没有 kmods 目录，kmods 源不会发布"
+            echo "vermagic=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          VERMAGIC="$(basename "${KM_DIR%/}")"
+          OWNER="${GITHUB_REPOSITORY_OWNER}"; REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          [ "${REPO_NAME}" = "${OWNER}.github.io" ] && BASE="https://${OWNER}.github.io" || BASE="https://${OWNER}.github.io/${REPO_NAME}"
+          [ -n "${KMODS_FEED_BASE_OVERRIDE:-}" ] && BASE="${KMODS_FEED_BASE_OVERRIDE}"
+          EXACT="${BASE}/kmods/${TARGET_DEVICE}/${VERMAGIC}/packages.adb"
+          echo ">>> vermagic     = ${VERMAGIC}"
+          echo ">>> apk 数量     = $(find "${KM_DIR}" -maxdepth 1 -name '*.apk' | wc -l)"
+          echo ">>> 精确源 URL   = ${EXACT}"
+          echo ">>> 固定源 URL   = ${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
+          {
+            echo "kmods_vermagic : ${VERMAGIC}"
+            echo "kmods_feed     : ${EXACT}"
+            echo "kmods_feed_latest: ${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
+          } >> "${WORKSPACE}/BUILDINFO.txt"
+          {
+            echo
+            echo "自建 Kmod 源（本次内核）"
+            echo
+            echo "- vermagic: \`${VERMAGIC}\`"
+            echo "- 精确源（推荐写进设备）: ${EXACT}"
+            echo "- 固定源（每次构建后覆盖）: ${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
+          } >> "${WORKSPACE}/release-notes.md"
+          echo "vermagic=${VERMAGIC}" >> "$GITHUB_OUTPUT"
+
       - name: Diagnose build failure
         if: failure()
         continue-on-error: true
@@ -664,6 +700,16 @@ jobs:
           echo ">>> 自有 kmod 库（本次产物）:"
           ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (没有 kmods 目录)"
           echo ">>> 设备端 distfeeds 应指向该 kmods 目录的发布地址（不要指向官方 kmods）"
+
+      - name: Upload kmods feed artifact
+        if: success() && steps.km.outputs.vermagic != ''
+        uses: actions/upload-artifact@v4
+        with:
+          # 命名规则 <设备>-kmods-feed-<vermagic>，发布 workflow 按这个前缀解析
+          name: ${{ github.event.inputs.target_device }}-kmods-feed-${{ steps.km.outputs.vermagic }}
+          path: src/bin/targets/*/*/kmods/**
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Upload Artifacts
         if: success()
