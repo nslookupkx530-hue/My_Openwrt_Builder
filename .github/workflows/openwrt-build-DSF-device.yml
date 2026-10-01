@@ -461,12 +461,12 @@ jobs:
           D="${WORKSPACE}/src/files/etc/uci-defaults"
           mkdir -p "$D"
           cat > "${D}/99-dsf-own-kmods" <<EOF
-#!/bin/sh
-# 由 DSF 构建注入：自建 kmods 源（本固件内核与官方不同源）
-mkdir -p /etc/apk/repositories.d
-echo "${FEED_URL}" > /etc/apk/repositories.d/99-dsf-own-kmods.list
-exit 0
-EOF
+          #!/bin/sh
+          # 由 DSF 构建注入：自建 kmods 源（本固件内核与官方不同源）
+          mkdir -p /etc/apk/repositories.d
+          echo "${FEED_URL}" > /etc/apk/repositories.d/99-dsf-own-kmods.list
+          exit 0
+          EOF
           chmod 0755 "${D}/99-dsf-own-kmods"
           cat "${D}/99-dsf-own-kmods"
 
