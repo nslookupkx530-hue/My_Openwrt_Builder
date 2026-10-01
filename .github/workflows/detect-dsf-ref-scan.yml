@@ -1,4 +1,5 @@
 name: DSF Ref Scanner (查该用哪个分支)
+run-name: "DSF Ref Scanner (查该用哪个分支): ${{ inputs.device }}"
 
 on:
   workflow_dispatch:
