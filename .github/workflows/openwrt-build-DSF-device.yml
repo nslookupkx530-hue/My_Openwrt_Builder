@@ -1,5 +1,5 @@
 name: OpenWrt Build & DSF-Release
-
+run-name: OpenWrt Build & DSF-Release - ${{ inputs.target_device }}
 
 # ============================================================================
 # 服务设备：GL-MT5000 (m0eak/fanchmwrt) / JDC-AX6600 (m0eak/libwrt)
