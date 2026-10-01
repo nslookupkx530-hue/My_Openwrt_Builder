@@ -1011,7 +1011,7 @@ jobs:
           # 表现为"镜像组装阶段无任何报错就失败"（竞态，不是编译错误）
           # 可以将 -j$(nproc) 修改为 -j3 通常能避开峰值
           # 或者修改为 -j2 稳定；基本不会撞峰值。但建时间拉长约 1.5~1.8 倍
-          export MAKEFLAGS="-j2" 
+          export MAKEFLAGS="-j3" 
 
           # 花 1 秒验证 MAKEFLAGS 能被 make 接受，避免白跑几小时
           printf 'all:\n\t@echo "MAKEFLAGS=${MAKEFLAGS} OK"\n' > /tmp/mf-check.mk
