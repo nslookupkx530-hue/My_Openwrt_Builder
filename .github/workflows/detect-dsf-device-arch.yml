@@ -112,13 +112,26 @@ jobs:
           cd src
           COMMIT="$(git rev-parse HEAD)"; CDATE="$(git log -1 --format=%cd --date=iso)"
           echo ">>> ${DEVICE} commit=${COMMIT} date=${CDATE}"
-          echo "--- feeds.conf.default ---"; cat feeds.conf.default 2>/dev/null || cat feeds.conf 2>/dev/null || echo "(无)"
+          echo "--- feeds.conf.default ---"; cat feeds.conf.default 2>/dev/null || true
           echo "--- 包体系 ---"; ls -d package/system/apk package/system/opkg 2>/dev/null || echo "(都无)"
           echo "--- 版本线索 ---"; grep -m3 -E 'RELEASE|VERSION_NUMBER|VERSION_CODE' include/version.mk 2>/dev/null || true
           echo "--- 内核 ---"; grep -rhE '^KERNEL_PATCHVER|^LINUX_VERSION' target/linux/*/Makefile target/linux/*/*/target.mk 2>/dev/null | head -5
-          [ -f "${GITHUB_WORKSPACE}/${SEED}" ] || { echo "!! 种子配置不存在: ${SEED}"; exit 1; }
-          cp -f "${GITHUB_WORKSPACE}/${SEED}" .config
-          make defconfig >/dev/null 2>&1 || { echo "!! make defconfig 失败"; tail -30 .config; exit 1; }
+
+          # ================================================================
+          # 关键：必须先装 feeds！
+          #   不装 feeds 时 tmp/.config-package.in 里没有 feed 包，
+          #   make defconfig 会把凡是来自 feed 的包（bash/curl/luci-app-* …）
+          #   全当"不存在"丢掉 → 后面那份 MISS 清单全是假警报
+          # ================================================================
+          ./scripts/feeds update -a  > /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds update 失败"; exit 1; }
+          ./scripts/feeds install -a >> /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds install 失败"; exit 1; }
+          echo ">>> feed 目录: $(ls -d feeds/*/ 2>/dev/null | wc -l) 个"
+
+          SEED_FILE="${GITHUB_WORKSPACE}/${SEED}"
+          [ -f "${SEED_FILE}" ] || { echo "!! 种子不存在: ${SEED}"; exit 1; }
+          cp -f "${SEED_FILE}" .config
+          make defconfig > /tmp/defconfig.log 2>&1 || { tail -40 /tmp/defconfig.log; echo "!! make defconfig 失败"; exit 1; }
+
           BOARD="$(sed -n 's/^CONFIG_TARGET_BOARD="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           SUB="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           ARCH="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
@@ -126,38 +139,44 @@ jobs:
           SYM="CONFIG_TARGET_${BOARD}_${SUB}_DEVICE_${PROFILE}"
           DEV_ALL="$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)"
           SYM_OK="$(grep -c "^${SYM}=y" .config || true)"
+          ZHCN_SEED="$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.*-zh-cn=y' "${SEED_FILE}" || true)"
           ZHCN="$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.*-zh-cn=y' .config || true)"
-          ZHCN_SEED="$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.*-zh-cn=y' "${GITHUB_WORKSPACE}/${SEED}" || true)"
           SEL="$(grep -cE '^CONFIG_PACKAGE_.*=y$' .config || true)"
+
+          # ================================================================
+          # 三段式差异诊断：真缺 / 存在但没启用（依赖不满足）/ 正常
+          # ================================================================
+          awk '/^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' "${SEED_FILE}" | sort -u > /tmp/seed.txt
+          grep -oE '^[[:space:]]*config[[:space:]]+PACKAGE_[A-Za-z0-9_.+-]+' tmp/.config-package.in \
+            | sed -E 's/^[[:space:]]*config[[:space:]]+PACKAGE_//' | sort -u > /tmp/tree.txt
+          awk '/^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' .config | sort -u > /tmp/now.txt
+
+          echo ">>> 种子声明 $(wc -l < /tmp/seed.txt) / 本树可见 $(wc -l < /tmp/tree.txt) / defconfig 后启用 $(wc -l < /tmp/now.txt)"
+          [ "$(wc -l < /tmp/tree.txt)" -gt 500 ] || echo "::warning::本树可见包符号数异常少，tmp/.config-package.in 格式可能不同"
+
+          comm -23 /tmp/seed.txt /tmp/now.txt    > /tmp/lost.txt      # 种子里声明、但没生效
+          comm -23 /tmp/lost.txt  /tmp/tree.txt  > /tmp/notfound.txt  # ① 本源树根本没有
+          comm -12 /tmp/lost.txt  /tmp/tree.txt  > /tmp/dropped.txt   # ② 存在但被 defconfig 丢掉（依赖不满足）
+
           {
-            echo "## $DEVICE"
+            echo "## ${DEVICE}"
             echo ""
-            echo "- 源: \`$REPO@$BRANCH\`"
-            echo "- commit: \`$COMMIT\`  ($CDATE)"
-            echo "- target: \`targets/$BOARD/$SUB\`   ARCH_PACKAGES: \`$ARCH\`"
-            echo "- profile: \`$PROFILE\`  符号 \`$SYM\` = $([ "$SYM_OK" = 1 ] && echo OK || echo '**不匹配**')"
+            echo "- 源: \`${REPO}@${BRANCH}\`  commit \`${COMMIT}\` (${CDATE})"
+            echo "- target: \`targets/${BOARD}/${SUB}\`  ARCH_PACKAGES: \`${ARCH}\`"
+            echo "- profile: \`${PROFILE}\`  符号 \`${SYM}\` = $([ "${SYM_OK}" = 1 ] && echo OK || echo '**不匹配**')"
             echo "- CONFIG_TARGET_PROFILE: \`${PROF:-<无>}\`"
-            echo "- 收窄前 device 选项数: **$DEV_ALL**（=1 才不用收窄）"
-            echo "- 已选包数: **$SEL**   zh-cn 包: 种子里 $ZHCN_SEED → defconfig 后 **$ZHCN**$([ "$ZHCN_SEED" -gt 0 ] && [ "$ZHCN" = 0 ] && echo '  ⚠️ 全丢，需要 CONFIG_LUCI_LANG_zh_Hans=y')"
+            echo "- 收窄前 device 选项数: **${DEV_ALL}**   已选包数: **${SEL}**"
+            echo "- zh-cn 包: 种子 ${ZHCN_SEED} → defconfig 后 **${ZHCN}**"
             echo ""
-            echo "### 种子里有、但本源树不存在的包（会静默丢失）"
-            echo '```'
-            awk '/^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' "${GITHUB_WORKSPACE}/${SEED}" | sort -u > /tmp/seed.txt
-            awk '/^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' .config | sort -u > /tmp/now.txt
-            comm -23 /tmp/seed.txt /tmp/now.txt | sed 's/^/  MISS  /' || true
-            echo '```'
-            echo ""
+            echo "### ① 本源树根本没有（需要改名/旁路/删掉）—— $(wc -l < /tmp/notfound.txt) 个"
+            echo '```'; sed 's/^/  /' /tmp/notfound.txt; echo '```'
+            echo "### ② 存在但没启用（依赖不满足，要查 depends）—— $(wc -l < /tmp/dropped.txt) 个"
+            echo '```'; sed 's/^/  /' /tmp/dropped.txt; echo '```'
             echo "### feed 清单"
-            echo '```'
-            cat feeds.conf.default 2>/dev/null || echo "(无)"
-            echo '```'
+            echo '```'; cat feeds.conf.default 2>/dev/null; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "===== 关键值（便于复制到 device_mapping.conf）====="
-          echo "device   : $DEVICE"
-          echo "repo     : $REPO"
-          echo "branch   : $BRANCH"
-          echo "seed     : $SEED"
-          echo "target   : targets/$BOARD/$SUB"
-          echo "profile  : $PROFILE"
-          echo "arch     : $ARCH"
-          echo "SYM      : $SYM  (=$SYM_OK)"
+
+          echo "===== 关键值 （便于复制到 device_mapping.conf）====="
+          echo "device=$DEVICE repo=$REPO branch=$BRANCH seed=$SEED profile=$PROFILE"
+          echo "target=targets/${BOARD}/${SUB}  arch=${ARCH}  DEV_ALL=${DEV_ALL}  SYM_OK=${SYM_OK}"
+          echo "notfound=$(wc -l < /tmp/notfound.txt)  dropped=$(wc -l < /tmp/dropped.txt)  zhcn=${ZHCN_SEED}->${ZHCN}"
