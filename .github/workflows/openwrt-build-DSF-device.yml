@@ -1,17 +1,21 @@
-name: OpenWrt Build & Release
-run-name: OpenWrt Build & Release - ${{ inputs.source_type }} - ${{ inputs.target_device }}
+name: OpenWrt Build & DSF-Release
+
+
+# ============================================================================
+# 服务设备：GL-MT5000 (m0eak/fanchmwrt) / JDC-AX6600 (m0eak/libwrt)
+# 与 openwrt-build-device.yml 的关键差异：
+#   1) 源是第三方：仓库/分支/种子配置由 configs/DSF/device_mapping.conf 决定
+#   2) 官方没有这两个 target 的 releases/snapshots → 不用 config.buildinfo 基线，
+#      改用你自带的种子 .config（defconfig 展开 + 收窄到单设备）
+#   3) 不引用官方 kmods 源：自己的 kmod 库＝构建产物
+#      bin/targets/<target>/<subtarget>/kmods/<vermagic>/（随 Artifact/Release 发布）
+#   4) 镜像组装会遍历整个 subtarget（filogic 尤甚）→ 保留"缺工件占位+重试"自愈，
+#      本文件只服务这两个设备，所以无条件启用，不做设备门控
+# ============================================================================
 
 on:
   workflow_dispatch:
     inputs:
-      source_type:
-        description: "源码类型"
-        required: true
-        default: 'immortalwrt'
-        type: choice
-        options:
-          - openwrt
-          - immortalwrt
       target_device:
         description: "目标设备"
         required: true
@@ -21,12 +25,7 @@ on:
           - JDC-AX6600
           - GL-MT5000
       source_ref:
-        description: "源码 ref / tag（留空 = 自动挑最新稳定版 tag）"
-        required: false
-        default: ""
-        type: string
-      version:
-        description: "版本号（留空 = 自动探测最新稳定版；snapshot = 快照）"
+        description: "覆盖映射表里的分支/tag（留空 = 用 configs/DSF/device_mapping.conf 里的值）"
         required: false
         default: ""
         type: string
@@ -35,25 +34,42 @@ on:
         required: false
         default: ""
         type: string
+      make_jobs:
+        description: "并行度（-j3 较稳；-j$(nproc) 最快但有 OOM 风险）"
+        required: false
+        default: '-j3'
+        type: choice
+        options:
+          - '-j2'
+          - '-j3'
+          - '-j4'
+      third_party_apk:
+        description: "是否额外拉取第三方预编译 apk（源自带这些包时保持 off）"
+        required: true
+        default: 'off'
+        type: choice
+        options:
+          - 'off'
+          - 'on'
 
 permissions:
-  contents: write        # 建 Release 必需，否则403
+  contents: write        # 建 Release 必需
 
 concurrency:
-  group: build-${{ github.event.inputs.source_type }}-${{ github.event.inputs.target_device }}
+  group: build-dsf-${{ github.event.inputs.target_device }}
   cancel-in-progress: false
 
 env:
   WORKSPACE: ${{ github.workspace }}
-  SOURCE_TYPE: ${{ github.event.inputs.source_type }}
   TARGET_DEVICE: ${{ github.event.inputs.target_device }}
   SOURCE_REF: ${{ github.event.inputs.source_ref }}
-  INPUT_VERSION: ${{ github.event.inputs.version }}
   CUSTOM_PACKAGE_EXTRA: ${{ github.event.inputs.custom_packages }}
+  MAKE_JOBS: ${{ github.event.inputs.make_jobs }}
+  THIRD_PARTY_APK: ${{ github.event.inputs.third_party_apk }}
 
 jobs:
   build:
-    name: Build ${{ github.event.inputs.target_device }} (${{ github.event.inputs.source_type }})
+    name: Build ${{ github.event.inputs.target_device }} (DSF)
     runs-on: ubuntu-22.04
     env:
       WORKSPACE: ${{ github.workspace }}
@@ -69,55 +85,31 @@ jobs:
         run: |
           set -euxo pipefail
           FAIL=0
-
-          # 用"最终执行它的解释器"检查，绝不能用 `bash -n || sh -n`（那样会互相掩盖）
           check_bash() {
               [ -f "$1" ] || return 0
-              if grep -q $'\r' "$1"; then
-                  echo "FAIL $1 含 CRLF 换行（请转成 LF）"; FAIL=1; return 0
-              fi
-              if bash -n "$1" 2>&1; then
-                  echo "OK(bash) $1"
-              else
-                  echo "FAIL(bash) $1"; FAIL=1
-              fi
+              if grep -q $'\r' "$1"; then echo "FAIL $1 含 CRLF"; FAIL=1; return 0; fi
+              if bash -n "$1" 2>&1; then echo "OK(bash) $1"; else echo "FAIL(bash) $1"; FAIL=1; fi
           }
-
           check_sh() {
               [ -f "$1" ] || return 0
-              if grep -q $'\r' "$1"; then
-                  echo "FAIL $1 含 CRLF 换行（请转成 LF）"; FAIL=1; return 0
-              fi
-              if sh -n "$1" 2>&1; then
-                  echo "OK(sh)   $1"
-              else
-                  echo "FAIL(sh) $1"; FAIL=1
-              fi
+              if grep -q $'\r' "$1"; then echo "FAIL $1 含 CRLF"; FAIL=1; return 0; fi
+              if sh -n "$1" 2>&1; then echo "OK(sh)   $1"; else echo "FAIL(sh) $1"; FAIL=1; fi
           }
-
-          # 1) 公共脚本（用 bash 执行）
           for f in shell/*.sh; do check_bash "$f"; done
-          check_bash "Third-Party/third-party.config"
-
-          # 2) 设备层 uci-defaults（用 sh 执行）
-          for f in "files/${TARGET_DEVICE:-x86}/etc/uci-defaults/"*; do check_sh "$f"; done
-
-          # 3) 公共层 uci-defaults 与 init.d（用 sh 执行）
+          for f in "files/${TARGET_DEVICE:-GL-MT5000}/etc/uci-defaults/"*; do check_sh "$f"; done
           for f in files/etc/uci-defaults/*; do check_sh "$f"; done
           for f in files/etc/init.d/*; do check_sh "$f"; done
-
-          # 4) 第三方安装脚本（设备上由 busybox ash 跑）
           for f in files/etc/third-party/*.sh files/etc/ithird-party/*.sh; do check_sh "$f"; done
-
           [ "$FAIL" = "0" ] || { echo "存在语法错误，请先修复"; exit 1; }
 
       - name: Cache OpenWrt downloads (dl)
         uses: actions/cache@v4
         with:
           path: dl-cache
-          key: dl-${{ github.event.inputs.source_type }}-${{ github.run_id }}
+          key: dl-dsf-${{ github.event.inputs.target_device }}-${{ github.run_id }}
           restore-keys: |
-            dl-${{ github.event.inputs.source_type }}-
+            dl-dsf-${{ github.event.inputs.target_device }}-
+            dl-dsf-
 
       - name: Install Build Dependencies
         shell: bash
@@ -126,115 +118,64 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential clang autoconf automake libtool bison flex gawk gettext git file swig \
-            python3 python3-pip python3-mako rsync unzip wget curl zstd dos2unix texinfo \
+            python3 python3-pip python3-mako rsync unzip wget curl zstd dos2unix texinfo perl \
             libncurses-dev zlib1g-dev libssl-dev libffi-dev libreadline-dev \
             libsqlite3-dev libcap-dev libgd-dev libjpeg-dev libpng-dev \
             libcurl4-gnutls-dev libxml2-dev libxslt-dev qemu-utils
+
+      # ======================================================================
+      # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
+      # ======================================================================
+      - name: Resolve device meta (configs/DSF/device_mapping.conf)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          MAP="${WORKSPACE}/configs/DSF/device_mapping.conf"
+          [ -f "${MAP}" ] || { echo "ERROR: 找不到 ${MAP}"; exit 1; }
+          LINE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 || true)"
+          [ -n "${LINE}" ] || { echo "ERROR: ${MAP} 里没有 ${TARGET_DEVICE}"; exit 1; }
+          VAL="${LINE#*=}"
+          REPO_URL="$(printf '%s' "${VAL}" | awk -F'|' '{print $1}' | tr -d '[:space:]')"
+          REPO_BRANCH="$(printf '%s' "${VAL}" | awk -F'|' '{print $2}' | tr -d '[:space:]')"
+          SEED_CONFIG="$(printf '%s' "${VAL}" | awk -F'|' '{print $3}' | tr -d '[:space:]')"
+          TARGET_PATH="$(printf '%s' "${VAL}" | awk -F'|' '{print $4}' | tr -d '[:space:]' | sed 's#^targets/##')"
+          PROFILE="$(printf '%s' "${VAL}" | awk -F'|' '{print $5}' | tr -d '[:space:]')"
+          [ -n "${REPO_URL}" ] && [ -n "${SEED_CONFIG}" ] && [ -n "${PROFILE}" ] \
+            || { echo "ERROR: 映射表字段不全（需要 源URL|分支|种子配置|target|profile）: ${VAL}"; exit 1; }
+          [ -f "${WORKSPACE}/${SEED_CONFIG}" ] || { echo "ERROR: 种子配置不存在: ${SEED_CONFIG}"; exit 1; }
+          if [ -n "${SOURCE_REF:-}" ]; then
+            echo ">>> source_ref 覆盖分支: ${REPO_BRANCH} → ${SOURCE_REF}"
+            REPO_BRANCH="${SOURCE_REF}"
+          fi
+          echo ">>> device=${TARGET_DEVICE}"
+          echo ">>> repo=${REPO_URL}  branch=${REPO_BRANCH}"
+          echo ">>> seed=${SEED_CONFIG}  target=${TARGET_PATH}  profile=${PROFILE}"
+          {
+            echo "REPO_URL=${REPO_URL}"
+            echo "REPO_BRANCH=${REPO_BRANCH}"
+            echo "SEED_CONFIG=${SEED_CONFIG}"
+            echo "DSF_TARGET_PATH=${TARGET_PATH}"
+            echo "PROFILE=${PROFILE}"
+          } >> "$GITHUB_ENV"
 
       - name: Clone Source Repository
         shell: bash
         run: |
           set -euxo pipefail
-          # ↓ 兜底：即使 env 里没定义也不会因 set -u 报错
-          SOURCE_REF="${SOURCE_REF:-}"
-          INPUT_VERSION="${INPUT_VERSION:-}"
-
-          case "${SOURCE_TYPE}" in
-            immortalwrt) SRC_URL="https://github.com/ImmortalWrt/immortalwrt.git"
-                         SITE="https://downloads.immortalwrt.org" ;;
-            openwrt)     SRC_URL="https://github.com/openwrt/openwrt.git"
-                         SITE="https://downloads.openwrt.org" ;;
-            *) echo "ERROR: unknown SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
-          esac
-
-          latest_stable() {
-            curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | sed -n '$p' || true
-          }
-          release_in_series() {   # $1=24.10 → 取该系列里版本最高的
-            curl -fsSL --retry 3 --connect-timeout 20 "${SITE}/releases/" \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu \
-              | grep -E "^$(printf '%s' "$1" | sed 's/[.]/\\./g')\." | sed -n '$p' || true
-          }
-
           rm -rf src
-          # ==================================================================
-          # 通道（release / snapshot）
-          #   优先级：显式 version 输入 > 默认 release
-          #   用于官方只在 snapshot 里支持的设备（如 Tenda-BE12PRO）
-          # ==================================================================
-          MAP="${WORKSPACE}/configs/device_mapping.conf"
-          DEV_CHAN="release"
-          if [ -f "${MAP}" ] && [ -n "${TARGET_DEVICE:-}" ]; then
-              MAP_LINE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 || true)"
-              if [ -n "${MAP_LINE}" ]; then
-                  _c="$(printf '%s' "${MAP_LINE#*=}" | awk -F'|' '{print $3}' | tr -d '[:space:]')"
-                  if [ -n "${_c}" ]; then DEV_CHAN="${_c}"; fi
-              fi
-          fi
-          if [ "${INPUT_VERSION}" = "snapshot" ]; then
-              DEV_CHAN="snapshot"
-          elif [ -n "${INPUT_VERSION}" ]; then
-              DEV_CHAN="release"     # 显式给了具体版本号 → 强制走 release
-          fi
-          echo ">>> 通道: ${DEV_CHAN}（version 输入 或 device_mapping.conf 第三段 决定）"
-
-          if [ "${DEV_CHAN}" = "snapshot" ]; then
-              MODE="快照（主分支）"
-              VERSION="snapshot"
-              case "${SOURCE_TYPE}" in
-                immortalwrt) CANDIDATES="master" ;;
-                openwrt)     CANDIDATES="main" ;;
-              esac
-          elif [ -n "${SOURCE_REF}" ]; then
-              MODE="指定 ref=${SOURCE_REF}"
-              CANDIDATES="${SOURCE_REF}"
-              case "${SOURCE_REF}" in
-                openwrt-*) SERIES="$(printf '%s' "${SOURCE_REF}" | sed 's/^openwrt-//')"
-                           VERSION="$(release_in_series "${SERIES}")" ;;
-                *)         VERSION="$(printf '%s' "${SOURCE_REF}" | sed -E 's/^v//; s/-immortalwrt$//')" ;;
-              esac
-          elif [ -n "${INPUT_VERSION}" ]; then
-              MODE="指定版本=${INPUT_VERSION}"
-              VERSION="${INPUT_VERSION}"
-              CANDIDATES="v${VERSION} openwrt-$(printf '%s' "${VERSION}" | cut -d. -f1,2)"
-          else
-              MODE="最新稳定版（tag 优先）"
-              VERSION="$(latest_stable)"
-              [ -n "${VERSION}" ] || { echo "ERROR: 无法识别最新稳定版本"; exit 1; }
-              S="$(printf '%s' "${VERSION}" | cut -d. -f1,2)"
-              CANDIDATES="v${VERSION} v${VERSION}-immortalwrt ${VERSION} openwrt-${S}"
-          fi
-
-          echo ">>> 模式: ${MODE}"
-          echo ">>> 版本: ${VERSION:-<未知>}"
-          echo ">>> 候选 ref: ${CANDIDATES}"
-
-          OK=0
-          for ref in ${CANDIDATES}; do
-              echo ">>> 尝试 git clone --depth=1 -b ${ref}"
-              if git clone --depth=1 -b "${ref}" "${SRC_URL}" src 2>/dev/null; then OK=1; break; fi
-              rm -rf src
-          done
-          [ "${OK}" = "1" ] || {
-              echo "ERROR: 候选 ref 全部克隆失败（${CANDIDATES}）"
-              echo "       请用 workflow 的 source_ref 手动指定正确的分支或 tag"; exit 1; }
-
+          echo ">>> git clone --depth=1 -b ${REPO_BRANCH} ${REPO_URL}"
+          git clone --depth=1 -b "${REPO_BRANCH}" "${REPO_URL}" src \
+            || { echo "ERROR: 克隆失败（分支/tag: ${REPO_BRANCH}）"; exit 1; }
+          [ -f src/Makefile ] && [ -d src/target/linux ] || { echo "ERROR: src 不是 OpenWrt 源码树"; exit 1; }
           git -C src log -1 --format='>>> 源码: %H  %cd  %s' --date=iso
           echo ">>> 当前分支: $(git -C src rev-parse --abbrev-ref HEAD)"
-          echo ">>> git describe: $(git -C src describe --tags 2>/dev/null || echo '<无 tag>')"
-
-          # 【改动】导出 VERSION 时把 snapshot 的提示写清楚
-          if [ -n "${VERSION}" ]; then
-              echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-              if [ "${VERSION}" = "snapshot" ]; then
-                  echo ">>> 已导出 VERSION=snapshot（基线将用 snapshots/ 的 buildinfo）"
-              else
-                  echo ">>> 已导出 VERSION=${VERSION}（基线将用 releases/${VERSION}/ 的 buildinfo）"
-              fi
-          else
-              echo "::warning::无法推导版本号，prepare_base_config 会自行取最新稳定版，可能与源码 ref 不配套"
-          fi
+          {
+            echo "SRC_COMMIT=$(git -C src rev-parse HEAD)"
+            echo "SRC_BRANCH=$(git -C src rev-parse --abbrev-ref HEAD)"
+            echo "SRC_DATE=$(git -C src log -1 --format=%cd --date=iso)"
+          } >> "$GITHUB_ENV"
+          echo ">>> feeds.conf.default:"
+          cat src/feeds.conf.default 2>/dev/null || echo "  (无 feeds.conf.default)"
 
       - name: Prepare dl cache link & clean build dirs
         shell: bash
@@ -246,54 +187,31 @@ jobs:
           ln -sfn "${GITHUB_WORKSPACE}/dl-cache" dl
           ls -ld dl "${GITHUB_WORKSPACE}/dl-cache"
 
+      # ======================================================================
+      # feeds：第三方源各有自己的 feeds.conf.default，这里不做任何"按源禁用"，
+      #        全部按源码自带清单 update/install；清理列表沿用（路径不存在则跳过）
+      # ======================================================================
       - name: Update & Install feeds
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
-          # ------------------------------------------------------------------
-          # video feed 按源区分处理（两个源的上游发布行为不同）
-          #   openwrt     : 上游官方发布会发布 video feed，镜像上该目录存在
-          #                 → 保持启用，才与官方 OpenWrt 一致
-          #   immortalwrt : 官方 25.12.2 固件/下载站都没有 video 目录
-          #                 官方基线 .config 未选任何 video 包，该 feed 对固件内容
-          #                 零贡献 → 与官方对齐，禁用它。
-          # 以后若需要 video feed 里的包（ffmpeg/qt5/weston 等），去掉这个 if 即可恢复。
-          # ------------------------------------------------------------------
-          if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
-            for f in feeds.conf feeds.conf.default; do
-              if [ -f "$f" ]; then
-                sed -i -E 's|^([[:space:]]*)(src-git[^[:space:]]*[[:space:]]+video[[:space:]]+)|\1#\2|' "$f"
-              fi
-            done
-            echo ">>> [immortalwrt] feeds 里的 video 行（应为注释状态）:"
-            grep -n 'video' feeds.conf feeds.conf.default 2>/dev/null || echo "  (无 video)"
-          else
-            echo ">>> [${SOURCE_TYPE}] feeds 保持原样（上游会发布 video feed，与官方一致）"
-            grep -n 'video' feeds.conf feeds.conf.default 2>/dev/null || echo "  (无 video)"
-          fi
+          echo ">>> 本次使用的 feed 清单:"
+          cat feeds.conf.default 2>/dev/null || cat feeds.conf 2>/dev/null || echo "  (无)"
+
           rm -rf ./feeds ./data/feeds-*.tmp ./package/feeds
           for i in 1 2 3; do
             ./scripts/feeds update -a && break || { echo "feeds update 失败，重试 ${i}/3"; sleep 5; }
           done
-
           ./scripts/feeds install -a
 
-          # ===============================================================
-          # 清理收尾 —— 必须在【最后一次】feeds install -a 之后！
-          #   ① feeds/<feed>/<pkg>          ← feeds 克隆目录；构建日志里 "make[3] -C feeds/..." 用的就是它
-          #   ② package/feeds/<feed>/<pkg>  ← feeds install 生成的符号链接；Makefile 扫描告警来自它
-          #   ③ package/devel/perf          ← 核心树里的包，无 feeds 前缀
-          #   放在 install 之前删 → 下一次 install 会把 ② 重建（所以旧写法等于白删）
-          #   [ -e ] 对"悬空符号链接"返回假，所以配 [ -L ] 一起判断
-          # ===============================================================
+          # ---- 清理收尾（必须在最后一次 feeds install -a 之后）----
           for p in \
             feeds/luci/applications/luci-app-bmx7 \
             feeds/luci/applications/luci-app-babeld \
             feeds/luci/applications/luci-app-librespeed \
             feeds/packages/bmx7-dnsupdate \
             feeds/packages/prometheus-node-exporter-lua \
-            package/boot/arm-trusted-firmware-microchipsw \
             feeds/telephony/net/rtpengine \
             feeds/telephony/libs/dahdi-linux \
             feeds/telephony/libs/oslec \
@@ -302,264 +220,21 @@ jobs:
             feeds/packages/libs/libpfring \
             feeds/packages/admin/netatop ; do
             for q in "$p" "package/$p"; do
-              if [ -e "$q" ] || [ -L "$q" ]; then
-                echo ">>> 移除: $q"
-                rm -rf "$q"
-              fi
+              if [ -e "$q" ] || [ -L "$q" ]; then echo ">>> 移除: $q"; rm -rf "$q"; fi
             done
           done
+          echo ">>> feeds 阶段完成"
 
-          echo ">>> 清理后确认（下面不应该有输出）:"
-          for p in package/devel/perf \
-                   package/feeds/packages/net/batctl feeds/packages/net/batctl \
-                   package/feeds/telephony/net/rtpengine feeds/telephony/net/rtpengine ; do
-            if [ -e "$p" ] || [ -L "$p" ]; then echo "  !! 仍存在: $p"; fi
-          done      
-
-      - name: Prepare Base Configuration
+      # ======================================================================
+      # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
+      # ======================================================================
+      - name: Seed & trim configuration (DSF)
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
-          bash ../shell/prepare_base_config.sh "${SOURCE_TYPE}" "${TARGET_DEVICE}"
+          bash ../shell/dsf_seed_config.sh "${SEED_CONFIG}" "${PROFILE}"
           test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
-
-      - name: Modify APK/OPKG mirror
-        # 按 SOURCE_TYPE 选镜像；并把仓库地址写进镜像（distfeeds.list 的来源）
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-
-          SOURCE_TYPE="${SOURCE_TYPE:-immortalwrt}"
-          VERSION="${VERSION:-}"
-
-          # ===== 1) 按源区分镜像（唯一真源；下一步会做一致性断言）=====
-          case "${SOURCE_TYPE}" in
-            immortalwrt) MIRROR="https://mirror.nju.edu.cn/immortalwrt" ;;
-            openwrt)     MIRROR="https://mirror.nju.edu.cn/openwrt" ;;
-            *) echo "ERROR: 未知 SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
-          esac
-          echo ">>> source_type=${SOURCE_TYPE} version=${VERSION:-<auto>} mirror=${MIRROR}"
-
-          # ===== 2) 推导 target 路径 / release 目录（本步与 Check 步共用）=====
-          MAP="${WORKSPACE}/configs/device_mapping.conf"
-          [ -f "${MAP}" ] || { echo "ERROR: 找不到 ${MAP}"; exit 1; }
-          LINE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 || true)"
-          [ -n "${LINE}" ] || { echo "ERROR: ${MAP} 里没有 ${TARGET_DEVICE}"; exit 1; }
-          TARGET_PATH="${LINE#*=}"; TARGET_PATH="${TARGET_PATH%%|*}"
-          TARGET_PATH="$(printf '%s' "${TARGET_PATH}" | tr -d '[:space:]')"
-          TARGET_PATH="${TARGET_PATH%/}"
-          TARGET_PATH="${TARGET_PATH#targets/}"   # ← 映射表存的就是 targets/x86/64，去掉前缀，下面统一加回来
-          case "${TARGET_PATH}" in
-            ""|*/-) echo "ERROR: ${TARGET_DEVICE} 的 target 路径不合法: '${TARGET_PATH}'"; exit 1 ;;
-          esac
-
-          # 【改动】VERSION=snapshot 时也要走 snapshots/
-          if [ -z "${VERSION}" ] || [ "${VERSION}" = "snapshot" ]; then
-            REL_DIR="snapshots"
-          else
-            REL_DIR="releases/${VERSION}"
-          fi
-          RELEASE_BASE="${MIRROR}/${REL_DIR}/targets/${TARGET_PATH}"
-          echo ">>> TARGET_PATH=${TARGET_PATH}  REL_DIR=${REL_DIR}"
-          echo ">>> RELEASE_BASE=${RELEASE_BASE}"
-
-          {
-            echo "MIRROR=${MIRROR}"
-            echo "TARGET_PATH=${TARGET_PATH}"
-            echo "REL_DIR=${REL_DIR}"
-            echo "RELEASE_BASE=${RELEASE_BASE}"
-          } >> "$GITHUB_ENV"
-
-          # ===== 3) CONFIG_VERSION_REPO 换主机、保留 releases 路径（两种源都试）=====
-          #      immortalwrt 若没有该符号不算错误，其机制是第 4 步的 apk_mirror
-          if grep -q '^CONFIG_VERSION_REPO=' .config; then
-            OLD_LINE="$(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
-            OLD_PATH="$(printf '%s' "${OLD_LINE}" | sed -E 's#^CONFIG_VERSION_REPO="https?://[^/]+(/.*)"$#\1#')"
-            case "${OLD_PATH}" in
-              /*) : ;;
-              *)  echo "::warning::无法从 ${OLD_LINE} 解析路径，改用 /${REL_DIR}"
-                  OLD_PATH="/${REL_DIR}" ;;
-            esac
-            echo ">>> VERSION_REPO 原: ${OLD_LINE}"
-            sed -i -E "s#^CONFIG_VERSION_REPO=.*#CONFIG_VERSION_REPO=\"${MIRROR}${OLD_PATH}\"#" .config
-            echo ">>> VERSION_REPO 新: $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
-            grep -qE "^CONFIG_VERSION_REPO=\"${MIRROR}" .config \
-              || { echo "ERROR: CONFIG_VERSION_REPO 替换失败"; exit 1; }
-          elif [ -f package/base-files/image-config.in ] && \
-               grep -qE 'default "https?://downloads\.(openwrt|immortalwrt)\.org' package/base-files/image-config.in; then
-            # 【改动】原来把整段 URL 换成 ${MIRROR}，把路径（/releases/x.y.z 或 /snapshots）丢了；
-            #         现在保留 ${REL_DIR}，release 和 snapshot 都拼得对
-            echo ">>> .config 无 CONFIG_VERSION_REPO，改 image-config.in 默认值兜底（保留 /${REL_DIR}）"
-            sed -i -E "s#(default \")https?://downloads\.(openwrt|immortalwrt)\.org[^\"]*#\1${MIRROR}/${REL_DIR}#" \
-              package/base-files/image-config.in
-            grep -Fq "default \"${MIRROR}/${REL_DIR}\"" package/base-files/image-config.in \
-              || { echo "ERROR: image-config.in 兜底失败"; exit 1; }
-          else
-            echo "::warning::未找到 CONFIG_VERSION_REPO（.config / image-config.in），运行时由 apk_mirror 兜底"
-          fi
-
-          # ===== 4) immortalwrt：只改 apk_mirror 的"默认值"一行 =====
-          #      注意：这里只换主机、不换路径 —— 所以 snapshot 构建会自动变成
-          #      https://mirror.nju.edu.cn/immortalwrt/snapshots/...，无需额外改动
-          if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
-            F="package/emortal/default-settings/files/99-default-settings-chinese"
-            [ -f "${F}" ] || { echo "ERROR: 找不到 ${F}"; exit 1; }
-
-            echo ">>> 改前:"
-            grep -nE 'apk_mirror=|s,https?://' "${F}" || true
-
-            # 值部分必须是 http(s) 开头的"字面量"：
-            #   ✔ 会匹配   apk_mirror="https://mirrors.vsean.net/openwrt"
-            #   ✘ 不匹配   apk_mirror="$(uci -q get system.@imm_init[0].apk_mirror)"   ← 必须保持原样
-            sed -i -E "s#^([[:space:]]*apk_mirror=)[\"']https?://[^\"']*[\"']#\1\"${MIRROR}\"#" "${F}"
-
-            echo ">>> 改后:"
-            grep -nE 'apk_mirror=|s,https?://' "${F}" || true
-
-            # 三条断言：默认值已改 / uci 读取行完好 / distfeeds 的 sed 模式完好
-            grep -qE "^[[:space:]]*apk_mirror=\"${MIRROR}\"$" "${F}" \
-              || { echo "ERROR: apk_mirror 默认值未被替换"; exit 1; }
-            grep -Fq 'apk_mirror="$(uci' "${F}" \
-              || { echo "ERROR: uci 读取那一行被改坏了"; exit 1; }
-            grep -Fq 's,https://downloads.immortalwrt.org,' "${F}" \
-              || { echo "ERROR: distfeeds 的 sed 匹配模式被改坏了"; exit 1; }
-
-            echo ">>> immortalwrt 镜像设置完成"
-          fi
-
-      - name: Check APK package mirror
-        # 本地断言 + 远端真探活：所有 apk 源必须 200（一个源 404 → 整个 apk 事务失败）
-        # 两个源共用本步骤：探活范围由"实际启用的 feeds/*"驱动，自动适配
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-
-          # ---- 0) 与 Modify 步骤的一致性断言（防止两处 MIRROR 写歪）----
-          case "${SOURCE_TYPE}" in
-            immortalwrt) EXPECT="https://mirror.nju.edu.cn/immortalwrt" ;;
-            openwrt)     EXPECT="https://mirror.nju.edu.cn/openwrt" ;;
-            *) echo "ERROR: 未知 SOURCE_TYPE: ${SOURCE_TYPE}"; exit 1 ;;
-          esac
-          MIRROR="${MIRROR:?MIRROR 未由 Modify APK/OPKG mirror 步骤导出}"
-          [ "${MIRROR}" = "${EXPECT}" ] || {
-            echo "ERROR: MIRROR(${MIRROR}) 与 SOURCE_TYPE=${SOURCE_TYPE} 期望值(${EXPECT}) 不一致"; exit 1; }
-          REL_DIR="${REL_DIR:?}"; RELEASE_BASE="${RELEASE_BASE:?}"
-
-          # ---- 1) 本地改写结果断言 ----
-          if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
-            F="package/emortal/default-settings/files/99-default-settings-chinese"
-            echo ">>> ${F} 关键行:"
-            grep -nE 'apk_mirror=|distfeeds' "${F}" || true
-            grep -qE "^[[:space:]]*apk_mirror=\"${MIRROR}\"$" "${F}" \
-              || { echo "ERROR: apk_mirror 默认值不是 ${MIRROR}"; exit 1; }
-            grep -Fq 'apk_mirror="$(uci' "${F}" \
-              || { echo "ERROR: uci 读取那一行被改坏了"; exit 1; }
-            grep -Fq 's,https://downloads.immortalwrt.org,' "${F}" \
-              || { echo "ERROR: distfeeds 的 sed 匹配模式被改坏了"; exit 1; }
-          fi
-
-          if grep -q '^CONFIG_VERSION_REPO=' .config; then
-            echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config)"
-            grep -qE "^CONFIG_VERSION_REPO=\"${MIRROR}" .config \
-              || { echo "ERROR: CONFIG_VERSION_REPO 未指向镜像"; exit 1; }
-          else
-            echo "::warning::.config 无 CONFIG_VERSION_REPO（immortalwrt 常见），首启由 apk_mirror 兜底"
-          fi
-
-          echo ">>> 运行时源的生成位置（供排查）:"
-          grep -nE 'FeedSourcesAppendAPK|repositories\.d' \
-               package/base-files/Makefile package/system/apk/Makefile 2>/dev/null || true
-
-          # ---- 2) 远端真探活 ----
-          proberc=0
-          probe() {                       # $1=url  $2=label
-            url="$1"; label="$2"
-            code="$(curl -s -o /dev/null -w '%{http_code}' -L --retry 3 --max-time 60 "${url}" || echo 000)"
-            if [ "${code}" = "200" ]; then
-              echo "OK   [${code}] ${label}: ${url}"
-            else
-              echo "FAIL [${code}] ${label}: ${url}"
-              proberc=1
-            fi
-          }
-
-          ARCH_PACKAGES="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
-          echo ">>> CONFIG_TARGET_ARCH_PACKAGES=${ARCH_PACKAGES:-<none>}"
-
-          # a) 基线（prepare_base_config.sh 用的就是这个文件）
-          probe "${RELEASE_BASE}/config.buildinfo" "target 基线 buildinfo"
-
-          # b) 目标核心 feed 索引（设备上拉的就是这个文件）
-          probe "${RELEASE_BASE}/packages/packages.adb" "target core feed 索引"
-
-          # c) 架构 feed：以"我们实际启用的 feeds/*"为准，自动适配两个源
-          #    ① 探"索引文件"而非目录 —— 目录存在 ≠ 索引可用
-          #    ② 自动抓出"我们启用了、但镜像上没发布"的 feed（video 的教训）
-          #    ③ 跳过 feeds 的临时目录（如 telephony.tmp）与非包 feed —— 它们不是 feed
-          rm -rf feeds/*.tmp 2>/dev/null || true
-
-          probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/base/packages.adb" "feed base 索引"
-
-          ARCH_FEEDS=""
-          for d in feeds/*/; do
-            [ -d "$d" ] || continue
-            n="$(basename "$d")"
-            case "$n" in
-              *.*|targets|emortal) continue ;;    # *.tmp / .* = 临时目录；targets/emortal 非包 feed
-            esac
-            ARCH_FEEDS="${ARCH_FEEDS}${n} "
-          done
-          echo ">>> 待校验的架构 feed: ${ARCH_FEEDS:-<无>}"
-
-          for n in ${ARCH_FEEDS}; do
-            probe "${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/${n}/packages.adb" "feed ${n} 索引"
-          done
-
-          # d) kmods（先落文件再解析，避免 set -x 把整页 HTML 打进日志）
-          KMODS_INDEX="/tmp/kmods-index.html"
-          curl -fsSL --retry 3 --max-time 60 "${RELEASE_BASE}/kmods/" -o "${KMODS_INDEX}" 2>/dev/null || true
-          KMODS_DIR="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[0-9a-f]{32,}' "${KMODS_INDEX}" 2>/dev/null \
-            | sort -u | tail -n1 || true)"
-          if [ -n "${KMODS_DIR}" ]; then
-            probe "${RELEASE_BASE}/kmods/${KMODS_DIR}/packages.adb" "kmods 索引 (${KMODS_DIR})"
-            echo "KMODS_DIR=${KMODS_DIR}" >> "$GITHUB_ENV"
-            echo ">>> 镜像内核 = ${KMODS_DIR%%-*}；设备 uname -r 应与此一致，否则 98-drop-kmods-repo 会删掉该源"
-          else
-            echo "::warning::未能解析 kmods 内核目录，跳过 kmods 索引探活"
-          fi
-
-          [ "${proberc}" = "0" ] || {
-            echo "ERROR: 有源不可用 —— 一个 404 就会让整个 apk 安装事务失败"; exit 1; }
-          echo ">>> 镜像检查通过"
-
-      - name: Load Third-Party Config & Inject Plugins
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-
-          echo "=== STEP 1: source Third-Party/third-party.config ==="
-          CONFIG_PATH="${WORKSPACE}/Third-Party/third-party.config"
-          [ -f "${CONFIG_PATH}" ] || { echo "ERROR: 找不到 ${CONFIG_PATH}"; exit 1; }
-          source "${CONFIG_PATH}"
-          CUSTOM_PACKAGE_EXTRA="${CUSTOM_PACKAGE_EXTRA:-}"
-          CUSTOM_PACKAGES="$(printf '%s %s' "${CUSTOM_PACKAGES}" "${CUSTOM_PACKAGE_EXTRA}" | xargs)"
-          echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
-          echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES}" >> "$GITHUB_ENV"
-
-          echo "=== STEP 2: inject_plugins.sh ==="
-          bash ../shell/inject_plugins.sh
-
-          echo "=== STEP 3: trim_config.sh ==="
-          bash ../shell/trim_config.sh
-
-          echo "=== STEP 4: 汇总 ==="
-          echo "Source Type: ${SOURCE_TYPE}"
-          echo "Target Device: ${TARGET_DEVICE}"
-          echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
 
       - name: Apply custom files (common + device)
         shell: bash
@@ -568,22 +243,16 @@ jobs:
           SOURCE_DIR="${WORKSPACE}/src"
           REPO_FILES_DIR="${WORKSPACE}/files"
           FIRMWARE_FILES_DIR="${SOURCE_DIR}/files"
-
           mkdir -p "${FIRMWARE_FILES_DIR}"
 
-          # 公共层
           if [ -d "${REPO_FILES_DIR}/etc" ]; then
             cp -af "${REPO_FILES_DIR}/etc" "${FIRMWARE_FILES_DIR}/"
             echo ">>> 已应用公共 overlay: files/etc"
           fi
-
-          # 设备层（后拷贝，覆盖公共层同名文件）
-          [ -d "${REPO_FILES_DIR}/${TARGET_DEVICE}" ] || {
-            echo "ERROR: 找不到设备目录 files/${TARGET_DEVICE}"; exit 1; }
+          [ -d "${REPO_FILES_DIR}/${TARGET_DEVICE}" ] || { echo "ERROR: 找不到设备目录 files/${TARGET_DEVICE}"; exit 1; }
           cp -af "${REPO_FILES_DIR}/${TARGET_DEVICE}/." "${FIRMWARE_FILES_DIR}/"
           echo ">>> 已应用设备 overlay: files/${TARGET_DEVICE}"
 
-          # 兼容旧目录名
           if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ] && [ ! -d "${FIRMWARE_FILES_DIR}/etc/third-party" ]; then
             mv "${FIRMWARE_FILES_DIR}/etc/ithird-party" "${FIRMWARE_FILES_DIR}/etc/third-party"
             echo ">>> 已重命名 etc/ithird-party → etc/third-party"
@@ -591,66 +260,30 @@ jobs:
 
           NET_CONF="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-custom-network"
           if [ ! -f "${NET_CONF}" ]; then
-            echo "=============================================================="
             echo "ERROR: 缺少 ${NET_CONF}（应来自 files/${TARGET_DEVICE}/）"
-            echo "--- 本次 checkout 的 ref / commit ---"
-            echo "  ref    = $(git -C "${WORKSPACE}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '<unknown>')"
-            echo "  commit = $(git -C "${WORKSPACE}" rev-parse HEAD 2>/dev/null || echo '<unknown>')"
-            echo "  remote = $(git -C "${WORKSPACE}" config --get remote.origin.url 2>/dev/null || echo '<unknown>')"
-            echo "--- 仓库里 files/${TARGET_DEVICE}/ 的实际内容（含类型）---"
-            find "${REPO_FILES_DIR}/${TARGET_DEVICE}" -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort \
-              || echo "  <目录不存在>"
-            echo "--- 全仓库里叫 99-custom-network* 的东西 ---"
-            find "${REPO_FILES_DIR}" -name '99-custom-network*' -printf '%y %p\n' 2>/dev/null \
-              || echo "  <一个都没有>"
-            echo "--- 拷贝后的 src/files/etc/uci-defaults/ ---"
-            ls -la "${FIRMWARE_FILES_DIR}/etc/uci-defaults/" 2>/dev/null || echo "  <目录不存在>"
-            echo "--- git 跟踪的 files/${TARGET_DEVICE}/ 文件 ---"
-            git -C "${WORKSPACE}" ls-files "files/${TARGET_DEVICE}/" 2>/dev/null || true
-            echo "=============================================================="
+            find "${REPO_FILES_DIR}/${TARGET_DEVICE}" -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
             exit 1
           fi
-
           chmod 0755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
-          [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && \
-            chmod 0755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
-          [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && \
-            chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
+          [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
+          [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
-          # ---- 构建期门控：只有开启 Docker 才把 docker 防火墙脚本打包进固件 ----
+          # 只有启用 docker 才打包 docker 防火墙脚本
           UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
           if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null \
              || grep -qxF 'CONFIG_PACKAGE_docker' "${SOURCE_DIR}/tmp/injected-plugins.txt" 2>/dev/null; then
             echo ">>> ENABLE_DOCKER=1 → 打包 99-docker-firewall"
           else
             rm -f "${UCI_DOCKER}"
-            echo ">>> 未启用 docker → 已从固件中移除 99-docker-firewall"
+            echo ">>> 未启用 docker → 已移除 99-docker-firewall"
           fi
+          echo ">>> 网络配置预览:"; cat "${NET_CONF}"
 
-          echo ">>> 网络配置预览:"
-          cat "${NET_CONF}"
-          echo ">>> overlay 结构:"
-          find "${FIRMWARE_FILES_DIR}" -maxdepth 3 | sort
-
-      - name: Prepare Third-Party APKs
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-          bash ../shell/apk-prepare-packages.sh
-
-      - name: Fetch OpenWrt third-party APK
-      # =====================================================================
-      # openwrt 源专用：从 apk 仓库拉取第三方预编译 apk（全架构通用）
-      #   argon 主题 / argon-config / diskman / autoreboot / ramfree /
-      #   filebrowser-go + 各自 zh-cn i18n（共 11 个）
-      #
-      #   架构由脚本自己从 src/.config 的 CONFIG_TARGET_ARCH_PACKAGES 推导：
-      #     x86_64 → x86_64/     aarch64_cortex-a53 → arm64-a53/     其它 arm64 → arm64/
-      #   输出到 src/packages/ → 交给下面现成的 "Install Third-Party APKs
-      #   into image" 步骤统一拷进固件（计数/自检/首启服务都在那步）
-      # =====================================================================
-        if: ${{ github.event.inputs.source_type == 'openwrt' }}
+      # ======================================================================
+      # 第三方预编译 apk（默认 off：这两个源自带大部分包）
+      # ======================================================================
+      - name: Fetch third-party APK (optional)
+        if: ${{ github.event.inputs.third_party_apk == 'on' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -660,7 +293,8 @@ jobs:
           APK_REPO_PREFIX="openwrt" \
           bash shell/fetch-openwrt-third-party.sh
 
-      - name: Install Third-Party APKs into image
+      - name: Install Third-Party APKs into image (optional)
+        if: ${{ github.event.inputs.third_party_apk == 'on' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -668,178 +302,55 @@ jobs:
           FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
           REPO_FILES_DIR="${WORKSPACE}/files"
           APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
-
-          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
-                   "${FIRMWARE_FILES_DIR}/etc/third-party" \
-                   "${FIRMWARE_FILES_DIR}/etc/init.d" \
-                   "${FIRMWARE_FILES_DIR}/etc/rc.d"
-
-          # ---- 1) 拷入第三方 apk ----
+          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" "${FIRMWARE_FILES_DIR}/etc/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/init.d" "${FIRMWARE_FILES_DIR}/etc/rc.d"
           APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
           [ "${APK_COUNT}" -gt 0 ] || { echo "ERROR: ${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
           find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' \
             -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
           echo ">>> 已拷入 ${APK_COUNT} 个第三方 apk"
-
-          # ---- 2) 兼容旧目录名 ithird-party（如果公共 overlay 已经拷过）----
-          if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ]; then
-            cp -af "${FIRMWARE_FILES_DIR}/etc/ithird-party/." "${FIRMWARE_FILES_DIR}/etc/third-party/"
-            rm -rf "${FIRMWARE_FILES_DIR}/etc/ithird-party"
-            echo ">>> etc/ithird-party → etc/third-party 已合并"
-          fi
-
-          # ---- 3) 兜底：脚本不在位就直接从仓库里找出来安装（不依赖上一步）----
           SRC_INIT="$(find "${REPO_FILES_DIR}" -type f -name 'apk-install' -print -quit 2>/dev/null || true)"
           SRC_INSTALLER="$(find "${REPO_FILES_DIR}" -type f -name 'install_third_party_apk.sh' -print -quit 2>/dev/null || true)"
-
           DST_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
           DST_INSTALLER="${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
-
-          if [ ! -f "${DST_INIT}" ]; then
-            [ -n "${SRC_INIT}" ] || { echo "ERROR: 在 ${REPO_FILES_DIR} 里找不到 apk-install"; exit 1; }
-            install -m 0755 "${SRC_INIT}" "${DST_INIT}"
-            echo ">>> 兜底安装 init: ${SRC_INIT} → ${DST_INIT}"
-          fi
-          if [ ! -f "${DST_INSTALLER}" ]; then
-            [ -n "${SRC_INSTALLER}" ] || { echo "ERROR: 在 ${REPO_FILES_DIR} 里找不到 install_third_party_apk.sh"; exit 1; }
-            install -m 0755 "${SRC_INSTALLER}" "${DST_INSTALLER}"
-            echo ">>> 兜底安装 installer: ${SRC_INSTALLER} → ${DST_INSTALLER}"
-          fi
-
-          chmod 0755 "${DST_INIT}" "${DST_INSTALLER}"
-
-          # ---- 4) 【关键】让首启服务真正被执行（rcS 只跑 /etc/rc.d/S*）----
+          [ -f "${DST_INIT}" ]      || { [ -n "${SRC_INIT}" ]      && install -m 0755 "${SRC_INIT}" "${DST_INIT}"; }
+          [ -f "${DST_INSTALLER}" ] || { [ -n "${SRC_INSTALLER}" ] && install -m 0755 "${SRC_INSTALLER}" "${DST_INSTALLER}"; }
+          chmod 0755 "${DST_INIT}" "${DST_INSTALLER}" 2>/dev/null || true
           ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
-          test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
-          echo ">>> 首启服务已启用: /etc/rc.d/S99apk-install"
-
-          # ---- 5) 结果自检 ----
-          echo ">>> overlay 结构:"
-          find "${FIRMWARE_FILES_DIR}" -maxdepth 4 | sort
-          echo ">>> 待安装 apk:"
-          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' \
-            -exec ls -lh {} \;
-          echo ">>> init 服务链接:"
           ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
 
-      - name: Finalize Configuration (defconfig + 校验注入)
+      # ======================================================================
+      # Finalize：再 defconfig 一次 + 校验收窄没被打破 + 范围诊断
+      # ======================================================================
+      - name: Finalize Configuration (defconfig + 校验)
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
           make defconfig
 
-          # ================================================================
-          # 【新增】收窄自检：这次 defconfig 不能把"只编一台设备"打破
-          #   只在"本设备在 device_mapping.conf 里填了 profile"时才断言，
-          #   这样 x86（不填 profile）不会被误杀
-          # ================================================================
-          MAP="${WORKSPACE}/configs/device_mapping.conf"
-          HAS_PROFILE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 | grep -c '|' || true)"
-          DEV_ON="$(grep -E "^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$" .config | wc -l)"
-          echo ">>> Finalize 后已启用 device 选项数: ${DEV_ON}（本设备填了 profile: ${HAS_PROFILE}）"
-          grep -E "^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$" .config | sed 's/^/    /' || true
-          if [ "${HAS_PROFILE}" = "1" ] && [ "${DEV_ON}" != "1" ]; then
-            echo "ERROR: 收窄被第二次 defconfig 打破了（现在 ${DEV_ON} 台）—— 会编全 target 镜像并超时"
-            echo "       处理：检查 .config 里是否又出现了别的 DEVICE_*=y；把它们的 'is not set' 显式写进 prepare_base_config.sh"
-            exit 1
-          fi
+          DEV_ON="$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)"
+          echo ">>> Finalize 后已启用 device 选项数: ${DEV_ON}  (期望 1)"
+          grep -E '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config | sed 's/^/    /' || true
+          [ "${DEV_ON}" = "1" ] || { echo "ERROR: 收窄被第二次 defconfig 打破（${DEV_ON} 台）"; exit 1; }
 
-          # ================================================================
-          # 【新增】诊断：编译范围到底有多大（不用本地环境，日志里直接看）
-          #   "已选包数"接近"菜单可见包数" → 说明 CONFIG_ALL=y，在编整个 feed
-          #   参照值：例GL-MT3600BE（release 基线）≈ 207 个包
-          # ================================================================
           SEL_ON="$(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
           MENU_ON="$(grep -cE '^[[:space:]]*config[[:space:]]+PACKAGE_' tmp/.config-package.in || true)"
-          echo ">>> [诊断] 已选包数: ${SEL_ON}   菜单可见包数: ${MENU_ON}"          
-          echo ">>> [诊断] ALL 系列开关:"
-          grep -E '^CONFIG_(ALL|ALL_KMODS|ALL_NONSHARED)=' .config || echo "        (未启用)"
-          echo ">>> [诊断] rtpengine: $(grep -m1 '^CONFIG_PACKAGE_rtpengine' .config || echo '<未选中>')"
+          echo ">>> [诊断] 已选包数: ${SEL_ON}   菜单可见包数: ${MENU_ON}"
+          echo ">>> [诊断] ALL 系列: $(grep -E '^CONFIG_(ALL|ALL_KMODS|ALL_NONSHARED)=' .config || echo '(未启用)')"
           if [ "${SEL_ON}" -gt 1500 ]; then
-            echo "::warning::已选包数 ${SEL_ON} 偏多（参照值约 207）—— 基线可能仍是 buildbot 全量配置，会编全 feed（耗时长、易撞编不过的包）"
-          else
-            echo ">>> [诊断] 编译范围正常（参照值约 207）"
+            echo "::warning::已选包数 ${SEL_ON} 偏多，可能把整个 feed 都编了"
           fi
-          
-          echo ">>> CONFIG_VERSION_REPO: $(grep -m1 '^CONFIG_VERSION_REPO=' .config || echo '<无>')"
-          echo ">>> ARCH_PACKAGES     : $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+          echo ">>> ARCH_PACKAGES = $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+          echo ">>> 内核版本线索  = $(grep -m1 '^CONFIG_LINUX_' .config || true)"
 
-          # 已启用包符号表（注意：只能用 [:blank:]，[:space:] 会把换行删掉导致符号粘连）
-          awk '/^CONFIG_PACKAGE_[^=]*=y$/{sub(/=y$/,"");print}' .config \
-            | tr -d '[:blank:]' | sort -u > tmp/enabled-symbols.txt
+          # 有注入/裁剪清单才校验（DSF 默认没有这两个文件）
+          awk '/^CONFIG_PACKAGE_[^=]*=y$/{sub(/=y$/,"");print}' .config | tr -d '[:blank:]' | sort -u > tmp/enabled-symbols.txt
           echo ">>> 已启用 CONFIG_PACKAGE_* 数量: $(wc -l < tmp/enabled-symbols.txt)"
-
-          # ---- 1) 注入的插件必须还在 ----
-          MISSING_OPT=""
-          if [ -s tmp/injected-plugins.txt ]; then
-            while read -r opt; do
-              [ -n "${opt}" ] || continue
-              if grep -qxF "${opt}" tmp/enabled-symbols.txt; then
-                echo "  OK   ${opt}"
-              else
-                echo "  MISS ${opt}"
-                MISSING_OPT="${MISSING_OPT} ${opt}"
-              fi
-            done < tmp/injected-plugins.txt
-          else
-            echo "WARNING: 未找到 tmp/injected-plugins.txt"
-          fi
-
-          # ---- 2) 裁剪 / 强制项必须按要求落地 ----
-          BAD_TRIM=""
-          if [ -s tmp/trimmed-options.txt ]; then
-            while read -r want sym; do
-              [ -n "${sym:-}" ] || continue
-              case "${want}" in
-                ON)
-                  if grep -qxF "${sym}" tmp/enabled-symbols.txt; then
-                    echo "  OK   ${sym} 已启用"
-                  else
-                    echo "  FAIL ${sym} 未启用"
-                    BAD_TRIM="${BAD_TRIM} ${sym}"
-                  fi ;;
-                OFF)
-                  if grep -qxF "${sym}" tmp/enabled-symbols.txt; then
-                    echo "  FAIL ${sym} 又被打开了"
-                    BAD_TRIM="${BAD_TRIM} ${sym}"
-                  else
-                    echo "  OK   ${sym} 已关闭"
-                  fi ;;
-              esac
-            done < tmp/trimmed-options.txt
-          else
-            echo "WARNING: 未找到 tmp/trimmed-options.txt"
-          fi
-
-          # ---- 3) ip 落点自查 ----
-          echo ">>> ip 相关:"
-          grep -E '^CONFIG_PACKAGE_ip-(full|tiny)=|^# CONFIG_PACKAGE_ip-(full|tiny) is not set' .config || true
-
-          if [ -n "${MISSING_OPT}" ]; then
-            if [ "${SOURCE_TYPE}" = "immortalwrt" ]; then
-              echo "ERROR: 以下插件没进固件，请核对 configs/plugins.cfg 里的包名:${MISSING_OPT}"
-              exit 1
-            fi
-            echo "::warning::[${SOURCE_TYPE}] 以下插件在本源码树不存在或未生效，已跳过:${MISSING_OPT}"
-            echo "（openwrt 上游的 luci/packages 比 immortalwrt 少，属正常差异；不拦构建）"
-
-            # 顺手把它们从注入清单里剔掉，保证 Release 包清单 = 固件实际内容
-            TMPF="$(mktemp)"
-            while read -r opt; do
-              [ -n "${opt}" ] || continue
-              case " ${MISSING_OPT} " in
-                *" ${opt} "*) continue ;;
-              esac
-              echo "${opt}" >> "${TMPF}"
-            done < tmp/injected-plugins.txt
-            mv "${TMPF}" tmp/injected-plugins.txt
-            echo ">>> 已从注入清单剔除未生效项，剩余 $(wc -l < tmp/injected-plugins.txt) 项"
-          fi
-          
-          [ -z "${BAD_TRIM}" ] || {
-            echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
-          echo ">>> 注入/裁剪校验通过"
+          for f in tmp/injected-plugins.txt tmp/trimmed-options.txt; do
+            [ -s "$f" ] && echo ">>> 发现 $f（$(wc -l < "$f") 行），如需强制校验请自行加断言" || echo ">>> 无 $f（跳过）"
+          done
+          echo ">>> 配置校验通过"
 
       - name: Generate release notes
         id: notes
@@ -849,65 +360,49 @@ jobs:
           cd "${WORKSPACE}/src"
 
           DATE_UTC="$(date -u +%F)"
-          TAG="${TARGET_DEVICE}-${SOURCE_TYPE}-${DATE_UTC}-${{ github.run_id }}"
+          TAG="${TARGET_DEVICE}-DSF-${DATE_UTC}-${{ github.run_id }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo ">>> tag=${TAG}"
 
-          # ========== 1) 构建信息（作为 Release 附件，不放进正文）==========
           {
             echo "device      : ${TARGET_DEVICE}"
-            echo "source_type : ${SOURCE_TYPE}"
-            echo "version     : ${VERSION:-snapshot}"
-            echo "source_ref  : ${SOURCE_REF:-<auto: 最新稳定版 tag>}"
-            echo "src_branch  : $(git rev-parse --abbrev-ref HEAD)"
-            echo "src_describe: $(git describe --tags 2>/dev/null || echo '<无 tag>')"
-            echo "src_commit  : $(git rev-parse HEAD)"
-            echo "src_date    : $(git log -1 --format=%cd --date=iso)"
+            echo "repo        : ${REPO_URL}"
+            echo "branch      : ${REPO_BRANCH}"
+            echo "src_commit  : ${SRC_COMMIT:-$(git rev-parse HEAD)}"
+            echo "src_branch  : ${SRC_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+            echo "src_date    : ${SRC_DATE:-$(git log -1 --format=%cd --date=iso)}"
+            echo "target      : ${DSF_TARGET_PATH}"
+            echo "profile     : ${PROFILE}"
+            echo "seed_config : ${SEED_CONFIG}"
+            echo "arch_packages: $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
             echo "build_time  : $(date -u '+%F %T UTC')"
             echo "run_id      : ${{ github.run_id }}"
-            echo "mirror      : ${MIRROR:-<unknown>}"
-            echo "kmods_dir   : ${KMODS_DIR:-<unknown>}"
             echo "config_md5  : $(md5sum .config | cut -d' ' -f1)"
+            echo "kmods_repo  : 本构建产物 bin/targets/${DSF_TARGET_PATH}/kmods/<vermagic>/（发布后即为自有 kmod 库）"
           } > "${WORKSPACE}/BUILDINFO.txt"
 
-          # ========== 2) 包清单（去重）==========
           PLIST="$(mktemp)"
-
-          # 2.1 .config 里已启用的 luci* 包
-          #     必须排除 *_INCLUDE_*（Kconfig 子开关，不是包，例如
-          #     CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy），否则正文里会出现
-          #     看起来装了 passwall / rclone 的假条目
           grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
-            | grep -v '_INCLUDE_' \
-            | grep -vx 'CONFIG_PACKAGE_luci' \
+            | grep -v '_INCLUDE_' | grep -vx 'CONFIG_PACKAGE_luci' \
             | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' >> "${PLIST}" || true
-
-          # 2.2 注入清单里的非 luci 项（如 irqbalance / smartdns）
           if [ -f tmp/injected-plugins.txt ]; then
-            grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt \
-              | sed 's/^CONFIG_PACKAGE_//' >> "${PLIST}" || true
+            grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt | sed 's/^CONFIG_PACKAGE_//' >> "${PLIST}" || true
           fi
-
           sort -u "${PLIST}" -o "${PLIST}"
           echo ">>> LuCI/插件条目数: $(wc -l < "${PLIST}")"
 
-          # ========== 3) Release 正文 ==========
           {
-            echo "OpenWrt automated build release"
+            echo "OpenWrt automated build release (DSF 第三方源)"
             echo
             echo "Device:"
             echo
             echo "${TARGET_DEVICE}"
-            echo "${SOURCE_TYPE} ${VERSION:-snapshot}"
-
-            # 编译通道（稳定版 / 快照）—— VERSION 或 REL_DIR 任一能判断即可（双保险）
-            #   REL_DIR 由 Modify APK/OPKG mirror 步骤导出：releases/<版本> 或 snapshots
-            if [ "${VERSION:-}" = "snapshot" ] || [ "${REL_DIR:-}" = "snapshots" ]; then
-              echo "编译通道：快照（主分支）"
-            else
-              echo "编译通道：稳定版 ${VERSION:-}（releases/${VERSION:-}）"
-            fi
-
+            echo
+            echo "Source:"
+            echo
+            echo "${REPO_URL}"
+            echo "branch ${REPO_BRANCH}  commit ${SRC_COMMIT:-unknown}"
+            echo "target ${DSF_TARGET_PATH}  profile ${PROFILE}"
             echo
             echo "Run ID:"
             echo
@@ -922,57 +417,14 @@ jobs:
             echo "Third-Party package list"
             echo
             printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
-
-            # ================== 新增：openwrt 第三方旁路包 ==================
-            # 来源：apk 仓库 <arch目录>/luci-third-party-openwrt/（immortalwrt 预编译）
-            # 由 shell/fetch-openwrt-third-party.sh 生成清单与元信息
-            # 本步骤已 cd 到 ${WORKSPACE}/src，清单落在 src/tmp/ 下
-            TP_TXT=""
-            for p in "tmp/openwrt-third-party.txt" "${WORKSPACE}/src/tmp/openwrt-third-party.txt"; do
-              if [ -f "$p" ]; then TP_TXT="$p"; break; fi
-            done
-
-            if [ -n "${TP_TXT}" ]; then
-              TP_META="${TP_TXT%.txt}.meta"
-              TP_ARCH=""
-              TP_ARCHDIR=""
-              TP_SRC=""
-              if [ -f "${TP_META}" ]; then
-                TP_ARCH="$(sed -n 's/^arch_packages=//p' "${TP_META}" | head -n1)"
-                TP_ARCHDIR="$(sed -n 's/^apk_arch_dir=//p' "${TP_META}" | head -n1)"
-                TP_SRC="$(sed -n 's/^apk_source=//p'     "${TP_META}" | head -n1)"
-              fi
-              echo
-              echo "Third-Party APK (openwrt only, prebuilt)"
-              echo
-              echo "${TARGET_DEVICE}"
-              echo
-              awk -F'\t' '{printf "- %s (`%s`)\n", $1, $2}' "${TP_TXT}"
-              echo
-              if [ -n "${TP_ARCHDIR}" ]; then
-                echo "Arch:    ${TP_ARCH:-<unknown>} → ${TP_ARCHDIR}"
-              fi
-              if [ -n "${TP_SRC}" ]; then
-                echo "Source:  ${TP_SRC}"
-              fi
-              if [ -f "${TP_META}" ]; then
-                echo "Repo:    $(sed -n 's/^apk_repo=//p' "${TP_META}")@$(sed -n 's/^apk_branch=//p' "${TP_META}") ($(sed -n 's/^apk_commit=//p' "${TP_META}"))"
-              fi
-            elif [ "${SOURCE_TYPE:-}" = "openwrt" ]; then
-              # openwrt 源却没有清单 → 拉取步骤没跑或被跳过，必须显眼（正文 + CI 注解）
-              echo
-              echo "Third-Party APK (openwrt only, prebuilt)"
-              echo
-              echo "WARNING: 清单缺失，第三方 apk 未记录（请检查 Fetch 步骤是否执行）"
-              echo "::warning::openwrt 构建缺少第三方 apk 清单（tmp/openwrt-third-party.txt）"
-            fi
-            # ==============================================================
+            echo
+            echo "自建 Kmod 库"
+            echo
+            echo "本固件内核与官方不同源，官方 kmods 源不可用；"
+            echo "自有 kmod 库来自本次构建产物 bin/targets/${DSF_TARGET_PATH}/kmods/<vermagic>/。"
           } > "${WORKSPACE}/release-notes.md"
-
           rm -f "${PLIST}"
-
-          echo ">>> release-notes.md 预览:"
-          cat "${WORKSPACE}/release-notes.md"
+          echo ">>> release-notes.md 预览:"; cat "${WORKSPACE}/release-notes.md"
 
       - name: Prepare build download
         shell: bash
@@ -983,115 +435,85 @@ jobs:
             echo ">>> 并行下载失败，降级单线程重试一次"
             make download -j1 V=s 2>&1 | tee -a build_download.log
           }
-          echo "=== 下载阶段 warning/error 汇总 ==="
           grep -Ei "error|warning" build_download.log || true
 
       - name: Build firmware
         shell: bash
-        # 关键：step 超时 < job 超时。
-        # step 超时 => 状态是 "failed"，后面 if: failure() 的诊断步骤会跑；
-        # job 超时 => 状态是 "cancelled"，if: failure() 的步骤【不会】跑。
-        # 默认 job 超时就是 360 分钟。
+        # step 超时 < job 超时：step 超时=失败（诊断步骤会跑）；job 超时=取消（诊断不跑）
         timeout-minutes: 300
         run: |
           set -uo pipefail
-          cd "${WORKSPACE}/src" || { echo "::error::源码目录 ${WORKSPACE}/src 不存在"; exit 1; }
+          cd "${WORKSPACE}/src" || { echo "::error::源码目录不存在"; exit 1; }
 
-          # 所有变量都兜底：set -u 下少传一个 env 就会在此行崩，日志里只留一行 unbound variable
-          echo ">>> 本次构建: device=${TARGET_DEVICE:-?} source=${SOURCE_TYPE:-?} version=${VERSION:-} REL_DIR=${REL_DIR:-} 基线=${RELEASE_BASE:-}"
-          echo ">>> [诊断] DEV_ON=$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)   UBOOT_ON=$(grep -cE '^CONFIG_PACKAGE_uboot-mediatek.*=y$' .config || true)"
-          echo ">>> [诊断] 相关开关:"; grep -E '^CONFIG_TARGET_(ALL_PROFILES|MULTI_PROFILE|PER_DEVICE_ROOTFS|PROFILE)' .config || echo "        (无相关开关)"
-          echo ">>> [诊断] 已选包数 SEL_ON=$(grep -cE '^CONFIG_PACKAGE_.*=y$' .config || true)"
-          echo ">>> 磁盘（编译前）:"; df -h / /home 2>/dev/null || true
-          echo ">>> inode（编译前）:"; df -i / /home 2>/dev/null || true
-          
-          # 默认 -j$(nproc) 使用所有可用核心进行并行编译，内存峰值容易触顶、内存不足（OOM）导致崩溃
-          # 表现为"镜像组装阶段无任何报错就失败"（竞态，不是编译错误）
-          # 可以将 -j$(nproc) 修改为 -j3 通常能避开峰值
-          # 或者修改为 -j2 稳定；基本不会撞峰值。但建时间拉长约 1.5~1.8 倍
-          export MAKEFLAGS="-j3" 
+          echo ">>> 本次构建: device=${TARGET_DEVICE:-?} repo=${REPO_URL:-?}@${REPO_BRANCH:-?} target=${DSF_TARGET_PATH:-?} profile=${PROFILE:-?}"
+          echo ">>> [诊断] DEV_ON=$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)  SEL_ON=$(grep -cE '^CONFIG_PACKAGE_.*=y$' .config || true)"
+          echo ">>> 磁盘:"; df -h / /home 2>/dev/null || true
+          echo ">>> inode:"; df -i / /home 2>/dev/null || true
 
-          # 花 1 秒验证 MAKEFLAGS 能被 make 接受，避免白跑几小时
+          export MAKEFLAGS="${MAKE_JOBS:--j3}"
           printf 'all:\n\t@echo "MAKEFLAGS=${MAKEFLAGS} OK"\n' > /tmp/mf-check.mk
           if ! make -f /tmp/mf-check.mk all; then
-            echo "::error::MAKEFLAGS='${MAKEFLAGS}' 被 make 拒绝，检查拼写（应为 -j2 / -j 2 / --jobs=2）"
-            exit 2
+            echo "::error::MAKEFLAGS='${MAKEFLAGS}' 被 make 拒绝"; exit 2
           fi
-          
+
           echo ">>> 开始编译 (CPU=$(nproc), MAKEFLAGS=${MAKEFLAGS})"
           set +e
-          rm -f build.log                # 清掉上次残留，诊断步骤才不会读到旧日志
-          set +e
-
-          # ---------- 第一遍：2 路并行 ----------
+          rm -f build.log
           make 2>&1 | tee build.log
           BUILD_RC=${PIPESTATUS[0]}
 
-          # ---------- 第二遍：降级串行重试 ----------
           # ==================================================================
-          # 失败处理：按设备分流，互不干扰
-          #   · Tenda-BE12PRO → 占位 + 增量重试（只处理"未选中设备缺工件"这一种失败）
-          #   · 其它所有型号   → 原样保留的 -j1 降级重试
+          # 失败自愈（本文件只服务这两个设备，无条件启用）
+          #   1) 若是"未选中设备缺 staging 工件"（filogic 镜像组装会遍历整个
+          #      subtarget）→ 0 字节占位 + 增量重试，最多 20 轮
+          #   2) 其它情况 → 降级 -j1 串行重试一次
+          # 注意：缺失路径只能从 V=s 的重跑日志里抓，非 verbose 的 build.log
+          #       不含该错误文本（实测）
           # ==================================================================
           if [ "${BUILD_RC}" -ne 0 ]; then
+            export MAKEFLAGS="-j1"
+            echo "::warning::构建失败（exit ${BUILD_RC}），进入占位自愈循环"
+            for i in $(seq 1 20); do
+              echo "::warning::第 ${i} 轮：重跑 target/linux/install (V=s) 定位缺失工件"
+              echo "===== 组装重试 ${i} $(date -u +%F' '%TZ) =====" >> build.log
+              make -j1 target/linux/install V=s > "/tmp/asm-${i}.log" 2>&1
+              RC2=$?
+              cat "/tmp/asm-${i}.log" >> build.log
+              if [ "${RC2}" -eq 0 ]; then echo ">>> 组装通过（第 ${i} 轮）"; BUILD_RC=0; break; fi
 
-            if [ "${TARGET_DEVICE:-}" = "Tenda-BE12PRO" ]; then
-              export MAKEFLAGS="-j1"          # 组装阶段单线程，行为与 Diagnose 复现一致
-              for i in $(seq 1 12); do
-                echo "::warning::第 ${i} 轮：重跑 target/linux/install (V=s) 以定位缺失工件"
-                echo "===== 组装重试 ${i} $(date -u +%F' '%TZ) =====" >> build.log
-                make -j1 target/linux/install V=s > "/tmp/asm-${i}.log" 2>&1
-                RC2=$?
-                cat "/tmp/asm-${i}.log" >> build.log      # 错误文本只在这份日志里，务必并进 build.log
-
-                if [ "${RC2}" -eq 0 ]; then
-                  echo ">>> 组装通过（第 ${i} 轮）"
-                  BUILD_RC=0; break
-                fi
-
-                MISS="$(grep -oE 'can not open input file [^[:space:]]+' "/tmp/asm-${i}.log" | tail -n1 | awk '{print $NF}')"
-                if [ -z "${MISS}" ]; then
-                  echo ">>> 第 ${i} 轮失败但不是'缺输入文件'型，停止占位循环（真错误见 build.log 末尾）"
-                  tail -40 "/tmp/asm-${i}.log" || true
-                  BUILD_RC="${RC2}"; break
-                fi
-                case "${MISS}" in
-                  */staging_dir/*) : ;;
-                  *) echo "::error::缺失路径不在 staging_dir 下，拒绝占位: ${MISS}"; BUILD_RC="${RC2}"; break ;;
-                esac
-                case "${MISS}" in
-                  *tenda*|*be12*) echo "::error::缺的是目标设备自己的工件，不能占位: ${MISS}"; BUILD_RC="${RC2}"; break ;;
-                esac
-                echo ">>> 第 ${i} 轮缺失: ${MISS}  → 建 0 字节占位"
-                mkdir -p "$(dirname "${MISS}")" && : > "${MISS}" || { BUILD_RC="${RC2}"; break; }
-              done
-
-            else
-              # ---------- 其它型号：降级串行重试 ----------
-              echo "::warning::并行构建失败（exit ${BUILD_RC}），自动降级 -j1 串行重试..."
-              echo "===== 以下为 -j1 重试 $(date -u +%F' '%TZ) =====" >> build.log
-              export MAKEFLAGS="-j1"
-              make V=s 2>&1 | tee -a build.log
-              BUILD_RC=${PIPESTATUS[0]}
-              echo ">>> -j1 重试退出码 = ${BUILD_RC}"
-            fi
-
+              MISS="$(grep -oE 'can not open input file [^[:space:]]+' "/tmp/asm-${i}.log" | tail -n1 | awk '{print $NF}')"
+              if [ -z "${MISS}" ]; then
+                echo ">>> 第 ${i} 轮失败但不是'缺输入文件'型 → 降级 -j1 全量重试一次"
+                tail -40 "/tmp/asm-${i}.log" || true
+                echo "===== -j1 全量重试 $(date -u +%F' '%TZ) =====" >> build.log
+                make V=s 2>&1 | tee -a build.log
+                BUILD_RC=${PIPESTATUS[0]}
+                break
+              fi
+              case "${MISS}" in
+                */staging_dir/*) : ;;
+                *) echo "::error::缺失路径不在 staging_dir 下，拒绝占位: ${MISS}"; BUILD_RC="${RC2}"; break ;;
+              esac
+              # 目标设备自己的产物绝不占位（用 profile key 与 target 名双重判断）
+              case "${MISS}" in
+                *"${PROFILE}"*|*"${TARGET_DEVICE}"*)
+                  echo "::error::缺的是目标设备自己的工件，不能占位: ${MISS}"; BUILD_RC="${RC2}"; break ;;
+              esac
+              echo ">>> 第 ${i} 轮缺失: ${MISS}  → 建 0 字节占位"
+              mkdir -p "$(dirname "${MISS}")" && : > "${MISS}" || { BUILD_RC="${RC2}"; break; }
+            done
           fi
 
           set -e
-          echo ">>> build.log 行数=$(wc -l < build.log)  大小=$(du -h build.log | cut -f1)"
+          echo ">>> build.log 行数=$(wc -l < build.log) 大小=$(du -h build.log | cut -f1)"
           echo "make exit code: ${BUILD_RC}"
           if [ "${BUILD_RC}" -ne 0 ]; then
-            echo "::error::编译失败（exit ${BUILD_RC}），详细原因见下一步 Diagnose build failure"
+            echo "::error::编译失败（exit ${BUILD_RC}），详细原因见 Diagnose build failure"
             exit "${BUILD_RC}"
           fi
           echo ">>> 编译成功"
 
       - name: Diagnose build failure
-        # ================================================================
-        # 独立诊断：if: failure() 保证"只要前面有步骤失败就会跑"，
-        # 完全不受 Build 步骤内部 set -e / 自身退出码的影响
-        # ================================================================
         if: failure()
         continue-on-error: true
         shell: bash
@@ -1101,153 +523,61 @@ jobs:
         run: |
           set +e
           shopt -s nullglob
-
-          # ---------- 0. 定位源码根（不再盲信 $WORKSPACE）----------
-          SRC=""
-          for d in "${WS}/src" "${WORKSPACE:-/nonexistent}/src" "${WS}" "${WORKSPACE:-/nonexistent}"; do
-            if [ -n "$d" ] && [ -f "$d/Makefile" ] && [ -d "$d/target" ] && [ -d "$d/scripts" ]; then
-              SRC="$d"; break
-            fi
-          done
-          if [ -z "$SRC" ]; then
-            echo ">>> 未找到源码根（判据：同时存在 Makefile / target/ / scripts/）"
-            find "${WS}" -maxdepth 2 -name Makefile -printf '%h\n' 2>/dev/null | head
-            exit 0
-          fi
-          cd "$SRC" || exit 0
-          echo ">>> WS  = $WS"
-          echo ">>> SRC = $SRC"
-
-          # ---------- 1. 磁盘 / inode / 内存 / OOM ----------
-          echo "::group::磁盘 / inode / 内存"
-          df -h / /home /tmp 2>/dev/null
-          echo "----- inode -----"
-          df -i / /home /tmp 2>/dev/null
+          SRC="${WS}/src"; [ -d "${SRC}/target" ] || SRC="${WS}"
+          cd "${SRC}" || exit 0
+          echo ">>> SRC=${SRC}"
+          echo "::group::资源"
+          df -h / /home /tmp 2>/dev/null; echo "--- inode ---"; df -i / /home 2>/dev/null
           free -h
-          echo "----- dmesg: OOM / 被杀进程（sudo -n，绝不挂住）-----"
-          sudo -n dmesg 2>/dev/null | grep -iE 'out of memory|killed process|oom-kill' | tail -20 || echo "(无)"
+          sudo -n dmesg 2>/dev/null | grep -iE 'out of memory|killed process' | tail -20 || echo "(无 OOM)"
           echo "::endgroup::"
-
-          # ---------- 2. 日志清点：Build 到底把日志写哪了 ----------
-          echo "::group::日志清点"
-          LOG=""
-          for f in "$SRC/build.log" "$WS/build.log" \
-                   "$SRC/build-full.log" "$WS/build-full.log" \
-                   "$SRC/build_img.log"  "$WS/build_img.log" "$SRC/tmp/build.log"; do
-            if [ -s "$f" ]; then
-              printf '行数=%-8s  %s\n' "$(wc -l < "$f")" "$f"
-              [ -z "$LOG" ] && LOG="$f"
-            fi
+          for f in "$SRC/build.log" "$WS/build.log"; do
+            [ -s "$f" ] && { echo ">>> 主日志: $f ($(wc -l < "$f") 行)"; LOG="$f"; }
           done
-          echo ">>> 主日志 LOG = ${LOG:-<不存在>}"
-          [ -n "$LOG" ] || echo ">>> Build 步骤可能只 tee 到 stdout 未落盘，只能靠下面的复现日志"
-          echo "::endgroup::"
-
-          # ---------- 3. 主日志报错扫描（全用同一份 LOG，绝不混用）----------
-          if [ -n "$LOG" ]; then
-            echo "::group::主日志报错扫描"
-            echo "##### 失败的目标/包 #####"
-            grep -nE "ERROR: (package|target)/|failed to build|Collected errors" "$LOG" | tail -30 || echo "(无)"
-            echo "##### make 报错行 #####"
-            grep -nE "make\[[0-9]+\]: \*\*\*" "$LOG" | tail -50 || echo "(无)"
-            echo "##### 编译器 fatal #####"
-            grep -nE "error:|fatal error:|undefined reference|collect2:" "$LOG" | tail -30 || echo "(无)"
-            echo "##### 主日志最后 80 行 #####"
-            tail -80 "$LOG"
-            echo "::endgroup::"
-
-            # ---------- 4. 失败性质判定：没报错 ≠ 编译错误 ----------
-            echo "::group::失败性质判定"
-            if grep -qE "Error [0-9]+|make\[[0-9]+\]: \*\*\*|error:|failed to build" "$LOG"; then
-              echo ">>> 日志中有明确报错  =>  真正的编译/组装错误，看上面三段"
-            else
-              echo ">>> 日志从头到尾无报错、末尾停在半路  =>  进程被【外部】杀死，不是编译错误"
-              echo ">>> 候选：job/step 超时(SIGTERM，dmesg 无痕迹) | OOM(SIGKILL，dmesg 有痕迹) | runner 掉线"
-              echo ">>> 对策：给 Build 步骤设 timeout-minutes 并让它自己落盘完整日志；MAKEFLAGS 降到 -j2 / -j1"
-            fi
+          if [ -n "${LOG:-}" ]; then
+            echo "::group::主日志尾部"
+            grep -nE "ERROR: (package|target)/|failed to build|make\[[0-9]+\]: \*\*\*" "$LOG" | tail -30 || echo "(无)"
+            tail -60 "$LOG"
             echo "::endgroup::"
           fi
-
-          # ---------- 5. 复现：target/linux/install（带 timeout，别把 job 吃干净）----------
-          echo "::group::复现 make -j1 target/linux/install V=s"
-          if [ -f .config ]; then
-            echo ">>> CONFIG_TARGET_BOARD = $(grep -m1 '^CONFIG_TARGET_BOARD=' .config 2>/dev/null)"
-          else
-            echo ">>> 警告：$SRC/.config 不存在，复现无意义（配置已被清掉）"
-          fi
+          echo "::group::复现 target/linux/install (V=s)"
           timeout --signal=TERM 1500 make -j1 target/linux/install V=s > /tmp/img-vs.log 2>&1
-          RC=$?
-          echo ">>> =================================================="
-          echo ">>> make -j1 target/linux/install V=s 退出码 RC = ${RC}"
-          echo ">>>    0   = 单独跑竟然成功 => 原失败是【并行竞态】，改 MAKEFLAGS=-j2 重跑即可出固件"
-          echo ">>>    1   = 命令失败，看 'Error 1' 上面那条被回显的命令"
-          echo ">>>    2   = make 用法/依赖错误"
-          echo ">>>    124 = 被 timeout 杀掉（超时）"
-          echo ">>>    137 = SIGKILL => 极可能 OOM 或 job 被强制终止"
-          echo ">>> =================================================="
-          echo "##### 错误关键字 #####"
-          grep -nE "Error [0-9]|error:|No such file|cannot stat|Permission denied|Killed|No space|too big|Assertion|Traceback|Segmentation|inode|Cannot allocate" /tmp/img-vs.log | tail -40 || echo "(无)"
-          echo "##### 复现日志最后 60 行（V=s 下元凶在末尾）#####"
-          tail -60 /tmp/img-vs.log
+          echo ">>> 退出码 = $?  (0=竞态/已成过, 1=命令失败, 2=make 用法错误, 124=超时, 137=SIGKILL)"
+          grep -nE "can not open input file|Error [0-9]|make\[[0-9]+\]: \*\*\*|No space|Killed" /tmp/img-vs.log | tail -30 || echo "(无)"
+          tail -40 /tmp/img-vs.log
           echo "::endgroup::"
-          cp -f /tmp/img-vs.log "${WS}/img-vs.log" 2>/dev/null || true
-
-          # ---------- 6. 产物 / 暂存 / 包级日志 ----------
-          echo "::group::产物与暂存目录"
+          echo "::group::产物与暂存"
           du -sh bin build_dir staging_dir tmp 2>/dev/null
-          echo "##### bin/targets 最近 60 分钟生成的文件 #####"
-          find bin/targets -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM %10s  %p\n' 2>/dev/null | tail -30 || echo "(无)"
           ls -la bin/targets/*/*/ 2>/dev/null | tail -40
-          
-          echo "##### staging_dir 下的 u-boot / fip / preloader 产出 #####"
+          echo "##### staging_dir 下的 u-boot/fip/preloader 产出 #####"
           find staging_dir -path '*/image/*' -type f \
-            \( -iname '*u-boot*' -o -iname '*fip*' -o -iname '*preloader*' \) \
-            2>/dev/null | head -60 || true
-          echo "----- 那些 staging image 目录里一共多少文件（0 = 一个工件都没生成过）-----"
+            \( -iname '*u-boot*' -o -iname '*fip*' -o -iname '*preloader*' \) 2>/dev/null | head -60 || true
           find staging_dir -path '*/image/*' -type f 2>/dev/null | wc -l
           echo "::endgroup::"
-
-          if [ -d logs ]; then
-            echo "::group::logs/ 下的包级日志"
-            find logs -type f -mmin -180 -printf '%TY-%Tm-%Td %TH:%TM  %p\n' 2>/dev/null | sort | tail -20
-            echo "##### logs/ 中含报错的日志（尾部 25 行）#####"
-            grep -rIlE "Error [0-9]+|error:|\*\*\*" logs/ 2>/dev/null | head -8 | while read -r f; do
-              echo "### $f"; tail -25 "$f"
-            done
-            echo "::endgroup::"
-          fi
-
-          # ---------- 7. 写进 Job Summary，省得翻网页日志 ----------
+          cp -f /tmp/img-vs.log "${WS}/img-vs.log" 2>/dev/null || true
           {
-            echo "## 构建失败诊断"
+            echo "## 构建失败诊断 (${TARGET_DEVICE:-?})"
             echo ""
-            echo "- 源码根: $SRC"
-            echo "- 主日志: ${LOG:-未落盘}"
-            echo "- 复现退出码 RC=${RC:-未执行}   (0=并行竞态 / 124=超时 / 137=SIGKILL)"
-            echo ""
+            echo "- 源: ${REPO_URL:-?}@${REPO_BRANCH:-?}"
+            echo "- 复现退出码: 见上方"
             echo '```'
-            free -h
-            df -h / /home
-            df -i / /home
+            free -h; df -h / /home
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: Upload build logs on failure
-        # ==================================================================
-        # 收尾：把日志挂成 artifact，方便下载逐行看
-        # ==================================================================
         if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-${{ github.run_id }}
+          name: dsf-logs-${{ github.event.inputs.target_device }}-${{ github.run_id }}
           if-no-files-found: warn
           retention-days: 7
           path: |
-            ${{ github.workspace }}/build.log
             ${{ github.workspace }}/src/build.log
+            ${{ github.workspace }}/src/build_download.log
+            ${{ github.workspace }}/src/.config
             ${{ github.workspace }}/img-vs.log
-            ${{ github.workspace }}/src/logs/**
 
       - name: Verify Images
         if: success()
@@ -1257,30 +587,18 @@ jobs:
           cd "${WORKSPACE}/src"
           ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,60p' || true
           IMG="$(find bin/targets -maxdepth 3 -type f \
-                 \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) \
-                 -print -quit)"
-          [ -n "${IMG}" ] || { echo "ERROR: bin/targets 下没有找到固件镜像"; exit 1; }
+                 \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) -print -quit)"
+          [ -n "${IMG}" ] || { echo "ERROR: 没有找到固件镜像"; exit 1; }
           echo ">>> 生成镜像示例: ${IMG}"
-
-      - name: Upload build log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.event.inputs.target_device }}-logs-${{ github.run_id }}
-          path: |
-            src/build.log
-            src/build_download.log
-            src/.config
-            src/tmp/injected-plugins.txt
-            src/tmp/trimmed-options.txt
-            src/tmp/enabled-symbols.txt
-          if-no-files-found: ignore
+          echo ">>> 自有 kmod 库（本次产物）:"
+          ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (没有 kmods 目录，可能未生成)"
+          echo ">>> 设备端 distfeeds 应指向该 kmods 目录对应的发布地址（不要指向官方 kmods）"
 
       - name: Upload Artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.target_device }}-${{ github.event.inputs.source_type }}-${{ github.run_id }}
+          name: ${{ github.event.inputs.target_device }}-DSF-${{ github.run_id }}
           path: |
             src/bin/targets/*
             !src/bin/targets/**/packages/**
@@ -1291,9 +609,9 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.notes.outputs.tag }}      # ← 形如 x86-immortalwrt-2026-09-23-35429357989
-          name: ${{ steps.notes.outputs.tag }}          # 标题同一个（截图里标题=tag）
-          body_path: release-notes.md                   # ← 正文用上面生成的文件
+          tag_name: ${{ steps.notes.outputs.tag }}
+          name: ${{ steps.notes.outputs.tag }}
+          body_path: release-notes.md
           files: |
             BUILDINFO.txt
             src/bin/targets/*/*/*.bin
