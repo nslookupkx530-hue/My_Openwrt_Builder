@@ -1,0 +1,92 @@
+name: Scan m0eak feeds (找缺包的 feed)
+run-name: "Scan m0eak feeds by ${{ inputs.users }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      users:
+        description: "要扫描的 GitHub 用户/组织（空格分隔）"
+        required: true
+        default: "m0eak fanchmwrt"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Scan repos for missing packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          USERS='${{ github.event.inputs.users }}'
+
+          # 要找回的包（注意目录名可能与包名不同，如 amneziawg-tools ← amneziawg）
+          cat > /tmp/need.txt <<'EOF'
+          luci-app-passwall2
+          luci-app-mosdns
+          luci-app-turboacc
+          luci-app-athena-led
+          luci-app-aurora-config
+          luci-theme-aurora
+          luci-theme-shadcn
+          easytier
+          v2dat
+          amneziawg-tools
+          default-settings-m0eak
+          EOF
+
+          api() { curl -sSL --max-time 60 \
+                    -H "Authorization: Bearer ${GH_TOKEN}" \
+                    -H 'Accept: application/vnd.github+json' "$1" || true; }
+
+          : > /tmp/hits.txt
+          for U in ${USERS}; do
+            echo "================ 用户/组织: ${U} ================"
+            REPOS=""
+            for PG in 1 2 3; do
+              P="$(api "https://api.github.com/users/${U}/repos?per_page=100&page=${PG}&type=all" \
+                   | grep -oE '"full_name":[[:space:]]*"[^"]+"' \
+                   | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+              [ -n "${P}" ] || break
+              REPOS="${REPOS} ${P}"
+            done
+            REPOS="$(printf '%s\n' ${REPOS} | sort -u | head -80)"
+            echo ">>> 仓库数: $(printf '%s\n' "${REPOS}" | grep -c . || true)"
+
+            for R in ${REPOS}; do
+              TREE="$(api "https://api.github.com/repos/${R}/git/trees/HEAD?recursive=1" \
+                      | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' \
+                      | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' || true)"
+              [ -n "${TREE}" ] || { echo "    ${R}: 取不到 tree"; continue; }
+              printf '%s\n' "${TREE}" > /tmp/tree.txt
+              hit=""
+              while read -r p; do
+                [ -n "${p}" ] || continue
+                if grep -qF "/${p}/" /tmp/tree.txt; then hit="${hit} ${p}"; continue; fi
+                alt="${p%%-*}"
+                case "${alt}" in luci|kmod|lib|app|base|default) alt="" ;; esac
+                if [ -n "${alt}" ] && grep -qF "/${alt}/" /tmp/tree.txt; then hit="${hit} (疑似${alt})"; fi
+              done < /tmp/need.txt
+              if [ -n "${hit}" ]; then
+                echo "  ★ ${R}  →${hit}"
+                printf '| `%s` |%s |\n' "${R}" "${hit}" >> /tmp/hits.txt
+              else
+                echo "    ${R}  (无命中, 文件数=$(wc -l < /tmp/tree.txt))"
+              fi
+            done
+          done
+
+          {
+            echo "## 含缺失包的仓库"
+            echo ""
+            echo "| 仓库 | 命中 |"
+            echo "|---|---|"
+            cat /tmp/hits.txt 2>/dev/null || true
+            echo ""
+            echo "用法：命中「luci 类」的仓库替换 luci feed URL；命中「packages 类」的替换 packages feed URL（或作为额外 feed）。"
+          } >> "$GITHUB_STEP_SUMMARY"
