@@ -1,16 +1,24 @@
 name: OpenWrt Build & Release (DSF 第三方源)
-run-name: OpenWrt Build & Release (DSF 第三方源) - ${{ inputs.target_device }}
+run-name: "Build ${{ inputs.target_device }} (DSF)"
 
 # ============================================================================
-# 服务设备：GL-MT5000 (m0eak/fanchmwrt) / JDC-AX6600 (m0eak/libwrt)
-# 与 openwrt-build-device.yml 的关键差异：
-#   1) 源是第三方：仓库/分支/种子配置由 device_mapping.conf 决定，没有 release/snapshot 概念
-#   2) 官方没有这两个 target 的 releases/snapshots → 不用 config.buildinfo 基线，
-#      改用种子 .config（defconfig 展开 + 收窄到单设备）
-#   3) 不引用官方 kmods 源：自有 kmod 库＝构建产物
-#      bin/targets/<target>/<subtarget>/kmods/<vermagic>/（随 Artifact/Release 发布）
-#   4) 不使用 third-party-openwrt.config / 预编译 apk 旁路
-#   5) 镜像组装会遍历整个 subtarget（filogic 尤甚）→ 保留"缺工件占位+重试"自愈，
+# 服务设备：GL-MT5000 (m0eak/fanchmwrt@mt5000) / JDC-AX6600 (m0eak/libwrt@25.12.4)
+#
+# 目录约定（除 workflow 外，这两个设备相关的东西都放 DSF 目录）：
+#   configs/DSF/device_mapping.conf      设备名=源URL|分支或tag|种子配置|target路径|profile
+#   configs/DSF/*.config                 种子配置
+#   configs/DSF/feeds.extra.conf         可选：追加/覆盖 feed（如 m0eakpatch）
+#   shell/DSF/dsf_seed_config.sh         种子处理：defconfig + 收窄 + zh-cn 兜底
+#   Third-Party/third-party.config       公共第三方包清单（按需开关）
+#   Third-Party/DSF/third-party.config   可选：DSF 追加（后 source，可覆盖）
+#   files/DSF/<设备>/                     可选：设备 overlay（叠加在 files/<设备> 之上）
+#
+# 第三方包的两条路（务必分清）：
+#   A) 源码包：Third-Party/*.config → 注入 .config → 编译进镜像（会 MISS 的说明本源树没有）
+#   B) apk 包 ：Third-Party/*.config → shell/apk-prepare-packages.sh
+#               （从 apk 仓库 run/<arch>/ 取 .run / .apk）→ src/packages/
+#               → 固件 usr/share/third-party/ → 首启 install_third_party_apk.sh 安装
+#   原则：apk 只交付 app 本体，它 Depends 里列的依赖必须走 A 编进镜像。
 # ============================================================================
 
 on:
@@ -22,20 +30,20 @@ on:
         default: 'GL-MT5000'
         type: choice
         options:
-          - JDC-AX6600
           - GL-MT5000
+          - JDC-AX6600
       source_ref:
         description: "覆盖映射表里的分支/tag（留空 = 用 configs/DSF/device_mapping.conf 的值）"
         required: false
         default: ""
         type: string
       custom_packages:
-        description: "额外第三方包（空格分隔，可选；会叠加到 third-party.config 之后）"
+        description: "额外第三方包（空格分隔，追加到 third-party.config 之后）"
         required: false
         default: ""
         type: string
       make_jobs:
-        description: "并行度（-j3 较稳；-j4 快但有 OOM 风险）"
+        description: "并行度"
         required: false
         default: '-j3'
         type: choice
@@ -43,14 +51,9 @@ on:
           - '-j2'
           - '-j3'
           - '-j4'
-      kmods_feed_base:
-        description: "自建 kmods 源的基址（留空 = 自动 https://<owner>.github.io/<repo>）"
-        required: false
-        default: ""
-        type: string
 
 permissions:
-  contents: write        # 建 Release 必需
+  contents: write
 
 concurrency:
   group: build-dsf-${{ github.event.inputs.target_device }}
@@ -62,7 +65,6 @@ env:
   SOURCE_REF: ${{ github.event.inputs.source_ref }}
   CUSTOM_PACKAGE_EXTRA: ${{ github.event.inputs.custom_packages }}
   MAKE_JOBS: ${{ github.event.inputs.make_jobs }}
-  KMODS_FEED_BASE_OVERRIDE: ${{ github.event.inputs.kmods_feed_base }}
 
 jobs:
   build:
@@ -92,12 +94,10 @@ jobs:
               if grep -q $'\r' "$1"; then echo "FAIL $1 含 CRLF"; FAIL=1; return 0; fi
               if sh -n "$1" 2>&1; then echo "OK(sh)   $1"; else echo "FAIL(sh) $1"; FAIL=1; fi
           }
-          # 脚本：公共 + DSF
           for f in shell/*.sh shell/DSF/*.sh; do check_bash "$f"; done
-          check_bash "Third-Party/DSF/third-party.config"
           check_bash "Third-Party/third-party.config"
-          # overlay：DSF 优先，回退公共目录
-          for d in "files/DSF/${TARGET_DEVICE:-GL-MT5000}" "files/${TARGET_DEVICE:-GL-MT5000}"; do
+          check_bash "Third-Party/DSF/third-party.config"
+          for d in "files/${TARGET_DEVICE:-GL-MT5000}" "files/DSF/${TARGET_DEVICE:-GL-MT5000}"; do
             for f in "$d/etc/uci-defaults/"*; do check_sh "$f"; done
           done
           for f in files/etc/uci-defaults/*; do check_sh "$f"; done
@@ -126,10 +126,10 @@ jobs:
             libsqlite3-dev libcap-dev libgd-dev libjpeg-dev libpng-dev \
             libcurl4-gnutls-dev libxml2-dev libxslt-dev qemu-utils
 
+      # ======================================================================
+      # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
+      # ======================================================================
       - name: Resolve device meta (configs/DSF/device_mapping.conf)
-        # ======================================================================
-        # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
-        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -143,8 +143,6 @@ jobs:
           SEED_CONFIG="$(printf '%s'     "${VAL}" | cut -d'|' -f3 | xargs)"
           DSF_TARGET_PATH="$(printf '%s' "${VAL}" | cut -d'|' -f4 | xargs | sed 's#^targets/##')"
           PROFILE="$(printf '%s'         "${VAL}" | cut -d'|' -f5 | xargs)"
-
-          # 从种子配置推导 profile key
           if [ -z "${PROFILE}" ] && [ -f "${WORKSPACE}/${SEED_CONFIG}" ]; then
             PREFIX="CONFIG_TARGET_$(printf '%s' "${DSF_TARGET_PATH}" | tr '/' '_')_DEVICE_"
             SYM="$(grep -oE "^${PREFIX}[A-Za-z0-9_.-]+=y" "${WORKSPACE}/${SEED_CONFIG}" | head -n1 || true)"
@@ -152,15 +150,14 @@ jobs:
             echo ">>> 映射表未写 profile → 从种子推导: ${PROFILE}"
           fi
           [ -n "${REPO_URL}" ] && [ -n "${REPO_BRANCH}" ] && [ -n "${SEED_CONFIG}" ] && [ -n "${PROFILE}" ] \
-            || { echo "ERROR: 映射表字段不全（需要 源URL|分支|种子配置|target路径[|profile]）: ${VAL}"; exit 1; }
+            || { echo "ERROR: 映射表字段不全（源URL|分支|种子配置|target路径[|profile]）: ${VAL}"; exit 1; }
           [ -f "${WORKSPACE}/${SEED_CONFIG}" ] || { echo "ERROR: 种子配置不存在: ${SEED_CONFIG}"; exit 1; }
           if [ -n "${SOURCE_REF:-}" ]; then
             echo ">>> source_ref 覆盖分支: ${REPO_BRANCH} → ${SOURCE_REF}"
             REPO_BRANCH="${SOURCE_REF}"
           fi
-          echo ">>> device=${TARGET_DEVICE}"
-          echo ">>> repo=${REPO_URL}  branch=${REPO_BRANCH}"
-          echo ">>> seed=${SEED_CONFIG}  target=${DSF_TARGET_PATH}  profile=${PROFILE}"
+          echo ">>> device=${TARGET_DEVICE} repo=${REPO_URL} branch=${REPO_BRANCH}"
+          echo ">>> seed=${SEED_CONFIG} target=${DSF_TARGET_PATH} profile=${PROFILE}"
           {
             echo "REPO_URL=${REPO_URL}"
             echo "REPO_BRANCH=${REPO_BRANCH}"
@@ -185,8 +182,7 @@ jobs:
             echo "SRC_BRANCH=$(git -C src rev-parse --abbrev-ref HEAD)"
             echo "SRC_DATE=$(git -C src log -1 --format=%cd --date=iso)"
           } >> "$GITHUB_ENV"
-          echo ">>> feeds.conf.default:"
-          cat src/feeds.conf.default 2>/dev/null || echo "  (无 feeds.conf.default)"
+          echo ">>> feeds.conf.default:"; cat src/feeds.conf.default 2>/dev/null || echo "  (无)"
 
       - name: Prepare dl cache link & clean build dirs
         shell: bash
@@ -198,6 +194,11 @@ jobs:
           ln -sfn "${GITHUB_WORKSPACE}/dl-cache" dl
           ls -ld dl "${GITHUB_WORKSPACE}/dl-cache"
 
+      # ======================================================================
+      # feeds 额外项（可选）：configs/DSF/feeds.extra.conf
+      #   同名 feed → 替换 URL；新名字 → 追加
+      #   例：src-git m0eakpatch https://github.com/m0eak/openwrt_patch.git
+      # ======================================================================
       - name: Apply extra feeds (optional)
         shell: bash
         run: |
@@ -223,23 +224,18 @@ jobs:
           echo ">>> 应用后的 feed 清单:"; cat feeds.conf.default
 
       - name: Update & Install feeds
-        # ======================================================================
-        # feeds：第三方源各有自己的 feeds.conf.default，全部按源码自带清单处理
-        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
-          echo ">>> 本次使用的 feed 清单:"
-          cat feeds.conf.default 2>/dev/null || cat feeds.conf 2>/dev/null || echo "  (无)"
-
+          echo ">>> 本次使用的 feed 清单:"; cat feeds.conf.default 2>/dev/null || true
           rm -rf ./feeds ./data/feeds-*.tmp ./package/feeds
           for i in 1 2 3; do
             ./scripts/feeds update -a && break || { echo "feeds update 失败，重试 ${i}/3"; sleep 5; }
           done
           ./scripts/feeds install -a
 
-          # ---- 清理收尾（必须在最后一次 feeds install -a 之后；路径不存在则跳过）----
+          # 清理收尾（必须在最后一次 feeds install -a 之后；路径不存在则跳过）
           for p in \
             feeds/luci/applications/luci-app-bmx7 \
             feeds/luci/applications/luci-app-babeld \
@@ -259,10 +255,10 @@ jobs:
           done
           echo ">>> feeds 阶段完成"
 
+      # ======================================================================
+      # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
+      # ======================================================================
       - name: Seed & trim configuration (DSF)
-        # ======================================================================
-        # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
-        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -270,36 +266,42 @@ jobs:
           bash ../shell/DSF/dsf_seed_config.sh "${SEED_CONFIG}" "${PROFILE}"
           test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
 
+      # ======================================================================
+      # 第三方包清单：公共 + DSF(可选) → 注入 .config（源码包走这条路）
+      #   apk 包在这里必然 MISS，属正常（见 Prepare Third-Party APKs）
+      # ======================================================================
       - name: Load Third-Party Config & Inject Plugins (DSF)
-        # ======================================================================
-        # 第三方包清单：DSF 优先，回退公共；注入后可自行开关
-        #   Third-Party/DSF/third-party.config  （可选，优先）
-        #   Third-Party/third-party.config      （回退）
-        #   注入项写进 .config，并落 tmp/injected-plugins.txt 供 Finalize/Release 使用
-        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
 
-          TP="${WORKSPACE}/Third-Party/DSF/third-party.config"
-          [ -f "${TP}" ] || TP="${WORKSPACE}/Third-Party/third-party.config"
-          [ -f "${TP}" ] || { echo "ERROR: 两处都没有 third-party.config"; exit 1; }
-          echo "=== STEP 1: source ${TP} ==="
-          # shellcheck disable=SC1090
-          source "${TP}"
-          CUSTOM_PACKAGES="${CUSTOM_PACKAGES:-}"
+          echo "=== STEP 1: source third-party.config（公共 + DSF 追加）==="
+          CUSTOM_PACKAGES=""
+          for TP in "${WORKSPACE}/Third-Party/third-party.config" \
+                    "${WORKSPACE}/Third-Party/DSF/third-party.config"; do
+            if [ -f "${TP}" ]; then
+              echo ">>> source ${TP}"
+              # shellcheck disable=SC1090
+              source "${TP}"
+            else
+              echo ">>> 跳过（不存在）: ${TP}"
+            fi
+          done
           CUSTOM_PACKAGE_EXTRA="${CUSTOM_PACKAGE_EXTRA:-}"
           CUSTOM_PACKAGES="$(printf '%s %s' "${CUSTOM_PACKAGES}" "${CUSTOM_PACKAGE_EXTRA}" | xargs)"
           echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
           echo "CUSTOM_PACKAGES=${CUSTOM_PACKAGES}" >> "$GITHUB_ENV"
 
-          # ---- STEP 2: 注入（对源码树没有的包只告警，不拦构建）----
-          echo "=== STEP 2: 注入到 .config ==="
+          echo "=== STEP 2: 注入源码包到 .config（apk 包在此跳过）==="
           mkdir -p tmp
           : > tmp/injected-plugins.txt
+          APK_ONLY="${APK_ONLY_PKGS:-luci-app-store luci-app-quickstart luci-i18n-quickstart-zh-cn}"
           MISS=""
           for p in $(printf '%s\n' "${CUSTOM_PACKAGES}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            case " ${APK_ONLY} " in
+              *" ${p} "*) echo "  SKIP ${p}（apk 交付，见 Prepare Third-Party APKs）"; continue ;;
+            esac
             if grep -qE "^[[:space:]]*config[[:space:]]+PACKAGE_${p}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
               ./scripts/config --enable "CONFIG_PACKAGE_${p}"
               echo "CONFIG_PACKAGE_${p}" >> tmp/injected-plugins.txt
@@ -308,36 +310,20 @@ jobs:
               MISS="${MISS} ${p}"
             fi
           done
-          [ -z "${MISS}" ] || echo "::warning::以下包在本源树不存在，已跳过:${MISS}"
+          [ -z "${MISS}" ] || echo "::warning::以下包在本源树不存在（若为 apk 包请加入 APK_ONLY_PKGS）:${MISS}"
           echo ">>> 已记录注入项 $(wc -l < tmp/injected-plugins.txt) 个"
 
-          # ---- STEP 3: 可选裁剪脚本（有就执行）----
+          echo "=== STEP 3: 可选裁剪脚本 ==="
           if [ -f ../shell/DSF/trim_config.sh ]; then
-            echo "=== STEP 3: shell/DSF/trim_config.sh ==="
             bash ../shell/DSF/trim_config.sh
           else
-            echo "=== STEP 3: 无 shell/DSF/trim_config.sh（跳过）==="
+            echo ">>> 无 shell/DSF/trim_config.sh（跳过）"
           fi
 
           make defconfig
           echo "=== STEP 4: 汇总 ==="
           echo "Device: ${TARGET_DEVICE}"
           echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
-
-      - name: Fetch DSF third-party APKs (offline install)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euxo pipefail
-          OUT_DIR="${WORKSPACE}/files/DSF/${TARGET_DEVICE}/usr/share/third-party"
-          mkdir -p "${OUT_DIR}"
-          APK_REPO="nslookupkx530-hue/apk" \
-          APK_BRANCH="My" \
-          APK_ARCH="arm64-a53" \
-          APK_GROUPS="passwall2 aurora" \
-          OUT_DIR="${OUT_DIR}" \
-          bash shell/DSF/fetch-dsf-apks.sh
 
       - name: Apply custom files (common + device)
         shell: bash
@@ -348,15 +334,13 @@ jobs:
           FIRMWARE_FILES_DIR="${SOURCE_DIR}/files"
           mkdir -p "${FIRMWARE_FILES_DIR}"
 
-          # ---- 1) 公共层 ----
+          # 1) 公共层
           if [ -d "${REPO_FILES_DIR}/etc" ]; then
             cp -af "${REPO_FILES_DIR}/etc" "${FIRMWARE_FILES_DIR}/"
             echo ">>> 已应用公共 overlay: files/etc"
           fi
 
-          # ---- 2) 设备层：按顺序叠加（后面的覆盖前面的）----
-          #    files/<设备>/        （旧目录，放你的 uci-defaults / init.d）
-          #    files/DSF/<设备>/    （DSF 目录，放 apk 等；优先级更高）
+          # 2) 设备层：按顺序叠加（后覆盖前）
           APPLIED=0
           for d in "${REPO_FILES_DIR}/${TARGET_DEVICE}" "${REPO_FILES_DIR}/DSF/${TARGET_DEVICE}"; do
             if [ -d "$d" ]; then
@@ -369,76 +353,127 @@ jobs:
           done
           [ "${APPLIED}" -gt 0 ] || { echo "ERROR: 找不到设备 overlay（files/${TARGET_DEVICE} 或 files/DSF/${TARGET_DEVICE}）"; exit 1; }
 
-          # ---- 3) 兼容旧目录名 ----
+          # 3) 兼容旧目录名
           if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ] && [ ! -d "${FIRMWARE_FILES_DIR}/etc/third-party" ]; then
             mv "${FIRMWARE_FILES_DIR}/etc/ithird-party" "${FIRMWARE_FILES_DIR}/etc/third-party"
             echo ">>> 已重命名 etc/ithird-party → etc/third-party"
           fi
 
-          # ---- 4) 网络配置必须存在 ----
+          # 4) 网络配置必须存在
           NET_CONF="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-custom-network"
           if [ ! -f "${NET_CONF}" ]; then
             echo "ERROR: 缺少 ${NET_CONF}"
-            echo "--- files/${TARGET_DEVICE}/ ---";      find "${REPO_FILES_DIR}/${TARGET_DEVICE}"      -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
-            echo "--- files/DSF/${TARGET_DEVICE}/ ---";  find "${REPO_FILES_DIR}/DSF/${TARGET_DEVICE}"  -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
+            echo "--- files/${TARGET_DEVICE}/ ---";     find "${REPO_FILES_DIR}/${TARGET_DEVICE}"     -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
+            echo "--- files/DSF/${TARGET_DEVICE}/ ---"; find "${REPO_FILES_DIR}/DSF/${TARGET_DEVICE}" -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
             exit 1
           fi
           chmod 0755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
           [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
           [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
-          # ---- 5) docker 门控 ----
+          # 5) docker 门控
           UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
           if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/DSF/plugins.cfg" 2>/dev/null \
              || grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null \
              || grep -qxF 'CONFIG_PACKAGE_docker' "${SOURCE_DIR}/tmp/injected-plugins.txt" 2>/dev/null; then
             echo ">>> ENABLE_DOCKER=1 → 打包 99-docker-firewall"
           else
-            rm -f "${UCI_DOCKER}"
-            echo ">>> 未启用 docker → 已移除 99-docker-firewall"
+            rm -f "${UCI_DOCKER}"; echo ">>> 未启用 docker → 已移除 99-docker-firewall"
+          fi
+          echo ">>> 网络配置预览:"; cat "${NET_CONF}"
+
+      # ======================================================================
+      # 第三方 apk：从你们的 apk 仓库 run/<arch>/ 取（.run 自动解包）
+      #   CUSTOM_PACKAGES 来自上一步（已写入 $GITHUB_ENV）
+      #   开 aurora 时需要 MATCH_OVERRIDE（名字与仓库布局对不上）
+      # ======================================================================
+      - name: Prepare Third-Party APKs
+        shell: bash
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/src
+          REPO: https://github.com/nslookupkx530-hue/apk.git
+          BRANCHES: "My master"
+          ALLOW_MISSING: "1"
+          # 需要时追加：MATCH_OVERRIDE: "luci-app-aurora-config=aurora luci-i18n-aurora-config-zh-cn=aurora"
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          bash ../shell/apk-prepare-packages.sh
+
+      - name: Install Third-Party APKs into image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OPENWRT_DIR="${WORKSPACE}/src"
+          FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
+          REPO_FILES_DIR="${WORKSPACE}/files"
+          APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
+
+          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/init.d" \
+                   "${FIRMWARE_FILES_DIR}/etc/rc.d"
+
+          APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          [ "${APK_COUNT}" -gt 0 ] || { echo "ERROR: ${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
+          find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' \
+            -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
+          echo ">>> 已拷入 ${APK_COUNT} 个第三方 apk"
+
+          if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ]; then
+            cp -af "${FIRMWARE_FILES_DIR}/etc/ithird-party/." "${FIRMWARE_FILES_DIR}/etc/third-party/"
+            rm -rf "${FIRMWARE_FILES_DIR}/etc/ithird-party"
+            echo ">>> etc/ithird-party → etc/third-party 已合并"
           fi
 
-          echo ">>> 网络配置预览:"; cat "${NET_CONF}"
-          echo ">>> overlay 顶层:"; find "${FIRMWARE_FILES_DIR}" -maxdepth 3 | sort | head -60
+          SRC_INIT="$(find "${REPO_FILES_DIR}" -type f -name 'apk-install' -print -quit 2>/dev/null || true)"
+          SRC_INSTALLER="$(find "${REPO_FILES_DIR}" -type f -name 'install_third_party_apk.sh' -print -quit 2>/dev/null || true)"
+          DST_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
+          DST_INSTALLER="${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+          [ -f "${DST_INIT}" ]      || { [ -n "${SRC_INIT}" ]      && install -m 0755 "${SRC_INIT}" "${DST_INIT}"; }
+          [ -f "${DST_INSTALLER}" ] || { [ -n "${SRC_INSTALLER}" ] && install -m 0755 "${SRC_INSTALLER}" "${DST_INSTALLER}"; }
+          chmod 0755 "${DST_INIT}" "${DST_INSTALLER}" 2>/dev/null || true
 
+          ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+          test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+          echo ">>> 首启服务已启用: /etc/rc.d/S99apk-install"
+
+          echo ">>> 固件内第三方 apk:"
+          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' \
+            -exec ls -lh {} \;
+          ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+
+      # ======================================================================
+      # 自建 kmods 源：写进固件（内核与官方不同源 → 官方 kmods 永远不可用）
+      #   发布由 publish-kmods-gh-pages.yml 在构建成功后自动完成
+      # ======================================================================
       - name: Inject own kmods feed into image (uci-defaults)
-        # ==================================================================
-        # 自建 kmods 源：本固件内核与官方不同源 → 官方 kmods 永远对不上，
-        # 设备端必须有指向 gh-pages 上自建库的源，否则装依赖 kmod 的 apk 会报缺源。
-        # 发布由 .github/workflows/publish-kmods-gh-pages.yml 在构建成功后自动完成。
-        # ==================================================================
         shell: bash
         run: |
           set -euxo pipefail
           OWNER="${GITHUB_REPOSITORY_OWNER}"
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          if [ "${REPO_NAME}" = "${OWNER}.github.io" ]; then
-            BASE="https://${OWNER}.github.io"
-          else
-            BASE="https://${OWNER}.github.io/${REPO_NAME}"
-          fi
+          if [ "${REPO_NAME}" = "${OWNER}.github.io" ]; then BASE="https://${OWNER}.github.io"; else BASE="https://${OWNER}.github.io/${REPO_NAME}"; fi
           [ -n "${KMODS_FEED_BASE_OVERRIDE:-}" ] && BASE="${KMODS_FEED_BASE_OVERRIDE}"
           FEED_URL="${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
           echo ">>> 自建 kmods 源: ${FEED_URL}"
           echo "KMODS_FEED_URL=${FEED_URL}" >> "$GITHUB_ENV"
-
           D="${WORKSPACE}/src/files/etc/uci-defaults"
           mkdir -p "$D"
           cat > "${D}/99-dsf-own-kmods" <<EOF
-          #!/bin/sh
-          # 由 DSF 构建注入：自建 kmods 源（本固件内核与官方不同源，官方 kmods 源不可用）
-          # 每次构建后由 publish-kmods-gh-pages.yml 更新
-          mkdir -p /etc/apk/repositories.d
-          echo "${FEED_URL}" > /etc/apk/repositories.d/99-dsf-own-kmods.list
-          exit 0
-          EOF
+#!/bin/sh
+# 由 DSF 构建注入：自建 kmods 源（本固件内核与官方不同源）
+mkdir -p /etc/apk/repositories.d
+echo "${FEED_URL}" > /etc/apk/repositories.d/99-dsf-own-kmods.list
+exit 0
+EOF
           chmod 0755 "${D}/99-dsf-own-kmods"
           cat "${D}/99-dsf-own-kmods"
 
+      # ======================================================================
+      # Finalize：再 defconfig + 收窄断言 + 注入项检查 + 范围诊断
+      # ======================================================================
       - name: Finalize Configuration (defconfig + 校验)
-        # ======================================================================
-        # Finalize：再 defconfig 一次 + 收窄断言 + 注入项落点检查 + 范围诊断
-        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -451,30 +486,20 @@ jobs:
           [ "${DEV_ON}" = "1" ] || { echo "ERROR: 收窄被第二次 defconfig 打破（${DEV_ON} 台）"; exit 1; }
 
           SEL_ON="$(grep -c '^CONFIG_PACKAGE_.*=y' .config || true)"
-          MENU_ON="$(grep -cE '^[[:space:]]*config[[:space:]]+PACKAGE_' tmp/.config-package.in || true)"
-          echo ">>> [诊断] 已选包数: ${SEL_ON}   菜单可见包数: ${MENU_ON}"
+          echo ">>> [诊断] 已选包数: ${SEL_ON}   菜单可见包数: $(grep -cE '^[[:space:]]*config[[:space:]]+PACKAGE_' tmp/.config-package.in || true)"
           echo ">>> [诊断] ALL 系列: $(grep -E '^CONFIG_(ALL|ALL_KMODS|ALL_NONSHARED)=' .config || echo '(未启用)')"
-          [ "${SEL_ON}" -gt 1500 ] && echo "::warning::已选包数 ${SEL_ON} 偏多，可能把整个 feed 都编了" || true
           echo ">>> ARCH_PACKAGES = $(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
 
           awk '/^CONFIG_PACKAGE_[^=]*=y$/{sub(/=y$/,"");print}' .config | tr -d '[:blank:]' | sort -u > tmp/enabled-symbols.txt
-          echo ">>> 已启用 CONFIG_PACKAGE_* 数量: $(wc -l < tmp/enabled-symbols.txt)"
-
-          # 注入项落点检查：DSF 源缺包属正常差异 → 告警 + 从清单剔除，不拦构建
           MISSING_OPT=""
           if [ -s tmp/injected-plugins.txt ]; then
             while read -r opt; do
               [ -n "${opt}" ] || continue
-              if grep -qxF "${opt}" tmp/enabled-symbols.txt; then
-                echo "  OK   ${opt}"
-              else
-                echo "  MISS ${opt}"
-                MISSING_OPT="${MISSING_OPT} ${opt}"
-              fi
+              if grep -qxF "${opt}" tmp/enabled-symbols.txt; then echo "  OK   ${opt}"; else echo "  MISS ${opt}"; MISSING_OPT="${MISSING_OPT} ${opt}"; fi
             done < tmp/injected-plugins.txt
           fi
           if [ -n "${MISSING_OPT}" ]; then
-            echo "::warning::以下注入项在 defconfig 后不存在，已跳过:${MISSING_OPT}"
+            echo "::warning::以下注入项 defconfig 后不存在，已跳过:${MISSING_OPT}"
             TMPF="$(mktemp)"
             while read -r opt; do
               [ -n "${opt}" ] || continue
@@ -482,10 +507,8 @@ jobs:
               echo "${opt}" >> "${TMPF}"
             done < tmp/injected-plugins.txt
             mv "${TMPF}" tmp/injected-plugins.txt
-            echo ">>> 已从注入清单剔除未生效项，剩余 $(wc -l < tmp/injected-plugins.txt) 项"
+            echo ">>> 已从注入清单剔除，剩余 $(wc -l < tmp/injected-plugins.txt) 项"
           fi
-
-          echo ">>> ip 相关: $(grep -E '^CONFIG_PACKAGE_ip-(full|tiny)=' .config || echo '(未选中)')"
           echo ">>> 配置校验通过"
 
       - name: Generate release notes
@@ -494,7 +517,6 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
-
           DATE_UTC="$(date -u +%F)"
           TAG="${TARGET_DEVICE}-DSF-${DATE_UTC}-${{ github.run_id }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -514,18 +536,17 @@ jobs:
             echo "build_time  : $(date -u '+%F %T UTC')"
             echo "run_id      : ${{ github.run_id }}"
             echo "config_md5  : $(md5sum .config | cut -d' ' -f1)"
-            echo "kmods_repo  : bin/targets/${DSF_TARGET_PATH}/kmods/<vermagic>/（本次构建产物＝自有 kmod 库）"
+            echo "kmods_feed  : ${KMODS_FEED_URL:-<未设置>}"
           } > "${WORKSPACE}/BUILDINFO.txt"
 
           PLIST="$(mktemp)"
-          grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config \
-            | grep -v '_INCLUDE_' | grep -vx 'CONFIG_PACKAGE_luci' \
+          grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config | grep -v '_INCLUDE_' | grep -vx 'CONFIG_PACKAGE_luci' \
             | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' >> "${PLIST}" || true
-          if [ -f tmp/injected-plugins.txt ]; then
-            grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt | sed 's/^CONFIG_PACKAGE_//' >> "${PLIST}" || true
-          fi
+          [ -f tmp/injected-plugins.txt ] && grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt | sed 's/^CONFIG_PACKAGE_//' >> "${PLIST}" || true
           sort -u "${PLIST}" -o "${PLIST}"
           echo ">>> LuCI/插件条目数: $(wc -l < "${PLIST}")"
+
+          APKS="$(find "${WORKSPACE}/src/packages" -maxdepth 1 -type f -name '*.apk' -printf '%f\n' 2>/dev/null | sort || true)"
 
           {
             echo "OpenWrt automated build release (DSF 第三方源)"
@@ -554,10 +575,18 @@ jobs:
             echo
             printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
             echo
-            echo "自建 Kmod 库"
+            echo "首次开机自动安装的第三方 APK"
             echo
-            echo "本固件内核与官方不同源，官方 kmods 源不可用；"
-            echo "自有 kmod 库来自本次构建产物 bin/targets/${DSF_TARGET_PATH}/kmods/<vermagic>/。"
+            if [ -n "${APKS}" ]; then
+              printf '%s\n' "${APKS}" | sed 's/^/- /'
+            else
+              echo "- (无)"
+            fi
+            echo
+            echo "自建 Kmod 源"
+            echo
+            echo "本固件内核与官方不同源，官方 kmods 源不可用。"
+            echo "自有 kmods 源：${KMODS_FEED_URL:-<未设置>}"
           } > "${WORKSPACE}/release-notes.md"
           rm -f "${PLIST}"
           echo ">>> release-notes.md 预览:"; cat "${WORKSPACE}/release-notes.md"
@@ -575,12 +604,10 @@ jobs:
 
       - name: Build firmware
         shell: bash
-        # step 超时 < job 超时：step 超时=失败（诊断会跑）；job 超时=取消（诊断不跑）
         timeout-minutes: 300
         run: |
           set -uo pipefail
           cd "${WORKSPACE}/src" || { echo "::error::源码目录不存在"; exit 1; }
-
           echo ">>> 本次构建: device=${TARGET_DEVICE:-?} repo=${REPO_URL:-?}@${REPO_BRANCH:-?} target=${DSF_TARGET_PATH:-?} profile=${PROFILE:-?}"
           echo ">>> [诊断] DEV_ON=$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)  SEL_ON=$(grep -cE '^CONFIG_PACKAGE_.*=y$' .config || true)"
           echo ">>> 磁盘:"; df -h / /home 2>/dev/null || true
@@ -588,9 +615,7 @@ jobs:
 
           export MAKEFLAGS="${MAKE_JOBS:--j3}"
           printf 'all:\n\t@echo "MAKEFLAGS=${MAKEFLAGS} OK"\n' > /tmp/mf-check.mk
-          if ! make -f /tmp/mf-check.mk all; then
-            echo "::error::MAKEFLAGS='${MAKEFLAGS}' 被 make 拒绝"; exit 2
-          fi
+          make -f /tmp/mf-check.mk all || { echo "::error::MAKEFLAGS='${MAKEFLAGS}' 被 make 拒绝"; exit 2; }
 
           echo ">>> 开始编译 (CPU=$(nproc), MAKEFLAGS=${MAKEFLAGS})"
           set +e
@@ -598,14 +623,8 @@ jobs:
           make 2>&1 | tee build.log
           BUILD_RC=${PIPESTATUS[0]}
 
-          # ==================================================================
-          # 失败自愈（本文件只服务这两个设备，无条件启用）
-          #   1) "未选中设备缺 staging 工件"（镜像组装会遍历整个 subtarget）
-          #      → 0 字节占位 + 增量重试，最多 20 轮
-          #   2) 其它情况 → 降级 -j1 全量重试一次
-          # 注意：缺失路径只能从 V=s 的重跑日志里抓——非 verbose 的 build.log
-          #       不含该错误文本（实测）
-          # ==================================================================
+          # 失败自愈：未选中设备缺 staging 工件 → 0 字节占位 + 增量重试
+          # 缺失路径只能从 V=s 的重跑日志里抓（非 verbose 的 build.log 不含该错误文本）
           if [ "${BUILD_RC}" -ne 0 ]; then
             export MAKEFLAGS="-j1"
             echo "::warning::构建失败（exit ${BUILD_RC}），进入占位自愈循环"
@@ -648,42 +667,6 @@ jobs:
           fi
           echo ">>> 编译成功"
 
-      - name: Compute vermagic & record kmods feed URL
-        id: km
-        if: success()
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-          KM_DIR="$(ls -d bin/targets/*/*/kmods/*/ 2>/dev/null | head -n1 || true)"
-          if [ -z "${KM_DIR}" ]; then
-            echo "::warning::没有 kmods 目录，kmods 源不会发布"
-            echo "vermagic=" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          VERMAGIC="$(basename "${KM_DIR%/}")"
-          OWNER="${GITHUB_REPOSITORY_OWNER}"; REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          [ "${REPO_NAME}" = "${OWNER}.github.io" ] && BASE="https://${OWNER}.github.io" || BASE="https://${OWNER}.github.io/${REPO_NAME}"
-          [ -n "${KMODS_FEED_BASE_OVERRIDE:-}" ] && BASE="${KMODS_FEED_BASE_OVERRIDE}"
-          EXACT="${BASE}/kmods/${TARGET_DEVICE}/${VERMAGIC}/packages.adb"
-          echo ">>> vermagic     = ${VERMAGIC}"
-          echo ">>> apk 数量     = $(find "${KM_DIR}" -maxdepth 1 -name '*.apk' | wc -l)"
-          echo ">>> 精确源 URL   = ${EXACT}"
-          echo ">>> 固定源 URL   = ${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
-          {
-            echo "kmods_vermagic : ${VERMAGIC}"
-            echo "kmods_feed     : ${EXACT}"
-            echo "kmods_feed_latest: ${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
-          } >> "${WORKSPACE}/BUILDINFO.txt"
-          {
-            echo
-            echo "自建 Kmod 源（本次内核）"
-            echo
-            echo "- vermagic: \`${VERMAGIC}\`"
-            echo "- 精确源（推荐写进设备）: ${EXACT}"
-            echo "- 固定源（每次构建后覆盖）: ${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
-          } >> "${WORKSPACE}/release-notes.md"
-          echo "vermagic=${VERMAGIC}" >> "$GITHUB_OUTPUT"
-
       - name: Diagnose build failure
         if: failure()
         continue-on-error: true
@@ -703,9 +686,7 @@ jobs:
           sudo -n dmesg 2>/dev/null | grep -iE 'out of memory|killed process' | tail -20 || echo "(无 OOM)"
           echo "::endgroup::"
           LOG=""
-          for f in "$SRC/build.log" "$WS/build.log"; do
-            [ -s "$f" ] && { echo ">>> 主日志: $f ($(wc -l < "$f") 行)"; LOG="$f"; }
-          done
+          for f in "$SRC/build.log" "$WS/build.log"; do [ -s "$f" ] && { echo ">>> 主日志: $f ($(wc -l < "$f") 行)"; LOG="$f"; }; done
           if [ -n "${LOG}" ]; then
             echo "::group::主日志尾部"
             grep -nE "ERROR: (package|target)/|failed to build|make\[[0-9]+\]: \*\*\*" "$LOG" | tail -30 || echo "(无)"
@@ -714,7 +695,7 @@ jobs:
           fi
           echo "::group::复现 target/linux/install (V=s)"
           timeout --signal=TERM 1500 make -j1 target/linux/install V=s > /tmp/img-vs.log 2>&1
-          echo ">>> 退出码 = $?  (0=已成过/竞态, 1=命令失败, 2=make 用法错误, 124=超时, 137=SIGKILL)"
+          echo ">>> 退出码 = $?  (0=竞态/已成过, 1=命令失败, 2=make 用法错误, 124=超时, 137=SIGKILL)"
           grep -nE "can not open input file|Error [0-9]|make\[[0-9]+\]: \*\*\*|No space|Killed" /tmp/img-vs.log | tail -30 || echo "(无)"
           tail -40 /tmp/img-vs.log
           echo "::endgroup::"
@@ -722,8 +703,7 @@ jobs:
           du -sh bin build_dir staging_dir tmp 2>/dev/null
           ls -la bin/targets/*/*/ 2>/dev/null | tail -40
           echo "##### staging_dir 下的 u-boot/fip/preloader 产出 #####"
-          find staging_dir -path '*/image/*' -type f \
-            \( -iname '*u-boot*' -o -iname '*fip*' -o -iname '*preloader*' \) 2>/dev/null | head -60 || true
+          find staging_dir -path '*/image/*' -type f \( -iname '*u-boot*' -o -iname '*fip*' -o -iname '*preloader*' \) 2>/dev/null | head -60 || true
           find staging_dir -path '*/image/*' -type f 2>/dev/null | wc -l
           echo "::endgroup::"
           cp -f /tmp/img-vs.log "${WS}/img-vs.log" 2>/dev/null || true
@@ -742,6 +722,32 @@ jobs:
             ${{ github.workspace }}/src/.config
             ${{ github.workspace }}/img-vs.log
 
+      - name: Compute vermagic (for kmods feed artifact)
+        id: km
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          KM_DIR="$(ls -d bin/targets/*/*/kmods/*/ 2>/dev/null | head -n1 || true)"
+          if [ -z "${KM_DIR}" ]; then echo "::warning::没有 kmods 目录"; echo "vermagic=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          VERMAGIC="$(basename "${KM_DIR%/}")"
+          echo ">>> vermagic=${VERMAGIC}  apk 数=$(find "${KM_DIR}" -maxdepth 1 -name '*.apk' | wc -l)"
+          echo "vermagic=${VERMAGIC}" >> "$GITHUB_OUTPUT"
+          {
+            echo "kmods_vermagic : ${VERMAGIC}"
+            echo "kmods_feed_exact: ${KMODS_FEED_URL%/packages.adb}/../${VERMAGIC}/packages.adb"
+          } >> "${WORKSPACE}/BUILDINFO.txt"
+
+      - name: Upload kmods feed artifact
+        if: success() && steps.km.outputs.vermagic != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.target_device }}-kmods-feed-${{ steps.km.outputs.vermagic }}
+          path: src/bin/targets/*/*/kmods/**
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Verify Images
         if: success()
         shell: bash
@@ -749,23 +755,14 @@ jobs:
           set -euxo pipefail
           cd "${WORKSPACE}/src"
           ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,60p' || true
-          IMG="$(find bin/targets -maxdepth 3 -type f \
-                 \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) -print -quit)"
+          IMG="$(find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) -print -quit)"
           [ -n "${IMG}" ] || { echo "ERROR: 没有找到固件镜像"; exit 1; }
           echo ">>> 生成镜像示例: ${IMG}"
-          echo ">>> 自有 kmod 库（本次产物）:"
-          ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (没有 kmods 目录)"
-          echo ">>> 设备端 distfeeds 应指向该 kmods 目录的发布地址（不要指向官方 kmods）"
-
-      - name: Upload kmods feed artifact
-        if: success() && steps.km.outputs.vermagic != ''
-        uses: actions/upload-artifact@v4
-        with:
-          # 命名规则 <设备>-kmods-feed-<vermagic>，发布 workflow 按这个前缀解析
-          name: ${{ github.event.inputs.target_device }}-kmods-feed-${{ steps.km.outputs.vermagic }}
-          path: src/bin/targets/*/*/kmods/**
-          if-no-files-found: warn
-          retention-days: 30
+          echo ">>> 自有 kmod 库（本次产物）:"; ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (无 kmods 目录)"
+          echo ">>> 固件内第三方 apk:"; find files/usr/share/third-party -maxdepth 1 -name '*.apk' -printf '%f\n' 2>/dev/null | sort || echo "  (无)"
+          echo ">>> 首启安装服务:"; ls -l files/etc/rc.d/S99apk-install 2>/dev/null || echo "  (无)"
+          echo ">>> 镜像清单里搜关键包:"
+          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null || echo "  (manifest 里没有上述包)"
 
       - name: Upload Artifacts
         if: success()
