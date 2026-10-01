@@ -11,6 +11,9 @@ on:
         type: choice
         options: [all, GL-MT5000, JDC-AX6600]
 
+permissions:
+  contents: read
+
 jobs:
   discover:
     runs-on: ubuntu-22.04
@@ -62,6 +65,70 @@ jobs:
           echo ">>> matrix={\"include\":[${ITEMS}]}"
           echo "matrix={\"include\":[${ITEMS}]}" >> "$GITHUB_OUTPUT"
 
+  # ======================================================================
+  # 新增：扫描该源的所有 ref —— 解决"该用哪个分支"的问题
+  #   feeds.conf（非 .default）才是 scripts/feeds 真正读的文件；
+  #   哪个 ref 多挂了 feed，缺包就能对上。
+  # ======================================================================
+  scanrefs:
+    needs: discover
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    name: Scan refs ${{ matrix.device }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+
+      - name: Scan all refs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DEVICE='${{ matrix.device }}'
+          REPO='${{ matrix.repo }}'
+          BASE_BRANCH='${{ matrix.branch }}'
+
+          echo ">>> ${DEVICE}  repo=${REPO}  当前映射 ref=${BASE_BRANCH}"
+          rm -rf repo
+          # 只取 commit/tree、不取 blob：快，且后续 git show 单个文件按需拉取
+          git clone --filter=blob:none --no-checkout "${REPO}" repo >/dev/null 2>&1
+
+          # 基准 ref 的 feed 名单（用于算"多挂了哪些"）
+          BF="feeds.conf"; git -C repo cat-file -e "${BASE_BRANCH}:${BF}" 2>/dev/null || BF="feeds.conf.default"
+          git -C repo show "${BASE_BRANCH}:${BF}" 2>/dev/null | awk '/^[[:space:]]*src-/{print $2}' | sort -u > /tmp/base-feeds.txt
+          echo ">>> 基准 ref 的 feed（文件 ${BF}）: $(paste -sd' ' /tmp/base-feeds.txt)"
+
+          {
+            echo "## ${DEVICE} — ref 扫描（${REPO}）"
+            echo ""
+            echo "基准 ref：\`${BASE_BRANCH}\`（feed: $(paste -sd' ' /tmp/base-feeds.txt)）"
+            echo ""
+            echo "| ref | 最后提交 | feeds 文件 | feed 数 | 比基准多挂的 feed |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          REFS="$( { git -C repo branch -r --format='%(refname:short)' | grep -v HEAD; git -C repo tag; } | sort -u | head -40 )"
+          for r in ${REFS}; do
+            D="$(git -C repo log -1 --format=%ci "${r}" 2>/dev/null || echo '?')"
+            F="feeds.conf"; git -C repo cat-file -e "${r}:${F}" 2>/dev/null || F="feeds.conf.default"
+            BODY="$(git -C repo show "${r}:${F}" 2>/dev/null || echo '')"
+            N="$(printf '%s\n' "${BODY}" | grep -cE '^[[:space:]]*src-' || true)"
+            printf '%s\n' "${BODY}" | awk '/^[[:space:]]*src-/{print $2}' | sort -u > /tmp/this-feeds.txt
+            EXTRA="$(comm -23 /tmp/this-feeds.txt /tmp/base-feeds.txt | paste -sd, -)"
+            CAND="$(git -C repo ls-tree -r --name-only "${r}" 2>/dev/null \
+                    | grep -E '^\.github/workflows/.*\.ya?ml$|^feeds\.conf$|(^|/)(build|diy|feeds|compile)[A-Za-z0-9_.-]*\.sh$' \
+                    | head -8 | paste -sd' ' -)"
+
+            echo "=============================================================="
+            echo "### ${r}   (${D})   ${F}  feed=${N}   extra=${EXTRA:-无}"
+            printf '%s\n' "${BODY}" | sed 's/^/    /'
+            echo "    candidate scripts: ${CAND:-无}"
+            printf '| `%s` | %s | %s | %s | %s |\n' "${r}" "${D%% *}" "${F}" "${N}" "${EXTRA:-—}" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo ">>> 提示：EXTRA 非空的 ref 就是"多挂了 feed"的；把它的 feeds 行抄进构建流程即可" 
+
   detect:
     needs: discover
     runs-on: ubuntu-22.04
@@ -75,6 +142,8 @@ jobs:
 
       - name: Collect facts
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           DEVICE='${{ matrix.device }}'
@@ -112,16 +181,14 @@ jobs:
           cd src
           COMMIT="$(git rev-parse HEAD)"; CDATE="$(git log -1 --format=%cd --date=iso)"
           echo ">>> ${DEVICE} commit=${COMMIT} date=${CDATE}"
-          echo "--- feeds.conf.default ---"; cat feeds.conf.default 2>/dev/null || true
+          echo "--- feeds 文件 ---"
+          if [ -f feeds.conf ]; then echo "[feeds.conf 存在]"; cat feeds.conf; else echo "[只有 feeds.conf.default]"; cat feeds.conf.default 2>/dev/null || true; fi
           echo "--- 包体系 ---"; ls -d package/system/apk package/system/opkg 2>/dev/null || echo "(都无)"
           echo "--- 版本线索 ---"; grep -m3 -E 'RELEASE|VERSION_NUMBER|VERSION_CODE' include/version.mk 2>/dev/null || true
           echo "--- 内核 ---"; grep -rhE '^KERNEL_PATCHVER|^LINUX_VERSION' target/linux/*/Makefile target/linux/*/*/target.mk 2>/dev/null | head -5
 
           # ================================================================
-          # 关键：必须先装 feeds！
-          #   不装 feeds 时 tmp/.config-package.in 里没有 feed 包，
-          #   make defconfig 会把凡是来自 feed 的包（bash/curl/luci-app-* …）
-          #   全当"不存在"丢掉 → 后面那份 MISS 清单全是假警报
+          # 关键：必须先装 feeds！否则 defconfig 会把所有 feed 包当"不存在"丢掉
           # ================================================================
           ./scripts/feeds update -a  > /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds update 失败"; exit 1; }
           ./scripts/feeds install -a >> /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds install 失败"; exit 1; }
@@ -154,10 +221,62 @@ jobs:
           echo ">>> 种子声明 $(wc -l < /tmp/seed.txt) / 本树可见 $(wc -l < /tmp/tree.txt) / defconfig 后启用 $(wc -l < /tmp/now.txt)"
           [ "$(wc -l < /tmp/tree.txt)" -gt 500 ] || echo "::warning::本树可见包符号数异常少，tmp/.config-package.in 格式可能不同"
 
-          comm -23 /tmp/seed.txt /tmp/now.txt    > /tmp/lost.txt      # 种子里声明、但没生效
-          comm -23 /tmp/lost.txt  /tmp/tree.txt  > /tmp/notfound.txt  # ① 本源树根本没有
-          comm -12 /tmp/lost.txt  /tmp/tree.txt  > /tmp/dropped.txt   # ② 存在但被 defconfig 丢掉（依赖不满足）
+          comm -23 /tmp/seed.txt /tmp/now.txt    > /tmp/lost.txt
+          comm -23 /tmp/lost.txt  /tmp/tree.txt  > /tmp/notfound.txt
+          comm -12 /tmp/lost.txt  /tmp/tree.txt  > /tmp/dropped.txt
 
+          # ================================================================
+          # 追查"缺的包该挂哪个 feed"
+          #   解析每条 feed 的 URL + pin，用 GitHub API 拉该 pin 处的完整文件树，
+          #   再逐个缺包去匹配
+          # ================================================================
+          echo "--- 哪些脚本/CI 会动 feeds ---"
+          grep -rln --include='*.yml' --include='*.yaml' --include='*.sh' --include='*.conf' -E 'src-git|src-link' . 2>/dev/null \
+            | grep -v -E '^\./(feeds|build_dir|staging_dir|tmp|dl|package/feeds)/' | head -15 || true
+
+          awk '/^[[:space:]]*src-git[[:space:]]+/{print $2, $3}' feeds.conf.default 2>/dev/null | tr -d '\r' > /tmp/feeds.list
+          echo ">>> 待查 feed: $(wc -l < /tmp/feeds.list) 条"
+          while read -r nm u; do
+            [ -n "${nm:-}" ] || continue
+            case "${u}" in
+              *github.com/*) : ;;
+              *) echo "  [${nm}] 非 GitHub，跳过: ${u}"; continue ;;
+            esac
+            slug="$(printf '%s' "${u}" | sed -E 's#^https?://github.com/##; s#\.git$##; s#/$##')"
+            ref="${u##*^}"; [ "${ref}" = "${u}" ] && ref="HEAD"
+            tree="$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' \
+                    "https://api.github.com/repos/${slug}/git/trees/${ref}?recursive=1" \
+                    | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
+            if [ -z "${tree}" ]; then echo "  [${nm}] 取不到 tree（${slug}@${ref}）"; continue; fi
+            printf '%s\n' "${tree}" > "/tmp/tree-${nm}.txt"
+            echo "  [${nm}] ${slug}@${ref}  文件数=$(wc -l < "/tmp/tree-${nm}.txt")"
+          done < /tmp/feeds.list
+
+          echo "--- 逐个缺包：哪个 feed 的上游有它 ---"
+          : > /tmp/where.txt
+          while read -r p; do
+            [ -n "${p}" ] || continue
+            hit=""
+            for f in /tmp/tree-*.txt; do
+              [ -f "${f}" ] || continue
+              if grep -qF "/${p}/" "${f}" || grep -qF "${p}/Makefile" "${f}"; then
+                hit="${hit} $(basename "${f}" .txt | sed 's/^tree-//')"
+              fi
+            done
+            if [ -z "${hit}" ]; then          # 退一步：包名首段模糊匹配（如 amneziawg-tools ← amneziawg）
+              alt="${p%%-*}"
+              for f in /tmp/tree-*.txt; do
+                [ -f "${f}" ] || continue
+                grep -qF "/${alt}/" "${f}" && hit="${hit} (疑似)${alt}@$(basename "${f}" .txt | sed 's/^tree-//')"
+              done
+            fi
+            printf '  %-44s %s\n' "${p}" "${hit:-<所有 feed 上游都没有 → 需新 feed 或改名>}"
+            printf '| `%s` | %s |\n' "${p}" "${hit:-**都没有**}" >> /tmp/where.txt
+          done < /tmp/notfound.txt
+
+          # ================================================================
+          # Job Summary
+          # ================================================================
           {
             echo "## ${DEVICE}"
             echo ""
@@ -168,15 +287,21 @@ jobs:
             echo "- 收窄前 device 选项数: **${DEV_ALL}**   已选包数: **${SEL}**"
             echo "- zh-cn 包: 种子 ${ZHCN_SEED} → defconfig 后 **${ZHCN}**"
             echo ""
-            echo "### ① 本源树根本没有（需要改名/旁路/删掉）—— $(wc -l < /tmp/notfound.txt) 个"
+            echo "### ① 本源树根本没有 —— $(wc -l < /tmp/notfound.txt) 个"
             echo '```'; sed 's/^/  /' /tmp/notfound.txt; echo '```'
-            echo "### ② 存在但没启用（依赖不满足，要查 depends）—— $(wc -l < /tmp/dropped.txt) 个"
+            echo "### ①附：它到底该挂哪个 feed"
+            echo ""
+            echo "| 缺包 | 上游哪个 feed 有 |"
+            echo "|---|---|"
+            cat /tmp/where.txt 2>/dev/null || true
+            echo ""
+            echo "### ② 存在但没启用（依赖不满足）—— $(wc -l < /tmp/dropped.txt) 个"
             echo '```'; sed 's/^/  /' /tmp/dropped.txt; echo '```'
             echo "### feed 清单"
             echo '```'; cat feeds.conf.default 2>/dev/null; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "===== 关键值 （便于复制到 device_mapping.conf）====="
-          echo "device=$DEVICE repo=$REPO branch=$BRANCH seed=$SEED profile=$PROFILE"
+          echo "===== 关键值 ====="
+          echo "device=${DEVICE} repo=${REPO} branch=${BRANCH} seed=${SEED} profile=${PROFILE}"
           echo "target=targets/${BOARD}/${SUB}  arch=${ARCH}  DEV_ALL=${DEV_ALL}  SYM_OK=${SYM_OK}"
           echo "notfound=$(wc -l < /tmp/notfound.txt)  dropped=$(wc -l < /tmp/dropped.txt)  zhcn=${ZHCN_SEED}->${ZHCN}"
