@@ -25,14 +25,23 @@ jobs:
           set -euo pipefail
           MAP=configs/DSF/device_mapping.conf
           SEL='${{ github.event.inputs.device }}'
+          # 格式: 设备名=源URL|分支或tag|种子配置|target路径|profile
+          #   -F'|' 之后 $1 = "设备名=源URL"，必须再按 = 拆一次（上次就是漏了这步）
           JSON="$(awk -F'|' -v sel="$SEL" '
-            /^[[:space:]]*#/ {next} /^[[:space:]]*$/ {next}
-            { split($0,a,"="); name=a[1]; gsub(/[[:space:]]/,"",name)
-              if (name=="") next
-              if (sel!="all" && name!=sel) next
+            /^[[:space:]]*#/ { next }
+            /^[[:space:]]*$/ { next }
+            {
+              name = $1; sub(/[[:space:]]*=[[:space:]]*.*$/, "", name)
+              url  = $1; sub(/^[^=]*=[[:space:]]*/,        "", url)
+              gsub(/[[:space:]]/, "", url)
+              if (name == "") next
+              if (sel != "all" && name != sel) next
               printf "%s{\"device\":\"%s\",\"repo\":\"%s\",\"branch\":\"%s\",\"seed\":\"%s\",\"profile\":\"%s\"}",
-                     (n++?",":""), name, $2, $3, $4, $5 }
+                     (n++ ? "," : ""), name, url, $2, $3, $4, $5
+            }
           ' "$MAP")"
+          [ -n "${JSON}" ] || { echo "ERROR: device_mapping.conf 解析为空（检查路径/格式）"; exit 1; }
+          echo ">>> 解析结果: ${JSON}"
           echo "matrix={\"include\":[${JSON}]}" >> "$GITHUB_OUTPUT"
 
   detect:
@@ -49,18 +58,42 @@ jobs:
       - name: Collect facts
         shell: bash
         run: |
-          set -uxo pipefail
-          DEVICE='${{ matrix.device }}'; REPO='${{ matrix.repo }}'
-          BRANCH='${{ matrix.branch }}'; SEED='${{ matrix.seed }}'; PROFILE='${{ matrix.profile }}'
+          set -euxo pipefail
+          DEVICE='${{ matrix.device }}'
+          REPO='${{ matrix.repo }}'
+          BRANCH='${{ matrix.branch }}'
+          SEED='${{ matrix.seed }}'
+          PROFILE='${{ matrix.profile }}'
+
+          # ---- 字段自检：错位在这里就报出来，不要等到 git clone 失败 ----
+          case "${REPO}" in
+            http*|git@*) : ;;
+            *) echo "::error::repo 字段不合法: '${REPO}'（device_mapping.conf 解析错位？）"; exit 1 ;;
+          esac
+          case "${BRANCH}" in
+            ""|*.config) echo "::error::branch 字段不合法: '${BRANCH}'（像种子文件路径，说明解析错位）"; exit 1 ;;
+          esac
+          case "${SEED}" in
+            *.config) : ;;
+            *) echo "::error::seed 字段不合法: '${SEED}'"; exit 1 ;;
+          esac
+          case "${PROFILE}" in
+            ""|*/*|*.config) echo "::error::profile 字段不合法: '${PROFILE}'"; exit 1 ;;
+          esac
+          echo ">>> device=${DEVICE} repo=${REPO} branch=${BRANCH} seed=${SEED} profile=${PROFILE}"
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential gcc make git perl python3 unzip file wget curl \
             libncurses-dev zlib1g-dev libssl-dev 2>/dev/null || true
+
           rm -rf src
-          if ! git clone --depth=1 -b "$BRANCH" "$REPO" src >/dev/null 2>&1; then
-            echo "## $DEVICE：克隆失败（分支 $BRANCH）" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          if ! git clone --depth=1 -b "${BRANCH}" "${REPO}" src >/dev/null 2>&1; then
+            echo "## ${DEVICE}：克隆失败（分支 ${BRANCH}）" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::克隆失败: ${REPO} @ ${BRANCH}"; exit 1
+          fi
           cd src
           COMMIT="$(git rev-parse HEAD)"; CDATE="$(git log -1 --format=%cd --date=iso)"
-          echo "device=$DEVICE commit=$COMMIT branch=$BRANCH seed=$SEED profile=$PROFILE"
+          echo ">>> ${DEVICE} commit=${COMMIT} date=${CDATE}"
           echo "--- feeds.conf.default ---"; cat feeds.conf.default 2>/dev/null || cat feeds.conf 2>/dev/null || echo "(无)"
           echo "--- 包体系 ---"; ls -d package/system/apk package/system/opkg 2>/dev/null || echo "(都无)"
           echo "--- 版本线索 ---"; grep -m3 -E 'RELEASE|VERSION_NUMBER|VERSION_CODE' include/version.mk 2>/dev/null || true
