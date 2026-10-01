@@ -1,4 +1,5 @@
 name: Detect Device Arch (DSF 第三方源)
+run-name: "Detect Device Arch (DSF 第三方源): ${{ inputs.device }}"
 
 on:
   workflow_dispatch:
