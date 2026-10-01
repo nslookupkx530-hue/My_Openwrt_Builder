@@ -1,4 +1,5 @@
 name: Detect Device Architecture
+run-name: Detect Device Architecture - ${{ inputs.device }}
 
 on:
   workflow_dispatch:
