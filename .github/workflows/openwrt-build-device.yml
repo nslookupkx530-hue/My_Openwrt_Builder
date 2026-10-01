@@ -1,4 +1,5 @@
 name: OpenWrt Build & Release
+run-name: OpenWrt Build & Release - ${{ inputs.device }}
 
 on:
   workflow_dispatch:
