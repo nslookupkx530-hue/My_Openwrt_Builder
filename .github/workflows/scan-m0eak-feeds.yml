@@ -1,13 +1,18 @@
-name: Scan m0eak feeds (找缺包的 feed)
-run-name: "Scan m0eak feeds by ${{ inputs.users }}"
+name: Scan feeds / apk repos (找缺包的来源)
+run-name: "Scan sources: users=[${{ inputs.users }}] repos=[${{ inputs.repos }}]"
 
 on:
   workflow_dispatch:
     inputs:
       users:
-        description: "要扫描的 GitHub 用户/组织（空格分隔）"
-        required: true
+        description: "扫这些人/组织的全部仓库（空格分隔，可留空）"
+        required: false
         default: "m0eak fanchmwrt"
+        type: string
+      repos:
+        description: "直接指定仓库，格式 owner/repo[@分支]（空格分隔）"
+        required: false
+        default: "nslookupkx530-hue/apk@My"
         type: string
 
 permissions:
@@ -17,15 +22,15 @@ jobs:
   scan:
     runs-on: ubuntu-22.04
     steps:
-      - name: Scan repos for missing packages
+      - name: Scan
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           USERS='${{ github.event.inputs.users }}'
+          REPOS_IN='${{ github.event.inputs.repos }}'
 
-          # 要找回的包（注意目录名可能与包名不同，如 amneziawg-tools ← amneziawg）
           cat > /tmp/need.txt <<'EOF'
           luci-app-passwall2
           luci-app-mosdns
@@ -40,53 +45,85 @@ jobs:
           default-settings-m0eak
           EOF
 
-          api() { curl -sSL --max-time 60 \
-                    -H "Authorization: Bearer ${GH_TOKEN}" \
+          api() { curl -sSL --max-time 60 -H "Authorization: Bearer ${GH_TOKEN}" \
                     -H 'Accept: application/vnd.github+json' "$1" || true; }
+          tree_of() {   # $1=owner/repo  $2=ref
+            api "https://api.github.com/repos/$1/git/trees/$2?recursive=1" \
+              | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' \
+              | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' || true
+          }
 
-          : > /tmp/hits.txt
+          : > /tmp/summary.txt
+          : > /tmp/detail.txt
+
+          # ---- 组装待扫列表：owner/repo@ref（ref 缺省 = HEAD）----
+          LIST=""
+          for R in ${REPOS_IN}; do LIST="${LIST} ${R}"; done
           for U in ${USERS}; do
-            echo "================ 用户/组织: ${U} ================"
-            REPOS=""
             for PG in 1 2 3; do
               P="$(api "https://api.github.com/users/${U}/repos?per_page=100&page=${PG}&type=all" \
-                   | grep -oE '"full_name":[[:space:]]*"[^"]+"' \
-                   | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+                   | grep -oE '"full_name":[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' || true)"
               [ -n "${P}" ] || break
-              REPOS="${REPOS} ${P}"
+              for r in ${P}; do LIST="${LIST} ${r}"; done
             done
-            REPOS="$(printf '%s\n' ${REPOS} | sort -u | head -80)"
-            echo ">>> 仓库数: $(printf '%s\n' "${REPOS}" | grep -c . || true)"
+          done
+          LIST="$(printf '%s\n' ${LIST} | sort -u | head -120)"
+          echo ">>> 待扫仓库 $(printf '%s\n' "${LIST}" | grep -c . || true) 个"
 
-            for R in ${REPOS}; do
-              TREE="$(api "https://api.github.com/repos/${R}/git/trees/HEAD?recursive=1" \
-                      | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' \
-                      | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' || true)"
-              [ -n "${TREE}" ] || { echo "    ${R}: 取不到 tree"; continue; }
-              printf '%s\n' "${TREE}" > /tmp/tree.txt
-              hit=""
-              while read -r p; do
-                [ -n "${p}" ] || continue
-                if grep -qF "/${p}/" /tmp/tree.txt; then hit="${hit} ${p}"; continue; fi
-                alt="${p%%-*}"
-                case "${alt}" in luci|kmod|lib|app|base|default) alt="" ;; esac
-                if [ -n "${alt}" ] && grep -qF "/${alt}/" /tmp/tree.txt; then hit="${hit} (疑似${alt})"; fi
-              done < /tmp/need.txt
-              if [ -n "${hit}" ]; then
-                echo "  ★ ${R}  →${hit}"
-                printf '| `%s` |%s |\n' "${R}" "${hit}" >> /tmp/hits.txt
-              else
-                echo "    ${R}  (无命中, 文件数=$(wc -l < /tmp/tree.txt))"
+          for ITEM in ${LIST}; do
+            R="${ITEM%@*}"; REF="${ITEM##*@}"; [ "${REF}" = "${ITEM}" ] && REF="HEAD"
+            TREE="$(tree_of "${R}" "${REF}")"
+            if [ -z "${TREE}" ] && [ "${REF}" != "HEAD" ]; then
+              echo "  ${R}@${REF}: 取不到，退回 HEAD"
+              REF="HEAD"; TREE="$(tree_of "${R}" "HEAD")"
+            fi
+            [ -n "${TREE}" ] || { echo "  ${R}: 取不到 tree（私有/不存在？）"; continue; }
+            printf '%s\n' "${TREE}" > /tmp/tree.txt
+
+            # ---- 判断仓库类型（就是你要放的那段）----
+            KIND="源码feed"
+            grep -qE '\.apk$'       /tmp/tree.txt && KIND="apk仓库"
+            grep -qF 'packages.adb' /tmp/tree.txt && KIND="${KIND}+有索引(packages.adb)"
+            grep -qF 'feeds.conf'   /tmp/tree.txt && KIND="${KIND}+含feeds.conf"
+            grep -qE '/Makefile$'   /tmp/tree.txt && KIND="${KIND}+有Makefile"
+
+            HITN=0; HITS=""
+            while read -r p; do
+              [ -n "${p}" ] || continue
+              if grep -qF "/${p}/" /tmp/tree.txt \
+                 || grep -qE "/${p}-[0-9]" /tmp/tree.txt \
+                 || grep -qE "/${p}[^/]*\.apk$" /tmp/tree.txt; then
+                HITN=$((HITN+1)); HITS="${HITS} ${p}"
+                PATHS="$(grep -E "/${p}/|/${p}-[0-9]|/${p}[^/]*\.apk$" /tmp/tree.txt | head -3 | paste -sd' ' -)"
+                printf '%-34s %-28s %s\n' "${R}@${REF}" "${p}" "${PATHS}" >> /tmp/detail.txt
+                continue
               fi
-            done
+              alt="${p%%-*}"
+              case "${alt}" in luci|kmod|lib|app|base|default) alt="" ;; esac
+              if [ -n "${alt}" ] && grep -qF "/${alt}/" /tmp/tree.txt; then
+                HITN=$((HITN+1)); HITS="${HITS} (疑似)${p}"
+                printf '%-34s %-28s (疑似) %s\n' "${R}@${REF}" "${p}" \
+                  "$(grep -F "/${alt}/" /tmp/tree.txt | head -3 | paste -sd' ' -)" >> /tmp/detail.txt
+              fi
+            done < /tmp/need.txt
+
+            if [ "${HITN}" -gt 0 ]; then
+              echo "★ ${R}@${REF}  [${KIND}]  命中 ${HITN}/11 →${HITS}"
+              printf '| `%s` | `%s` | %s | %s |\n' "${R}" "${REF}" "${KIND}" "${HITS//|/\\|}" >> /tmp/summary.txt
+            else
+              echo "  ${R}@${REF}  [${KIND}]  无命中"
+            fi
           done
 
           {
-            echo "## 含缺失包的仓库"
+            echo "## 扫描结果"
             echo ""
-            echo "| 仓库 | 命中 |"
-            echo "|---|---|"
-            cat /tmp/hits.txt 2>/dev/null || true
+            echo "| 仓库 | ref | 类型 | 命中的包 |"
+            echo "|---|---|---|---|"
+            cat /tmp/summary.txt 2>/dev/null || true
             echo ""
-            echo "用法：命中「luci 类」的仓库替换 luci feed URL；命中「packages 类」的替换 packages feed URL（或作为额外 feed）。"
+            echo "### 命中路径明细（看架构目录 / 是否是完整 feed）"
+            echo '```'
+            cat /tmp/detail.txt 2>/dev/null || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
