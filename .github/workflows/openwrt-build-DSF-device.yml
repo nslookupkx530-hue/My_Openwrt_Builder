@@ -43,6 +43,11 @@ on:
           - '-j2'
           - '-j3'
           - '-j4'
+      kmods_feed_base:
+        description: "自建 kmods 源的基址（留空 = 自动 https://<owner>.github.io/<repo>）"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write        # 建 Release 必需
@@ -57,6 +62,7 @@ env:
   SOURCE_REF: ${{ github.event.inputs.source_ref }}
   CUSTOM_PACKAGE_EXTRA: ${{ github.event.inputs.custom_packages }}
   MAKE_JOBS: ${{ github.event.inputs.make_jobs }}
+  KMODS_FEED_BASE_OVERRIDE: ${{ github.event.inputs.kmods_feed_base }}
 
 jobs:
   build:
@@ -339,10 +345,44 @@ jobs:
           fi
           echo ">>> 网络配置预览:"; cat "${NET_CONF}"
 
-      # ======================================================================
-      # Finalize：再 defconfig 一次 + 收窄断言 + 注入项落点检查 + 范围诊断
-      # ======================================================================
+      - name: Inject own kmods feed into image (uci-defaults)
+        # ==================================================================
+        # 自建 kmods 源：本固件内核与官方不同源 → 官方 kmods 永远对不上，
+        # 设备端必须有指向 gh-pages 上自建库的源，否则装依赖 kmod 的 apk 会报缺源。
+        # 发布由 .github/workflows/publish-kmods-gh-pages.yml 在构建成功后自动完成。
+        # ==================================================================
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          if [ "${REPO_NAME}" = "${OWNER}.github.io" ]; then
+            BASE="https://${OWNER}.github.io"
+          else
+            BASE="https://${OWNER}.github.io/${REPO_NAME}"
+          fi
+          [ -n "${KMODS_FEED_BASE_OVERRIDE:-}" ] && BASE="${KMODS_FEED_BASE_OVERRIDE}"
+          FEED_URL="${BASE}/kmods/${TARGET_DEVICE}/latest/packages.adb"
+          echo ">>> 自建 kmods 源: ${FEED_URL}"
+          echo "KMODS_FEED_URL=${FEED_URL}" >> "$GITHUB_ENV"
+
+          D="${WORKSPACE}/src/files/etc/uci-defaults"
+          mkdir -p "$D"
+          cat > "${D}/99-dsf-own-kmods" <<EOF
+          #!/bin/sh
+          # 由 DSF 构建注入：自建 kmods 源（本固件内核与官方不同源，官方 kmods 源不可用）
+          # 每次构建后由 publish-kmods-gh-pages.yml 更新
+          mkdir -p /etc/apk/repositories.d
+          echo "${FEED_URL}" > /etc/apk/repositories.d/99-dsf-own-kmods.list
+          exit 0
+          EOF
+          chmod 0755 "${D}/99-dsf-own-kmods"
+          cat "${D}/99-dsf-own-kmods"
+
       - name: Finalize Configuration (defconfig + 校验)
+        # ======================================================================
+        # Finalize：再 defconfig 一次 + 收窄断言 + 注入项落点检查 + 范围诊断
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
