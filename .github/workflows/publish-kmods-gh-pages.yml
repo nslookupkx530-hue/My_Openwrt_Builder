@@ -1,0 +1,211 @@
+name: Publish Kmods Feed (gh-pages)
+
+# 触发：DSF 构建成功后自动发布；也可手动指定 run-id 补发
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "要补发的构建 run id（留空 = 只重新生成索引）"
+        required: false
+        default: ""
+        type: string
+  workflow_run:
+    workflows:
+      # ⚠️ 这里必须写【workflow 的 name】，不是文件名
+      - "OpenWrt Build & Release (DSF 第三方源)"
+    types: [completed]
+
+permissions:
+  contents: write      # 推 gh-pages
+  actions: read        # 读上游 run 的 artifacts
+
+jobs:
+  publish:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve run id & version
+        id: rid
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RID="${{ github.event.workflow_run.id }}"
+          else
+            RID="${{ github.event.inputs.run_id }}"
+          fi
+          VERSION="$(date -u +%Y-%m-%d)-${RID:-${{ github.run_id }}}"
+          echo "RID=${RID}"         >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "has_rid=$([ -n "${RID}" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo ">>> run=${RID:-<无>}  version=${VERSION}"
+
+      - name: Download artifacts
+        if: steps.rid.outputs.has_rid == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ env.RID }}
+          path: downloaded
+
+      - name: Check artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "=============================="
+          echo "Downloaded artifacts"
+          echo "=============================="
+          if [ -d downloaded ]; then find downloaded -maxdepth 3 -type f | sort; else echo "No artifact found"; fi
+
+      - name: Prepare gh-pages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          if git ls-remote --heads "${REPO_URL}" gh-pages | grep -q gh-pages; then
+            echo "gh-pages 已存在"
+            git clone --branch gh-pages --single-branch --depth=1 "${REPO_URL}" gh-pages
+          else
+            echo "创建 gh-pages"
+            mkdir gh-pages && cd gh-pages
+            git init -b gh-pages
+            git config user.name "github-actions"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git remote add origin "${REPO_URL}"
+            echo "# OpenWrt DSF Kmods Feed" > README.md
+            git add README.md
+            git commit -m "Create gh-pages"
+            git push origin gh-pages
+            cd ..
+          fi
+
+      - name: Publish kmods feed
+        shell: bash
+        run: |
+          set -euxo pipefail
+          [ -d downloaded ] || { echo "没有 artifact，跳过发布"; exit 0; }
+
+          for artifact in downloaded/*/; do
+            ART="${artifact%/}"; NAME="$(basename "${ART}")"
+            case "${NAME}" in
+              *-kmods-feed-*)  KIND=kmods;    DEVICE="${NAME%-kmods-feed-*}"  ;;
+              *-apk-feed-*)    KIND=packages; DEVICE="${NAME%-apk-feed-*}"    ;;
+              *) echo "跳过无关 artifact: ${NAME}"; continue ;;
+            esac
+            echo ">>> ${KIND} / ${DEVICE}  ← ${NAME}"
+
+            # 核心包 feed（可选，体积大，建议只在确实需要时上传）
+            if [ "${KIND}" = "packages" ]; then
+              DEST="gh-pages/packages/${DEVICE}/latest"
+              rm -rf "${DEST}"; mkdir -p "${DEST}"
+              cp -rf "${ART}/." "${DEST}/"
+              cp -rf "${DEST}/." "gh-pages/archive/${VERSION}/${DEVICE}/packages/"
+              echo ">>> 发布核心 feed: ${DEST} ($(du -sh "${DEST}" | cut -f1))"
+              continue
+            fi
+
+            # kmods feed
+            PDB="$(find "${ART}" -type f -name packages.adb | head -n1 || true)"
+            [ -n "${PDB}" ] || { echo "!! ${NAME} 里没有 packages.adb，跳过"; continue; }
+            SRC="$(dirname "${PDB}")"
+            VER="$(basename "${SRC}")"          # = vermagic
+            DEST="gh-pages/kmods/${DEVICE}/${VER}"
+            ARCH="gh-pages/archive/${VERSION}/${DEVICE}/kmods/${VER}"
+            mkdir -p "${DEST}" "${ARCH}"
+            find "${SRC}" -maxdepth 1 -type f \( -name '*.apk' -o -name 'packages.adb' \) -exec cp -f {} "${DEST}/" \;
+            cp -rf "${DEST}/." "${ARCH}/"
+            echo ">>> 发布: ${DEST}  ($(find "${DEST}" -maxdepth 1 -name '*.apk' | wc -l) 个 apk)"
+
+            # latest = 该设备最新一次的 vermagic（供固件里固定的 URL 使用）
+            rm -rf "gh-pages/kmods/${DEVICE}/latest"
+            mkdir -p "gh-pages/kmods/${DEVICE}/latest"
+            cp -rf "${DEST}/." "gh-pages/kmods/${DEVICE}/latest/"
+            echo ">>> latest 已更新: gh-pages/kmods/${DEVICE}/latest"
+          done
+
+      - name: Generate indexes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          REPO_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+
+          # 根索引
+          {
+            echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OpenWrt DSF Feed</title></head><body>"
+            echo "<h1>OpenWrt DSF Feed</h1><ul>"
+            [ -d gh-pages/kmods ] && echo "<li><a href=\"kmods/\">kmods/</a></li>"
+            [ -d gh-pages/packages ] && echo "<li><a href=\"packages/\">packages/</a></li>"
+            [ -d gh-pages/archive ] && echo "<li><a href=\"archive/\">archive/</a></li>"
+            echo "</ul></body></html>"
+          } > gh-pages/index.html
+
+          # kmods 设备索引
+          if [ -d gh-pages/kmods ]; then
+            {
+              echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Kmods</title></head><body>"
+              echo "<h1>Kmods Feed</h1><ul>"
+              for d in gh-pages/kmods/*/; do
+                [ -d "$d" ] || continue
+                DEV="$(basename "${d%/}")"
+                echo "<li><a href=\"${DEV}/\">${DEV}</a></li>"
+              done
+              echo "</ul></body></html>"
+            } > gh-pages/kmods/index.html
+
+            # 每个设备的 vermagic 列表
+            for d in gh-pages/kmods/*/; do
+              [ -d "$d" ] || continue
+              {
+                echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>$(basename "${d%/}")</title></head><body>"
+                echo "<h1>$(basename "${d%/}") kmods</h1><ul>"
+                for v in "$d"*/; do
+                  [ -d "$v" ] || continue
+                  V="$(basename "${v%/}")"
+                  echo "<li><a href=\"${V}/\">${V}</a>  (源: <code>${REPO_URL}/kmods/$(basename "${d%/}")/${V}/packages.adb</code>)</li>"
+                done
+                echo "</ul></body></html>"
+              } > "${d}index.html"
+            done
+          fi
+
+          # archive 索引
+          if [ -d gh-pages/archive ]; then
+            {
+              echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Archive</title></head><body>"
+              echo "<h1>Archive</h1><ul>"
+              for v in gh-pages/archive/*/; do
+                [ -d "$v" ] || continue
+                echo "<li><a href=\"$(basename "${v%/}")/\">$(basename "${v%/}")</a></li>"
+              done
+              echo "</ul></body></html>"
+            } > gh-pages/archive/index.html
+          fi
+
+      - name: Commit gh-pages
+        shell: bash
+        working-directory: gh-pages
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "无变化，跳过提交"; exit 0; fi
+          git commit -m "Update kmods feed (${VERSION})"
+          git push origin gh-pages
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Kmods Feed 发布 (${VERSION:-?})"
+            echo ""
+            echo "- 站点根: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+            for d in gh-pages/kmods/*/; do
+              [ -d "$d" ] || continue
+              DEV="$(basename "${d%/}")"
+              echo "- ${DEV} 固定源: \`https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/kmods/${DEV}/latest/packages.adb\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
