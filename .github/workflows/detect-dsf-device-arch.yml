@@ -25,24 +25,42 @@ jobs:
           set -euo pipefail
           MAP=configs/DSF/device_mapping.conf
           SEL='${{ github.event.inputs.device }}'
-          # 格式: 设备名=源URL|分支或tag|种子配置|target路径|profile
-          #   -F'|' 之后 $1 = "设备名=源URL"，必须再按 = 拆一次（上次就是漏了这步）
-          JSON="$(awk -F'|' -v sel="$SEL" '
-            /^[[:space:]]*#/ { next }
-            /^[[:space:]]*$/ { next }
-            {
-              name = $1; sub(/[[:space:]]*=[[:space:]]*.*$/, "", name)
-              url  = $1; sub(/^[^=]*=[[:space:]]*/,        "", url)
-              gsub(/[[:space:]]/, "", url)
-              if (name == "") next
-              if (sel != "all" && name != sel) next
-              printf "%s{\"device\":\"%s\",\"repo\":\"%s\",\"branch\":\"%s\",\"seed\":\"%s\",\"profile\":\"%s\"}",
-                     (n++ ? "," : ""), name, url, $2, $3, $4, $5
-            }
-          ' "$MAP")"
-          [ -n "${JSON}" ] || { echo "ERROR: device_mapping.conf 解析为空（检查路径/格式）"; exit 1; }
-          echo ">>> 解析结果: ${JSON}"
-          echo "matrix={\"include\":[${JSON}]}" >> "$GITHUB_OUTPUT"
+          [ -f "${MAP}" ] || { echo "ERROR: 找不到 ${MAP}"; exit 1; }
+
+          ITEMS=""
+          while IFS= read -r line; do
+            line="$(printf '%s' "${line}" | tr -d '\r')"
+            case "${line}" in ''|'#'*) continue ;; esac
+            name="$(printf '%s' "${line%%=*}" | xargs)"
+            val="$(printf '%s' "${line#*=}"  | xargs)"
+            [ -n "${name}" ] || continue
+            if [ "${SEL}" != "all" ] && [ "${name}" != "${SEL}" ]; then continue; fi
+
+            repo="$(printf '%s'    "${val}" | cut -d'|' -f1 | xargs)"
+            branch="$(printf '%s'  "${val}" | cut -d'|' -f2 | xargs)"
+            seed="$(printf '%s'    "${val}" | cut -d'|' -f3 | xargs)"
+            target="$(printf '%s'  "${val}" | cut -d'|' -f4 | xargs)"
+            profile="$(printf '%s' "${val}" | cut -d'|' -f5 | xargs)"
+
+            # 第 5 段可省：从种子配置里的 CONFIG_TARGET_<board>_<sub>_DEVICE_<profile>=y 推导
+            if [ -z "${profile}" ]; then
+              PREFIX="CONFIG_TARGET_$(printf '%s' "${target}" | sed 's#^targets/##' | tr '/' '_')_DEVICE_"
+              if [ -f "${seed}" ]; then
+                SYM="$(grep -oE "^${PREFIX}[A-Za-z0-9_.-]+=y" "${seed}" | head -n1 || true)"
+                profile="${SYM#"${PREFIX}"}"; profile="${profile%=y}"
+              fi
+              echo ">>> ${name}: 映射表未写 profile → 从种子推导 = '${profile}'"
+            fi
+
+            [ -n "${repo}" ] && [ -n "${branch}" ] && [ -n "${seed}" ] && [ -n "${profile}" ] \
+              || { echo "ERROR: ${name} 字段不全 repo='${repo}' branch='${branch}' seed='${seed}' profile='${profile}'"; exit 1; }
+
+            ITEMS="${ITEMS}${ITEMS:+,}{\"device\":\"${name}\",\"repo\":\"${repo}\",\"branch\":\"${branch}\",\"seed\":\"${seed}\",\"target\":\"${target}\",\"profile\":\"${profile}\"}"
+          done < "${MAP}"
+
+          [ -n "${ITEMS}" ] || { echo "ERROR: 没解析出任何设备（检查 ${MAP} 格式）"; exit 1; }
+          echo ">>> matrix={\"include\":[${ITEMS}]}"
+          echo "matrix={\"include\":[${ITEMS}]}" >> "$GITHUB_OUTPUT"
 
   detect:
     needs: discover
