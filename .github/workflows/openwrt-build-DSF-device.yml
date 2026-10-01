@@ -346,41 +346,48 @@ jobs:
           SOURCE_DIR="${WORKSPACE}/src"
           REPO_FILES_DIR="${WORKSPACE}/files"
           FIRMWARE_FILES_DIR="${SOURCE_DIR}/files"
-
-          # 设备层目录：DSF 优先，回退公共
-          DEV_OVERLAY=""
-          for d in "${REPO_FILES_DIR}/DSF/${TARGET_DEVICE}" "${REPO_FILES_DIR}/${TARGET_DEVICE}"; do
-            [ -d "$d" ] && { DEV_OVERLAY="$d"; break; }
-          done
-          [ -n "${DEV_OVERLAY}" ] || { echo "ERROR: 找不到设备 overlay（files/DSF/${TARGET_DEVICE} 或 files/${TARGET_DEVICE}）"; exit 1; }
-
           mkdir -p "${FIRMWARE_FILES_DIR}"
 
-          # 公共层
+          # ---- 1) 公共层 ----
           if [ -d "${REPO_FILES_DIR}/etc" ]; then
             cp -af "${REPO_FILES_DIR}/etc" "${FIRMWARE_FILES_DIR}/"
             echo ">>> 已应用公共 overlay: files/etc"
           fi
-          # 设备层（后拷贝，覆盖公共层同名文件）
-          cp -af "${DEV_OVERLAY}/." "${FIRMWARE_FILES_DIR}/"
-          echo ">>> 已应用设备 overlay: ${DEV_OVERLAY}"
 
+          # ---- 2) 设备层：按顺序叠加（后面的覆盖前面的）----
+          #    files/<设备>/        （旧目录，放你的 uci-defaults / init.d）
+          #    files/DSF/<设备>/    （DSF 目录，放 apk 等；优先级更高）
+          APPLIED=0
+          for d in "${REPO_FILES_DIR}/${TARGET_DEVICE}" "${REPO_FILES_DIR}/DSF/${TARGET_DEVICE}"; do
+            if [ -d "$d" ]; then
+              cp -af "$d/." "${FIRMWARE_FILES_DIR}/"
+              echo ">>> 已应用设备 overlay: $d"
+              APPLIED=$((APPLIED+1))
+            else
+              echo ">>> 跳过（不存在）: $d"
+            fi
+          done
+          [ "${APPLIED}" -gt 0 ] || { echo "ERROR: 找不到设备 overlay（files/${TARGET_DEVICE} 或 files/DSF/${TARGET_DEVICE}）"; exit 1; }
+
+          # ---- 3) 兼容旧目录名 ----
           if [ -d "${FIRMWARE_FILES_DIR}/etc/ithird-party" ] && [ ! -d "${FIRMWARE_FILES_DIR}/etc/third-party" ]; then
             mv "${FIRMWARE_FILES_DIR}/etc/ithird-party" "${FIRMWARE_FILES_DIR}/etc/third-party"
             echo ">>> 已重命名 etc/ithird-party → etc/third-party"
           fi
 
+          # ---- 4) 网络配置必须存在 ----
           NET_CONF="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-custom-network"
           if [ ! -f "${NET_CONF}" ]; then
-            echo "ERROR: 缺少 ${NET_CONF}（应来自 ${DEV_OVERLAY}/）"
-            find "${DEV_OVERLAY}" -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
+            echo "ERROR: 缺少 ${NET_CONF}"
+            echo "--- files/${TARGET_DEVICE}/ ---";      find "${REPO_FILES_DIR}/${TARGET_DEVICE}"      -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
+            echo "--- files/DSF/${TARGET_DEVICE}/ ---";  find "${REPO_FILES_DIR}/DSF/${TARGET_DEVICE}"  -maxdepth 4 -printf '%y %p\n' 2>/dev/null | sort || true
             exit 1
           fi
           chmod 0755 "${FIRMWARE_FILES_DIR}/etc/uci-defaults/"* 2>/dev/null || true
           [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
           [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
-          # 只有启用 docker 才打包 docker 防火墙脚本
+          # ---- 5) docker 门控 ----
           UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
           if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/DSF/plugins.cfg" 2>/dev/null \
              || grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null \
@@ -390,7 +397,9 @@ jobs:
             rm -f "${UCI_DOCKER}"
             echo ">>> 未启用 docker → 已移除 99-docker-firewall"
           fi
+
           echo ">>> 网络配置预览:"; cat "${NET_CONF}"
+          echo ">>> overlay 顶层:"; find "${FIRMWARE_FILES_DIR}" -maxdepth 3 | sort | head -60
 
       - name: Inject own kmods feed into image (uci-defaults)
         # ==================================================================
