@@ -198,6 +198,30 @@ jobs:
           ln -sfn "${GITHUB_WORKSPACE}/dl-cache" dl
           ls -ld dl "${GITHUB_WORKSPACE}/dl-cache"
 
+      - name: Apply extra feeds (optional)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          EXTRA="${WORKSPACE}/configs/DSF/feeds.extra.conf"
+          [ -f "${EXTRA}" ] || { echo ">>> 无 ${EXTRA}，跳过"; exit 0; }
+          echo ">>> 应用 feeds 覆盖/追加: ${EXTRA}"
+          while read -r line; do
+            case "${line}" in ''|'#'*) continue ;; esac
+            nm="$(printf '%s' "${line}" | awk '{print $1}')"
+            url="$(printf '%s' "${line}" | awk '{print $2}')"
+            case "${nm}" in src-git|src-link) nm="$(printf '%s' "${line}" | awk '{print $2}')"; url="$(printf '%s' "${line}" | awk '{print $3}')" ;; esac
+            [ -n "${nm}" ] && [ -n "${url}" ] || { echo "  !! 忽略非法行: ${line}"; continue; }
+            if grep -qE "^[[:space:]]*src-git[[:space:]]+${nm}[[:space:]]+" feeds.conf.default; then
+              sed -i -E "s#^[[:space:]]*src-git[[:space:]]+${nm}[[:space:]]+.*#src-git ${nm} ${url}#" feeds.conf.default
+              echo "    REPLACE ${nm} → ${url}"
+            else
+              echo "src-git ${nm} ${url}" >> feeds.conf.default
+              echo "    APPEND  ${nm} → ${url}"
+            fi
+          done < "${EXTRA}"
+          echo ">>> 应用后的 feed 清单:"; cat feeds.conf.default
+
       - name: Update & Install feeds
         # ======================================================================
         # feeds：第三方源各有自己的 feeds.conf.default，全部按源码自带清单处理
@@ -299,6 +323,21 @@ jobs:
           echo "=== STEP 4: 汇总 ==="
           echo "Device: ${TARGET_DEVICE}"
           echo "FINAL CUSTOM_PACKAGES: ${CUSTOM_PACKAGES:-<none>}"
+
+      - name: Fetch DSF third-party APKs (offline install)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          OUT_DIR="${WORKSPACE}/files/DSF/${TARGET_DEVICE}/usr/share/third-party"
+          mkdir -p "${OUT_DIR}"
+          APK_REPO="nslookupkx530-hue/apk" \
+          APK_BRANCH="My" \
+          APK_ARCH="arm64-a53" \
+          APK_GROUPS="passwall2 aurora" \
+          OUT_DIR="${OUT_DIR}" \
+          bash shell/DSF/fetch-dsf-apks.sh
 
       - name: Apply custom files (common + device)
         shell: bash
