@@ -256,18 +256,34 @@ jobs:
 
           awk '/^[[:space:]]*src-git[[:space:]]+/{print $2, $3}' feeds.conf.default 2>/dev/null | tr -d '\r' > /tmp/feeds.list
           echo ">>> 待查 feed: $(wc -l < /tmp/feeds.list) 条"
+
+          # 取某个仓库某个 ref 的完整文件列表（失败返回空，绝不触发 errexit）
+          fetch_tree() {   # $1=slug  $2=ref
+            curl -sSL --max-time 60 \
+                 -H "Authorization: Bearer ${GH_TOKEN}" \
+                 -H 'Accept: application/vnd.github+json' \
+                 "https://api.github.com/repos/$1/git/trees/$2?recursive=1" 2>/dev/null \
+              | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' \
+              | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' || true
+          }
+
           while read -r nm u; do
             [ -n "${nm:-}" ] || continue
-            case "${u}" in
-              *github.com/*) : ;;
-              *) echo "  [${nm}] 非 GitHub，跳过: ${u}"; continue ;;
+            # ★ 先拆 pin，再算 slug（顺序反了会把 ^sha 留在仓库名里 → 404）
+            url="${u%%^*}"; ref="${u##*^}"; [ "${ref}" = "${u}" ] && ref="HEAD"
+            case "${url}" in
+              *github.com[:/]*) : ;;
+              *) echo "  [${nm}] 非 GitHub，跳过: ${url}"; continue ;;
             esac
-            slug="$(printf '%s' "${u}" | sed -E 's#^https?://github.com/##; s#\.git$##; s#/$##')"
-            ref="${u##*^}"; [ "${ref}" = "${u}" ] && ref="HEAD"
-            tree="$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' \
-                    "https://api.github.com/repos/${slug}/git/trees/${ref}?recursive=1" \
-                    | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')"
-            if [ -z "${tree}" ]; then echo "  [${nm}] 取不到 tree（${slug}@${ref}）"; continue; fi
+            slug="$(printf '%s' "${url}" | sed -E 's#^https?://github\.com/##; s#^git@github\.com:##; s#\.git$##; s#/$##')"
+
+            tree="$(fetch_tree "${slug}" "${ref}")"
+            if [ -z "${tree}" ] && [ "${ref}" != "HEAD" ]; then
+              echo "  [${nm}] pin ${ref} 取不到 → 退回 HEAD 再试"
+              tree="$(fetch_tree "${slug}" "HEAD")"
+            fi
+            [ -n "${tree}" ] || { echo "  [${nm}] ${slug} 取不到 tree，跳过"; continue; }
+
             printf '%s\n' "${tree}" > "/tmp/tree-${nm}.txt"
             echo "  [${nm}] ${slug}@${ref}  文件数=$(wc -l < "/tmp/tree-${nm}.txt")"
           done < /tmp/feeds.list
@@ -283,11 +299,13 @@ jobs:
                 hit="${hit} $(basename "${f}" .txt | sed 's/^tree-//')"
               fi
             done
-            if [ -z "${hit}" ]; then          # 退一步：包名首段模糊匹配（如 amneziawg-tools ← amneziawg）
+            if [ -z "${hit}" ]; then    # 退一步：包名首段模糊匹配（如 amneziawg-tools ← amneziawg）
               alt="${p%%-*}"
               for f in /tmp/tree-*.txt; do
                 [ -f "${f}" ] || continue
-                grep -qF "/${alt}/" "${f}" && hit="${hit} (疑似)${alt}@$(basename "${f}" .txt | sed 's/^tree-//')"
+                if grep -qF "/${alt}/" "${f}"; then
+                  hit="${hit} (疑似)${alt}@$(basename "${f}" .txt | sed 's/^tree-//')"
+                fi
               done
             fi
             printf '  %-44s %s\n' "${p}" "${hit:-<所有 feed 上游都没有 → 需新 feed 或改名>}"
