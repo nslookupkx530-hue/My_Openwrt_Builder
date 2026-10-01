@@ -7,7 +7,7 @@ on:
       users:
         description: "扫这些人/组织的全部公开仓库（空格分隔，可留空）"
         required: false
-        default: "m0eak fanchmwrt"
+        default: "m0eak fanchmwrt nslookupkx530-hue"
         type: string
       repos:
         description: "直接指定仓库，格式 owner/repo[@分支]（空格分隔）"
@@ -32,7 +32,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          set -euo pipefail
+          # 只读扫描：故意不用 -e，避免某个仓库的一条命令把整轮打断
+          set -uo pipefail
           USERS='${{ github.event.inputs.users }}'
           REPOS_IN='${{ github.event.inputs.repos }}'
           ARCHDIR='${{ github.event.inputs.arch }}'
@@ -53,7 +54,7 @@ jobs:
           EOF
 
           api() { curl -sSL --max-time 60 -H "Authorization: Bearer ${GH_TOKEN}" \
-                    -H 'Accept: application/vnd.github+json' "$1" || true; }
+                    -H 'Accept: application/vnd.github+json' "$1" 2>/dev/null || true; }
           tree_of() {   # $1=owner/repo  $2=ref
             api "https://api.github.com/repos/$1/git/trees/$2?recursive=1" \
               | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' \
@@ -95,9 +96,9 @@ jobs:
             grep -qF 'feeds.conf'   /tmp/tree.txt && KIND="${KIND}+含feeds.conf"
             grep -qE '/Makefile$'   /tmp/tree.txt && KIND="${KIND}+有Makefile"
 
-            # ---- apk 仓库目录概览：只看 run/<arch>/（openwrt/ 是给官方 OpenWrt 的，DSF 不碰）----
+            # ---- apk 仓库：只看 run/<arch>/（openwrt/ 是给官方 OpenWrt 的，DSF 不碰）----
             AAPK="$(grep -cE "^run/${ARCHDIR}/.*\.apk$" /tmp/tree.txt 2>/dev/null || true)"
-            if [ "${AAPK}" -gt 0 ]; then
+            if [ -n "${AAPK}" ] && [ "${AAPK}" -gt 0 ] 2>/dev/null; then
               echo "  --- ${R}@${REF}: run/${ARCHDIR} 下共 ${AAPK} 个 apk，按包组统计 ---"
               grep -oE "^run/${ARCHDIR}/[^/]+/" /tmp/tree.txt | sort | uniq -c | sort -rn | head -60 | sed 's/^/      /' || true
               echo "      [包组] $(grep -oE "^run/${ARCHDIR}/[^/]+/" /tmp/tree.txt | sort -u | tr '\n' ' ')"
@@ -112,23 +113,23 @@ jobs:
                  || grep -qE "/${p}[^/]*\.apk$" /tmp/tree.txt; then
                 HITN=$((HITN+1)); HITS="${HITS} ${p}"
 
-                # 命中路径：优先 run/<arch>/，其次 run/，最后整体
-                P2="$(grep -E "/${p}/|/${p}-[0-9]|/${p}[^/]*\.apk$" /tmp/tree.txt \
-                      | grep -E "^run/${ARCHDIR}/" | head -8 | paste -sd' ' -)"
-                [ -n "${P2}" ] || P2="$(grep -E "/${p}/|/${p}-[0-9]|/${p}[^/]*\.apk$" /tmp/tree.txt \
-                      | grep -E '^run/' | head -5 | paste -sd' ' -)"
-                [ -n "${P2}" ] || P2="$(grep -E "/${p}/|/${p}-[0-9]|/${p}[^/]*\.apk$" /tmp/tree.txt | head -5 | paste -sd' ' -)"
-                printf '%-34s %-26s %s\n' "${R}@${REF}" "${p}" "${P2}" >> /tmp/detail.txt
+                # 命中路径：优先 run/<arch>/，其次 run/，最后整体（全部 || true，失败不影响）
+                ALL="$(grep -E "/${p}/|/${p}-[0-9]|/${p}[^/]*\.apk$" /tmp/tree.txt | head -8 | paste -sd' ' - || true)"
+                P2="$(printf '%s\n' "${ALL}" | tr ' ' '\n' | grep -E "^run/${ARCHDIR}/" | head -8 | paste -sd' ' - || true)"
+                [ -n "${P2}" ] || P2="$(printf '%s\n' "${ALL}" | tr ' ' '\n' | grep -E '^run/' | head -5 | paste -sd' ' - || true)"
+                [ -n "${P2}" ] || P2="${ALL}"
+                printf '%-36s %-26s %s\n' "${R}@${REF}" "${p}" "${P2}" >> /tmp/detail.txt
                 continue
               fi
 
-              # 退一步：包名首段模糊匹配（但要排除 luci/kmod/lib 这类太通用的前缀）
+              # 退一步：包名首段模糊匹配（排除 luci/kmod/lib 这类太通用的前缀）
               alt="${p%%-*}"
               case "${alt}" in luci|kmod|lib|app|base|default) alt="" ;; esac
               if [ -n "${alt}" ] && grep -qF "/${alt}/" /tmp/tree.txt; then
                 HITN=$((HITN+1)); HITS="${HITS} (疑似)${p}"
-                printf '%-34s %-26s (疑似) %s\n' "${R}@${REF}" "${p}" \
-                  "$(grep -F "/${alt}/" /tmp/tree.txt | grep -E "^run/${ARCHDIR}/" | head -5 | paste -sd' ' -)" >> /tmp/detail.txt
+                FP="$(grep -F "/${alt}/" /tmp/tree.txt | grep -E "^run/${ARCHDIR}/" | head -5 | paste -sd' ' - || true)"
+                [ -n "${FP}" ] || FP="$(grep -F "/${alt}/" /tmp/tree.txt | head -5 | paste -sd' ' - || true)"
+                printf '%-36s %-26s (疑似) %s\n' "${R}@${REF}" "${p}" "${FP}" >> /tmp/detail.txt
               fi
             done < /tmp/need.txt
 
@@ -153,3 +154,4 @@ jobs:
             cat /tmp/detail.txt 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          echo ">>> 扫描完成"
