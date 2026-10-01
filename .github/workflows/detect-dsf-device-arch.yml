@@ -89,36 +89,56 @@ jobs:
           REPO='${{ matrix.repo }}'
           BASE_BRANCH='${{ matrix.branch }}'
 
-          echo ">>> ${DEVICE}  repo=${REPO}  当前映射 ref=${BASE_BRANCH}"
           rm -rf repo
-          # 只取 commit/tree、不取 blob：快，且后续 git show 单个文件按需拉取
           git clone --filter=blob:none --no-checkout "${REPO}" repo >/dev/null 2>&1
 
-          # 基准 ref 的 feed 名单（用于算"多挂了哪些"）
-          BF="feeds.conf"; git -C repo cat-file -e "${BASE_BRANCH}:${BF}" 2>/dev/null || BF="feeds.conf.default"
-          git -C repo show "${BASE_BRANCH}:${BF}" 2>/dev/null | awk '/^[[:space:]]*src-/{print $2}' | sort -u > /tmp/base-feeds.txt
-          echo ">>> 基准 ref 的 feed（文件 ${BF}）: $(paste -sd' ' /tmp/base-feeds.txt)"
+          # 映射表写的是裸名（mt5000 / 25.12.4），但分支在本地是 origin/<名>，tag 才是裸名
+          resolve_ref() {
+            for c in "origin/$1" "$1" "refs/tags/$1"; do
+              if git -C repo rev-parse --verify --quiet "${c}^{commit}" >/dev/null 2>&1; then
+                printf '%s' "$c"; return 0
+              fi
+            done
+            return 1
+          }
+          # 用 tree 判断 feeds 文件（blobless clone 里 tree 是本地就有的，不触发网络）
+          feeds_file_of() {
+            if [ -n "$(git -C repo ls-tree "$1" -- feeds.conf 2>/dev/null)" ]; then
+              echo feeds.conf
+            else
+              echo feeds.conf.default
+            fi
+          }
+
+          BASE_REF="$(resolve_ref "${BASE_BRANCH}")" || { echo "::error::解析不到 ref: ${BASE_BRANCH}"; exit 1; }
+          BASE_F="$(feeds_file_of "${BASE_REF}")"
+          echo ">>> ${DEVICE}  repo=${REPO}  映射 ref=${BASE_BRANCH} → 实际 ${BASE_REF}  文件=${BASE_F}"
+          git -C repo show "${BASE_REF}:${BASE_F}" 2>/dev/null | awk '/^[[:space:]]*src-/{print $2}' | sort -u > /tmp/base-feeds.txt || true
+          echo ">>> 基准 feed: $(paste -sd' ' /tmp/base-feeds.txt)"
 
           {
             echo "## ${DEVICE} — ref 扫描（${REPO}）"
             echo ""
-            echo "基准 ref：\`${BASE_BRANCH}\`（feed: $(paste -sd' ' /tmp/base-feeds.txt)）"
+            echo "基准 ref：\`${BASE_BRANCH}\`（实际 \`${BASE_REF}\`，文件 \`${BASE_F}\`）"
+            echo ""
+            echo "基准 feed：$(paste -sd' ' /tmp/base-feeds.txt)"
             echo ""
             echo "| ref | 最后提交 | feeds 文件 | feed 数 | 比基准多挂的 feed |"
             echo "|---|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          REFS="$( { git -C repo branch -r --format='%(refname:short)' | grep -v HEAD; git -C repo tag; } | sort -u | head -40 )"
+          REFS="$( { git -C repo branch -r --format='%(refname:short)' | grep -v 'HEAD'; git -C repo tag; } | sort -u | head -40 )"
           for r in ${REFS}; do
             D="$(git -C repo log -1 --format=%ci "${r}" 2>/dev/null || echo '?')"
-            F="feeds.conf"; git -C repo cat-file -e "${r}:${F}" 2>/dev/null || F="feeds.conf.default"
-            BODY="$(git -C repo show "${r}:${F}" 2>/dev/null || echo '')"
+            F="$(feeds_file_of "${r}")"
+            BODY="$(git -C repo show "${r}:${F}" 2>/dev/null || true)"
             N="$(printf '%s\n' "${BODY}" | grep -cE '^[[:space:]]*src-' || true)"
-            printf '%s\n' "${BODY}" | awk '/^[[:space:]]*src-/{print $2}' | sort -u > /tmp/this-feeds.txt
-            EXTRA="$(comm -23 /tmp/this-feeds.txt /tmp/base-feeds.txt | paste -sd, -)"
+            printf '%s\n' "${BODY}" | awk '/^[[:space:]]*src-/{print $2}' | sort -u > /tmp/this-feeds.txt || true
+
+            EXTRA="$(comm -23 /tmp/this-feeds.txt /tmp/base-feeds.txt 2>/dev/null | paste -sd, - || true)"
             CAND="$(git -C repo ls-tree -r --name-only "${r}" 2>/dev/null \
                     | grep -E '^\.github/workflows/.*\.ya?ml$|^feeds\.conf$|(^|/)(build|diy|feeds|compile)[A-Za-z0-9_.-]*\.sh$' \
-                    | head -8 | paste -sd' ' -)"
+                    | head -8 | paste -sd' ' - || true)"
 
             echo "=============================================================="
             echo "### ${r}   (${D})   ${F}  feed=${N}   extra=${EXTRA:-无}"
