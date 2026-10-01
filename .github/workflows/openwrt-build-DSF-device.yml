@@ -126,10 +126,10 @@ jobs:
             libsqlite3-dev libcap-dev libgd-dev libjpeg-dev libpng-dev \
             libcurl4-gnutls-dev libxml2-dev libxslt-dev qemu-utils
 
-      # ======================================================================
-      # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
-      # ======================================================================
       - name: Resolve device meta (configs/DSF/device_mapping.conf)
+        # ======================================================================
+        # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -138,13 +138,21 @@ jobs:
           LINE="$(grep -E "^[[:space:]]*${TARGET_DEVICE}=" "${MAP}" | head -n1 || true)"
           [ -n "${LINE}" ] || { echo "ERROR: ${MAP} 里没有 ${TARGET_DEVICE}"; exit 1; }
           VAL="${LINE#*=}"
-          REPO_URL="$(printf '%s' "${VAL}" | awk -F'|' '{print $1}' | tr -d '[:space:]')"
-          REPO_BRANCH="$(printf '%s' "${VAL}" | awk -F'|' '{print $2}' | tr -d '[:space:]')"
-          SEED_CONFIG="$(printf '%s' "${VAL}" | awk -F'|' '{print $3}' | tr -d '[:space:]')"
-          DSF_TARGET_PATH="$(printf '%s' "${VAL}" | awk -F'|' '{print $4}' | tr -d '[:space:]' | sed 's#^targets/##')"
-          PROFILE="$(printf '%s' "${VAL}" | awk -F'|' '{print $5}' | tr -d '[:space:]')"
-          [ -n "${REPO_URL}" ] && [ -n "${SEED_CONFIG}" ] && [ -n "${PROFILE}" ] \
-            || { echo "ERROR: 映射表字段不全（需要 源URL|分支|种子配置|target|profile）: ${VAL}"; exit 1; }
+          REPO_URL="$(printf '%s'        "${VAL}" | cut -d'|' -f1 | xargs)"
+          REPO_BRANCH="$(printf '%s'     "${VAL}" | cut -d'|' -f2 | xargs)"
+          SEED_CONFIG="$(printf '%s'     "${VAL}" | cut -d'|' -f3 | xargs)"
+          DSF_TARGET_PATH="$(printf '%s' "${VAL}" | cut -d'|' -f4 | xargs | sed 's#^targets/##')"
+          PROFILE="$(printf '%s'         "${VAL}" | cut -d'|' -f5 | xargs)"
+
+          # 从种子配置推导 profile key
+          if [ -z "${PROFILE}" ] && [ -f "${WORKSPACE}/${SEED_CONFIG}" ]; then
+            PREFIX="CONFIG_TARGET_$(printf '%s' "${DSF_TARGET_PATH}" | tr '/' '_')_DEVICE_"
+            SYM="$(grep -oE "^${PREFIX}[A-Za-z0-9_.-]+=y" "${WORKSPACE}/${SEED_CONFIG}" | head -n1 || true)"
+            PROFILE="${SYM#"${PREFIX}"}"; PROFILE="${PROFILE%=y}"
+            echo ">>> 映射表未写 profile → 从种子推导: ${PROFILE}"
+          fi
+          [ -n "${REPO_URL}" ] && [ -n "${REPO_BRANCH}" ] && [ -n "${SEED_CONFIG}" ] && [ -n "${PROFILE}" ] \
+            || { echo "ERROR: 映射表字段不全（需要 源URL|分支|种子配置|target路径[|profile]）: ${VAL}"; exit 1; }
           [ -f "${WORKSPACE}/${SEED_CONFIG}" ] || { echo "ERROR: 种子配置不存在: ${SEED_CONFIG}"; exit 1; }
           if [ -n "${SOURCE_REF:-}" ]; then
             echo ">>> source_ref 覆盖分支: ${REPO_BRANCH} → ${SOURCE_REF}"
@@ -190,10 +198,10 @@ jobs:
           ln -sfn "${GITHUB_WORKSPACE}/dl-cache" dl
           ls -ld dl "${GITHUB_WORKSPACE}/dl-cache"
 
-      # ======================================================================
-      # feeds：第三方源各有自己的 feeds.conf.default，全部按源码自带清单处理
-      # ======================================================================
       - name: Update & Install feeds
+        # ======================================================================
+        # feeds：第三方源各有自己的 feeds.conf.default，全部按源码自带清单处理
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -227,10 +235,10 @@ jobs:
           done
           echo ">>> feeds 阶段完成"
 
-      # ======================================================================
-      # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
-      # ======================================================================
       - name: Seed & trim configuration (DSF)
+        # ======================================================================
+        # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -238,13 +246,13 @@ jobs:
           bash ../shell/DSF/dsf_seed_config.sh "${SEED_CONFIG}" "${PROFILE}"
           test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
 
-      # ======================================================================
-      # 第三方包清单：DSF 优先，回退公共；注入后可自行开关
-      #   Third-Party/DSF/third-party.config  （可选，优先）
-      #   Third-Party/third-party.config      （回退）
-      #   注入项写进 .config，并落 tmp/injected-plugins.txt 供 Finalize/Release 使用
-      # ======================================================================
       - name: Load Third-Party Config & Inject Plugins (DSF)
+        # ======================================================================
+        # 第三方包清单：DSF 优先，回退公共；注入后可自行开关
+        #   Third-Party/DSF/third-party.config  （可选，优先）
+        #   Third-Party/third-party.config      （回退）
+        #   注入项写进 .config，并落 tmp/injected-plugins.txt 供 Finalize/Release 使用
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
