@@ -145,11 +145,19 @@ jobs:
           KEEP=3
           prune() {   # $1 = archive 根目录
             [ -d "$1" ] || return 0
-            # ⚠️ 必须按【名字】排序，不能按时间：--depth=1 clone 后所有目录 mtime 都=检出时间
-            ls -1d "$1"/*/ 2>/dev/null | sort -r | tail -n +$((KEEP+1)) | xargs -r rm -rf
+            local victims total
+            total="$(ls -1d "$1"/*/ 2>/dev/null | grep -c . || true)"
+            victims="$(ls -1d "$1"/*/ 2>/dev/null | sort -r | tail -n +$((KEEP+1)) || true)"
+            if [ -n "${victims}" ]; then
+              echo ">>> 清理旧版本（保留最新 ${KEEP} 个，共 ${total} 个）:"
+              echo "${victims}" | sed 's/^/    rm -rf /'
+              echo "${victims}" | xargs -r rm -rf
+            else
+              echo ">>> 无需清理（共 ${total} 个版本 ≤ ${KEEP}）"
+            fi
           }
           prune gh-pages/archive
-          echo ">>> 剩余 archive:"; ls -1 gh-pages/archive 2>/dev/null || true
+          echo ">>> 剩余:"; ls -1 gh-pages/archive 2>/dev/null || true
 
       - name: Generate indexes
         shell: bash
