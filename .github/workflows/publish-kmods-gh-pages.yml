@@ -154,59 +154,78 @@ jobs:
       - name: Generate indexes
         shell: bash
         run: |
-          set -euxo pipefail
+          set -uxo pipefail
           REPO_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
 
-          # 根索引
+          # 通用：为任意目录生成 index.html（列子目录 + 列文件），递归复用
+          dir_index() {   # $1=目录  $2=标题  $3=返回上一层的相对链接（可空）
+            local d="${1%/}" title="$2" up="$3" f n
+            {
+              echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>${title}</title></head><body>"
+              echo "<h1>${title}</h1><ul>"
+              for f in "${d}"/*/; do
+                [ -d "${f}" ] || continue
+                n="$(basename "${f%/}")"
+                echo "<li><a href=\"${n}/\">${n}/</a></li>"
+              done
+              for f in "${d}"/*; do
+                [ -f "${f}" ] || continue
+                n="$(basename "${f}")"
+                [ "${n}" = "index.html" ] && continue
+                echo "<li><a href=\"${n}\">${n}</a></li>"
+              done
+              echo "</ul>"
+              [ -n "${up}" ] && echo "<p><a href=\"${up}\">← 上一层</a></p>"
+              echo "</body></html>"
+            } > "${d}/index.html"
+          }
+
+          # 站点根
           {
             echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>OpenWrt DSF Feed</title></head><body>"
             echo "<h1>OpenWrt DSF Feed</h1><ul>"
-            [ -d gh-pages/kmods ] && echo "<li><a href=\"kmods/\">kmods/</a></li>"
+            [ -d gh-pages/kmods ]    && echo "<li><a href=\"kmods/\">kmods/</a></li>"
             [ -d gh-pages/packages ] && echo "<li><a href=\"packages/\">packages/</a></li>"
-            [ -d gh-pages/archive ] && echo "<li><a href=\"archive/\">archive/</a></li>"
+            [ -d gh-pages/archive ]  && echo "<li><a href=\"archive/\">archive/</a></li>"
             echo "</ul></body></html>"
           } > gh-pages/index.html
 
-          # kmods 设备索引
+          # kmods/<设备>/  与  kmods/<设备>/latest/
           if [ -d gh-pages/kmods ]; then
-            {
-              echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Kmods</title></head><body>"
-              echo "<h1>Kmods Feed</h1><ul>"
-              for d in gh-pages/kmods/*/; do
-                [ -d "$d" ] || continue
-                DEV="$(basename "${d%/}")"
-                echo "<li><a href=\"${DEV}/\">${DEV}</a></li>"
-              done
-              echo "</ul></body></html>"
-            } > gh-pages/kmods/index.html
-
-            # 每个设备的 vermagic 列表
+            dir_index gh-pages/kmods "Kmods Feed" "../"
             for d in gh-pages/kmods/*/; do
-              [ -d "$d" ] || continue
+              [ -d "${d}" ] || continue
+              DEV="$(basename "${d%/}")"
               {
-                echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>$(basename "${d%/}")</title></head><body>"
-                echo "<h1>$(basename "${d%/}") kmods</h1><ul>"
-                for v in "$d"*/; do
-                  [ -d "$v" ] || continue
-                  V="$(basename "${v%/}")"
-                  echo "<li><a href=\"${V}/\">${V}</a>  (源: <code>${REPO_URL}/kmods/$(basename "${d%/}")/${V}/packages.adb</code>)</li>"
-                done
-                echo "</ul></body></html>"
+                echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>${DEV} kmods</title></head><body>"
+                echo "<h1>${DEV} kmods</h1><ul>"
+                [ -d "${d}latest" ] && echo "<li><a href=\"latest/\">latest/</a> — 固件固定源: <code>${REPO_URL}/kmods/${DEV}/latest/packages.adb</code></li>"
+                echo "</ul><p><a href=\"../\">← kmods</a></p></body></html>"
               } > "${d}index.html"
+              [ -d "${d}latest" ] && dir_index "${d}latest" "${DEV} / latest" "../"
             done
           fi
 
-          # archive 索引
+          # archive 全树：版本层 → 设备层 → 类型层 → vermagic 层（每层都落一个 index.html）
           if [ -d gh-pages/archive ]; then
-            {
-              echo "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Archive</title></head><body>"
-              echo "<h1>Archive</h1><ul>"
-              for v in gh-pages/archive/*/; do
-                [ -d "$v" ] || continue
-                echo "<li><a href=\"$(basename "${v%/}")/\">$(basename "${v%/}")</a></li>"
+            dir_index gh-pages/archive "Archive" "../"
+            for v in gh-pages/archive/*/; do
+              [ -d "${v}" ] || continue
+              VNAME="$(basename "${v%/}")"
+              dir_index "${v}" "${VNAME}" "../"
+              for dev in "${v}"*/; do
+                [ -d "${dev}" ] || continue
+                dir_index "${dev}" "$(basename "${dev%/}") @ ${VNAME}" "../"
+                for kind in "${dev}"*/; do
+                  [ -d "${kind}" ] || continue
+                  dir_index "${kind}" "$(basename "${kind%/}")" "../"
+                  for ver in "${kind}"*/; do
+                    [ -d "${ver}" ] || continue
+                    dir_index "${ver}" "$(basename "${ver%/}")" "../"
+                  done
+                done
               done
-              echo "</ul></body></html>"
-            } > gh-pages/archive/index.html
+            done
           fi
 
       - name: Commit gh-pages
