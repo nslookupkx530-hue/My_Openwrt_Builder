@@ -575,14 +575,6 @@ jobs:
             echo
             printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
             echo
-            echo "首次开机自动安装的第三方 APK"
-            echo
-            if [ -n "${APKS}" ]; then
-              printf '%s\n' "${APKS}" | sed 's/^/- /'
-            else
-              echo "- (无)"
-            fi
-            echo
             echo "自建 Kmod 源"
             echo
             echo "本固件内核与官方不同源，官方 kmods 源不可用。"
@@ -748,6 +740,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Diagnose kmod artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uxo pipefail
+          cd "${WORKSPACE}/src" || exit 0
+          echo ">>> 1) 全仓找 kmods 目录"
+          find bin -type d -name kmods -print 2>/dev/null || true
+          echo ">>> 2) 全仓找 kmod 包（前 30 条）"
+          find bin \( -name 'kmod-*.apk' -o -name 'kmod-*.ipk' \) -print 2>/dev/null | head -30 || true
+          echo ">>> 3) bin/targets/*/*/packages/ 目录"
+          ls -lh bin/targets/*/*/packages/ 2>/dev/null | head -40 || true
+          echo ">>> 4) bin/packages/*/ 目录"
+          ls -lh bin/packages/*/ 2>/dev/null || true
+          echo ">>> 5) 原判据 kmods 目录"
+          ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (仍无 kmods 目录)"
+          echo ">>> 6) 内核版本线索"
+          cat bin/targets/*/*/version.buildinfo 2>/dev/null || true
+
       - name: Verify Images
         if: success()
         shell: bash
@@ -755,14 +766,17 @@ jobs:
           set -euxo pipefail
           cd "${WORKSPACE}/src"
           ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,60p' || true
-          IMG="$(find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) -print -quit)"
+          IMG="$(find bin/targets -maxdepth 3 -type f -name '*squashfs-sysupgrade.bin' -print -quit)"
+          [ -n "${IMG}" ] || IMG="$(find bin/targets -maxdepth 3 -type f -name '*.bin' ! -name 'mt*-ram-*bl2.bin' -print -quit)"
           [ -n "${IMG}" ] || { echo "ERROR: 没有找到固件镜像"; exit 1; }
-          echo ">>> 生成镜像示例: ${IMG}"
+          echo ">>> 生成镜像: ${IMG}"
+          echo ">>> 本设备相关镜像:"
+          find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.itb' -o -name '*.img.gz' \) ! -name 'mt*-ram-*bl2.bin' | sort || true
           echo ">>> 自有 kmod 库（本次产物）:"; ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (无 kmods 目录)"
           echo ">>> 固件内第三方 apk:"; find files/usr/share/third-party -maxdepth 1 -name '*.apk' -printf '%f\n' 2>/dev/null | sort || echo "  (无)"
           echo ">>> 首启安装服务:"; ls -l files/etc/rc.d/S99apk-install 2>/dev/null || echo "  (无)"
           echo ">>> 镜像清单里搜关键包:"
-          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null || echo "  (manifest 里没有上述包)"
+          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null || echo "  (manifest 里没有，第三方 apk 走首启安装，属正常)"
 
       - name: Upload Artifacts
         if: success()
