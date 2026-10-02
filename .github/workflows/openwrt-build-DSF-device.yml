@@ -126,10 +126,8 @@ jobs:
             libsqlite3-dev libcap-dev libgd-dev libjpeg-dev libpng-dev \
             libcurl4-gnutls-dev libxml2-dev libxslt-dev qemu-utils
 
-      # ======================================================================
-      # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
-      # ======================================================================
       - name: Resolve device meta (configs/DSF/device_mapping.conf)
+        # 设备元信息：源 URL / 分支 / 种子配置 / target / profile
         shell: bash
         run: |
           set -euxo pipefail
@@ -194,12 +192,12 @@ jobs:
           ln -sfn "${GITHUB_WORKSPACE}/dl-cache" dl
           ls -ld dl "${GITHUB_WORKSPACE}/dl-cache"
 
-      # ======================================================================
-      # feeds 额外项（可选）：configs/DSF/feeds.extra.conf
-      #   同名 feed → 替换 URL；新名字 → 追加
-      #   例：src-git m0eakpatch https://github.com/m0eak/openwrt_patch.git
-      # ======================================================================
       - name: Apply extra feeds (optional)
+        # ======================================================================
+        # feeds 额外项（可选）：configs/DSF/feeds.extra.conf
+        #   同名 feed → 替换 URL；新名字 → 追加
+        #   例：src-git m0eakpatch https://github.com/m0eak/openwrt_patch.git
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -255,10 +253,8 @@ jobs:
           done
           echo ">>> feeds 阶段完成"
 
-      # ======================================================================
-      # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
-      # ======================================================================
       - name: Seed & trim configuration (DSF)
+        # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
         shell: bash
         run: |
           set -euxo pipefail
@@ -266,11 +262,9 @@ jobs:
           bash ../shell/DSF/dsf_seed_config.sh "${SEED_CONFIG}" "${PROFILE}"
           test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
 
-      # ======================================================================
-      # 第三方包清单：公共 + DSF(可选) → 注入 .config（源码包走这条路）
-      #   apk 包在这里必然 MISS，属正常（见 Prepare Third-Party APKs）
-      # ======================================================================
       - name: Load Third-Party Config & Inject Plugins (DSF)
+        # 第三方包清单：公共 + DSF(可选) → 注入 .config（源码包走这条路）
+        #   apk 包在这里必然 MISS，属正常（见 Prepare Third-Party APKs）
         shell: bash
         run: |
           set -euxo pipefail
@@ -382,12 +376,12 @@ jobs:
           fi
           echo ">>> 网络配置预览:"; cat "${NET_CONF}"
 
-      # ======================================================================
-      # 第三方 apk：从你们的 apk 仓库 run/<arch>/ 取（.run 自动解包）
-      #   CUSTOM_PACKAGES 来自上一步（已写入 $GITHUB_ENV）
-      #   开 aurora 时需要 MATCH_OVERRIDE（名字与仓库布局对不上）
-      # ======================================================================
       - name: Prepare Third-Party APKs
+        # ======================================================================
+        # 第三方 apk：从apk 仓库 run/<arch>/ 取（.run 自动解包）
+        #   CUSTOM_PACKAGES 来自上一步（已写入 $GITHUB_ENV）
+        #   开 aurora 时需要 MATCH_OVERRIDE（名字与仓库布局对不上）
+        # ======================================================================
         shell: bash
         env:
           SOURCE_DIR: ${{ github.workspace }}/src
@@ -443,11 +437,11 @@ jobs:
             -exec ls -lh {} \;
           ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
 
-      # ======================================================================
-      # 自建 kmods 源：写进固件（内核与官方不同源 → 官方 kmods 永远不可用）
-      #   发布由 publish-kmods-gh-pages.yml 在构建成功后自动完成
-      # ======================================================================
       - name: Inject own kmods feed into image (uci-defaults)
+        # ======================================================================
+        # 自建 kmods 源：写进固件（内核与官方不同源 → 官方 kmods 永远不可用）
+        #   发布由 publish-kmods-gh-pages.yml 在构建成功后自动完成
+        # ======================================================================
         shell: bash
         run: |
           set -euxo pipefail
@@ -470,10 +464,8 @@ jobs:
           chmod 0755 "${D}/99-dsf-own-kmods"
           cat "${D}/99-dsf-own-kmods"
 
-      # ======================================================================
-      # Finalize：再 defconfig + 收窄断言 + 注入项检查 + 范围诊断
-      # ======================================================================
       - name: Finalize Configuration (defconfig + 校验)
+        # Finalize：再 defconfig + 收窄断言 + 注入项检查 + 范围诊断
         shell: bash
         run: |
           set -euxo pipefail
@@ -707,7 +699,7 @@ jobs:
         with:
           name: dsf-logs-${{ github.event.inputs.target_device }}-${{ github.run_id }}
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 3
           path: |
             ${{ github.workspace }}/src/build.log
             ${{ github.workspace }}/src/build_download.log
