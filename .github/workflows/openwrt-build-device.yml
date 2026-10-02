@@ -852,21 +852,29 @@ jobs:
           cd "${WORKSPACE}/src"
           DEV="${TARGET_DEVICE:-${{ github.event.inputs.target_device }}}"
           if [ "${DEV}" != "x86" ]; then
-            echo ">>> 当前设备 ${DEV}，非 x86，跳过"; exit 0
+            echo ">>> 当前设备 ${DEV}，非 x86，跳过"
+            exit 0
           fi
-          {
-            echo "CONFIG_TARGET_ROOTFS_EXT4FS=y"
+
+          printf '%s\n' \
+            "CONFIG_TARGET_ROOTFS_EXT4FS=y" \
             # 产出 VMware / ESXi 固件
-            echo "CONFIG_VMDK_IMAGES=y"
+            "CONFIG_VMDK_IMAGES=y" \
             # 产出 VirtualBox 固件
-            echo "# CONFIG_VDI_IMAGES is not set
+            "CONFIG_VDI_IMAGES is not set" \
             # 产出 Hyper-V 固件
-            echo "# CONFIG_VHDX_IMAGES is not set"
-          } >> .config
+            "CONFIG_VHDX_IMAGES is not set" >> .config
+
           make defconfig
-          echo ">>> 生效检查:"
-          grep -E '^(# )?CONFIG_(VMDK|VDI|VHDX)_IMAGES|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)=y' .config
-          grep -qE '^CONFIG_VMDK_IMAGES=y$' .config || { echo "ERROR: VMDK 没开起来"; exit 1; }
+
+          echo ">>> 生效检查（必须看到 4 行 =y）:"
+          grep -E '^CONFIG_(VMDK|VDI|VHDX)_IMAGES=y$|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)=y$' .config || true
+
+          if ! grep -q '^CONFIG_VMDK_IMAGES=y$' .config; then
+            echo "ERROR: CONFIG_VMDK_IMAGES 未生效（被 defconfig 丢弃）"
+            exit 1
+          fi
+          echo ">>> x86 VM 镜像选项已启用"
 
       - name: Generate release notes
         id: notes
