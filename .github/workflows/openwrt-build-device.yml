@@ -859,9 +859,9 @@ jobs:
           # 产出 VMware / ESXi 固件
           echo "CONFIG_VMDK_IMAGES=y" >> .config
           # 产出 VirtualBox 固件
-          # echo "CONFIG_VDI_IMAGES is not set" >> .config
+          echo "# CONFIG_VDI_IMAGES is not set" >> .config
           # 产出 Hyper-V 固件
-          # echo "CONFIG_VHDX_IMAGES is not set >> .config
+          echo "# CONFIG_VHDX_IMAGES is not set" >> .config
           make defconfig
           echo ">>> 生效检查:"
           grep -E '^CONFIG_(VMDK|VDI|VHDX)_IMAGES|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)' .config || true
