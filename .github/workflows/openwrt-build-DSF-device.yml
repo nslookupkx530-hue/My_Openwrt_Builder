@@ -719,26 +719,44 @@ jobs:
         if: success()
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           cd "${WORKSPACE}/src"
-          KM_DIR="$(ls -d bin/targets/*/*/kmods/*/ 2>/dev/null | head -n1 || true)"
-          if [ -z "${KM_DIR}" ]; then echo "::warning::没有 kmods 目录"; echo "vermagic=" >> "$GITHUB_OUTPUT"; exit 0; fi
-          VERMAGIC="$(basename "${KM_DIR%/}")"
-          echo ">>> vermagic=${VERMAGIC}  apk 数=$(find "${KM_DIR}" -maxdepth 1 -name '*.apk' | wc -l)"
-          echo "vermagic=${VERMAGIC}" >> "$GITHUB_OUTPUT"
-          {
-            echo "kmods_vermagic : ${VERMAGIC}"
-            echo "kmods_feed_exact: ${KMODS_FEED_URL%/packages.adb}/../${VERMAGIC}/packages.adb"
-          } >> "${WORKSPACE}/BUILDINFO.txt"
+          KAPK="$(ls bin/targets/*/*/packages/kernel-*.apk 2>/dev/null | head -1 || true)"
+          [ -n "${KAPK}" ] || KAPK="$(find bin -type f -name 'kernel-*.apk' 2>/dev/null | head -1 || true)"
+          [ -n "${KAPK}" ] || { echo "ERROR: 找不到 kernel apk，无法推导 vermagic"; exit 1; }
+          PKGDIR="$(dirname "${KAPK}")"
+          VERMAGIC="$(basename "${KAPK}" .apk | sed -E 's/^kernel-//; s/-r[0-9]+$//')"
+          echo ">>> kernel apk : ${KAPK}"
+          echo ">>> 包目录     : ${PKGDIR}"
+          echo ">>> vermagic   : ${VERMAGIC}"
+          echo ">>> 该目录下非 apk 文件（索引/校验用）:"
+          find "${PKGDIR}" -maxdepth 1 -type f ! -name '*.apk' -printf '%f\n' | sort || true
+          echo "vermagic=${VERMAGIC}" >> "${GITHUB_OUTPUT}"
+          echo "pkgdir=${PKGDIR}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage kmods feed
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${WORKSPACE}/src"
+          VERMAGIC="${{ steps.km.outputs.vermagic }}"
+          PKGDIR="${{ steps.km.outputs.pkgdir }}"
+          rm -rf /tmp/kmods-feed
+          mkdir -p "/tmp/kmods-feed/kmods/${VERMAGIC}"
+          cp -f "${PKGDIR}"/* "/tmp/kmods-feed/kmods/${VERMAGIC}/"
+          echo ">>> 待发布: /tmp/kmods-feed/kmods/${VERMAGIC}/"
+          ls -lh "/tmp/kmods-feed/kmods/${VERMAGIC}/" | sed -n '1,12p'
+          echo ">>> 文件数: $(find "/tmp/kmods-feed/kmods/${VERMAGIC}" -maxdepth 1 -type f | wc -l)"
 
       - name: Upload kmods feed artifact
-        if: success() && steps.km.outputs.vermagic != ''
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.target_device }}-kmods-feed-${{ steps.km.outputs.vermagic }}
-          path: src/bin/targets/*/*/kmods/**
-          if-no-files-found: warn
-          retention-days: 30
+          name: ${{ env.TARGET_DEVICE }}-kmods-feed-${{ steps.km.outputs.vermagic }}
+          path: /tmp/kmods-feed/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Diagnose kmod artifacts
         if: always()
