@@ -3,14 +3,22 @@ name: Cleanup Old Workflow Runs
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "清理模式"
+        required: true
+        default: "failed"
+        type: choice
+        options:
+          - failed     # 只删失败(红色)记录
+          - all         # 按天数删全部已完成记录
       keep_days:
-        description: "删除早于多少天前的已完成运行（默认 7，最小 1，最大 90）"
+        description: "只处理早于多少天前的记录（failed 模式可填 0=连今天的一起清；all 模式最小 1；最大 90）"
         required: false
         default: "7"
       keep_latest:
-        description: "每个 workflow 至少保留最近多少次运行（默认 20）"
+        description: "每个 workflow 至少保留最近多少次（failed 模式建议 1~2，all 模式建议 20）"
         required: false
-        default: "20"
+        default: "1"
       dry_run:
         description: "只列出不删除（true/false）"
         required: false
@@ -30,28 +38,43 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: 删除过期运行
+      - name: 清理运行记录
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KEEP_DAYS: ${{ github.event.inputs.keep_days }}
-          KEEP_LATEST: ${{ github.event.inputs.keep_latest }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MODE: ${{ inputs.mode }}
+          KEEP_DAYS: ${{ inputs.keep_days }}
+          KEEP_LATEST: ${{ inputs.keep_latest }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -uo pipefail
+          MODE="${MODE:-failed}"
           KEEP_DAYS="${KEEP_DAYS:-7}"
-          KEEP_LATEST="${KEEP_LATEST:-20}"
+          KEEP_LATEST="${KEEP_LATEST:-1}"
           DRY_RUN="${DRY_RUN:-false}"
 
-          # ---- 参数守卫（删 run 不可逆，宁可不干也不能乱删）----
+          # ---- 参数守卫（删 run 不可逆）----
+          case "${MODE}" in failed|all) ;; *) echo "mode 非法: ${MODE}"; exit 1 ;; esac
           case "${KEEP_DAYS}" in ''|*[!0-9]*) echo "keep_days 非法: ${KEEP_DAYS}"; exit 1 ;; esac
-          [ "${KEEP_DAYS}" -ge 1 ]  || { echo "keep_days 必须 >= 1"; exit 1; }
-          [ "${KEEP_DAYS}" -le 90 ] || { echo "keep_days 过大（<=90）"; exit 1; }
-          case "${KEEP_LATEST}" in ''|*[!0-9]*) KEEP_LATEST=20 ;; esac
+
+          if [ "${MODE}" = "failed" ]; then MIN_DAYS=0; else MIN_DAYS=1; fi
+          [ "${KEEP_DAYS}" -ge "${MIN_DAYS}" ] || { echo "keep_days 必须 >= ${MIN_DAYS}（mode=${MODE}）"; exit 1; }
+          [ "${KEEP_DAYS}" -le 90 ]           || { echo "keep_days 过大（<=90）"; exit 1; }
+          case "${KEEP_LATEST}" in ''|*[!0-9]*) KEEP_LATEST=1 ;; esac
 
           THRESHOLD="$(date -u -d "${KEEP_DAYS} days ago" '+%Y-%m-%dT%H:%M:%SZ')"
-          echo ">>> 阈值        : created_at < ${THRESHOLD}"
-          echo ">>> 每个 workflow 至少保留最近 ${KEEP_LATEST} 次"
+
+          # 红色记录 = failure / timed_out / startup_failure
+          FAIL_RE='^(failure|timed_out|startup_failure)$'
+          if [ "${MODE}" = "failed" ]; then
+            CONCL_FILTER='.conclusion | test("'"${FAIL_RE}"'")'
+          else
+            CONCL_FILTER='true'
+          fi
+
+          echo ">>> 模式        : ${MODE}（$([ "${MODE}" = "failed" ] && echo "只删红色记录" || echo "全部已完成记录")）"
+          echo ">>> 阈值        : created_at < ${THRESHOLD}（保留 ${KEEP_DAYS} 天）"
+          echo ">>> 每 workflow 至少保留最近 ${KEEP_LATEST} 次"
           echo ">>> dry_run     : ${DRY_RUN}"
 
           WORKLIST="$(mktemp)"
@@ -59,35 +82,40 @@ jobs:
             --jq '.workflow_runs[]
                   | select(.status == "completed")
                   | select(.created_at < "'"${THRESHOLD}"'")
-                  | [.workflow_id, .id, .created_at] | @tsv' \
+                  | select('"${CONCL_FILTER}"')
+                  | [.workflow_id, .id, .created_at, (.conclusion // "-")] | @tsv' \
             | sort -k1,1n -k3,3r \
-            | awk -v keep="${KEEP_LATEST}" '{ n[$1]++; if (n[$1] > keep) print $2 }' \
+            | awk -v keep="${KEEP_LATEST}" '{ n[$1]++; if (n[$1] > keep) print $2 "\t" $3 "\t" $4 }' \
             > "${WORKLIST}" || true
 
           COUNT="$(wc -l < "${WORKLIST}" | tr -d ' ')"
-          echo ">>> 待删除运行数: ${COUNT}"
-          if [ "${COUNT}" = "0" ]; then echo "✅ 没有需要清理的运行"; rm -f "${WORKLIST}"; exit 0; fi
-          echo ">>> 前 20 条预览:"
-          head -20 "${WORKLIST}" | sed 's/^/    run id: /'
+          echo ">>> 待删除数量: ${COUNT}"
+          if [ "${COUNT}" = "0" ]; then
+            echo "✅ 没有需要清理的记录"; rm -f "${WORKLIST}"; exit 0
+          fi
+          echo ">>> 前 20 条预览（run_id / 创建时间 / 结论）:"
+          head -20 "${WORKLIST}" | awk -F'\t' '{ printf "    %s  %s  %s\n", $1, $2, $3 }'
 
           if [ "${DRY_RUN}" = "true" ]; then
             echo ">>> dry_run=true，未执行删除"; rm -f "${WORKLIST}"; exit 0
           fi
 
           DELETED=0; FAILED=0
-          while read -r id; do
+          while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            id="$(printf '%s' "${line}" | cut -f1)"
             [ -n "${id}" ] || continue
             ok=0
             for attempt in 1 2 3; do
               if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" >/dev/null 2>&1; then
                 ok=1; break
               fi
-              sleep $((attempt * 2))      # 撞限流就退避重试
+              sleep $((attempt * 2))          # 撞限流就退避重试
             done
             if [ "${ok}" = "1" ]; then
-              DELETED=$((DELETED + 1)); echo "🗑 已删除 ${id}"
+              DELETED=$((DELETED + 1)); echo "🗑 已删除 run ${id}"
             else
-              FAILED=$((FAILED + 1));  echo "⚠️ 删除失败 ${id}（已重试 3 次）"
+              FAILED=$((FAILED + 1));  echo "⚠️ 删除失败 run ${id}（已重试 3 次）"
             fi
             sleep 0.3
           done < "${WORKLIST}"
@@ -95,8 +123,9 @@ jobs:
 
           {
             echo "## 清理结果"
+            echo "- 模式: ${MODE}"
             echo "- 阈值: created_at < ${THRESHOLD}（保留 ${KEEP_DAYS} 天）"
-            echo "- 每个 workflow 至少保留最近 ${KEEP_LATEST} 次"
+            echo "- 每 workflow 至少保留最近 ${KEEP_LATEST} 次"
             echo "- 成功删除: ${DELETED}"
             echo "- 失败: ${FAILED}"
           } >> "$GITHUB_STEP_SUMMARY"
