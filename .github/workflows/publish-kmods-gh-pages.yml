@@ -19,6 +19,10 @@ permissions:
   contents: write      # 推 gh-pages
   actions: read        # 读上游 run 的 artifacts
 
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     if: |
@@ -48,6 +52,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ env.RID }}
+          pattern: "*-feed-*"
           path: downloaded
 
       - name: Check artifacts
@@ -84,7 +89,7 @@ jobs:
       - name: Publish kmods feed
         shell: bash
         run: |
-          set -euxo pipefail
+          set -uxo pipefail
           [ -d downloaded ] || { echo "没有 artifact，跳过发布"; exit 0; }
 
           for artifact in downloaded/*/; do
@@ -96,34 +101,55 @@ jobs:
             esac
             echo ">>> ${KIND} / ${DEVICE}  ← ${NAME}"
 
-            # 核心包 feed（可选，体积大，建议只在确实需要时上传）
             if [ "${KIND}" = "packages" ]; then
               DEST="gh-pages/packages/${DEVICE}/latest"
               rm -rf "${DEST}"; mkdir -p "${DEST}"
               cp -rf "${ART}/." "${DEST}/"
-              cp -rf "${DEST}/." "gh-pages/archive/${VERSION}/${DEVICE}/packages/"
               echo ">>> 发布核心 feed: ${DEST} ($(du -sh "${DEST}" | cut -f1))"
               continue
             fi
 
-            # kmods feed
-            PDB="$(find "${ART}" -type f -name packages.adb | head -n1 || true)"
-            [ -n "${PDB}" ] || { echo "!! ${NAME} 里没有 packages.adb，跳过"; continue; }
+            # ---------- kmods ----------
+            PDB="$(find "${ART}" -type f -name 'packages.adb' | head -n1 || true)"
+            if [ -z "${PDB}" ]; then
+              if find "${ART}" -type f -name 'index.json' | grep -q .; then
+                echo "::error::${NAME} 只有 index.json、没有 packages.adb，apk 客户端无法直接使用该源"
+              else
+                echo "::error::${NAME} 既没有 packages.adb 也没有 index.json，无法发布"
+              fi
+              continue
+            fi
             SRC="$(dirname "${PDB}")"
-            VER="$(basename "${SRC}")"          # = vermagic
-            DEST="gh-pages/kmods/${DEVICE}/${VER}"
-            ARCH="gh-pages/archive/${VERSION}/${DEVICE}/kmods/${VER}"
-            mkdir -p "${DEST}" "${ARCH}"
-            find "${SRC}" -maxdepth 1 -type f \( -name '*.apk' -o -name 'packages.adb' \) -exec cp -f {} "${DEST}/" \;
-            cp -rf "${DEST}/." "${ARCH}/"
-            echo ">>> 发布: ${DEST}  ($(find "${DEST}" -maxdepth 1 -name '*.apk' | wc -l) 个 apk)"
+            VER="$(basename "${SRC}")"        # = vermagic
 
-            # latest = 该设备最新一次的 vermagic（供固件里固定的 URL 使用）
-            rm -rf "gh-pages/kmods/${DEVICE}/latest"
-            mkdir -p "gh-pages/kmods/${DEVICE}/latest"
-            cp -rf "${DEST}/." "gh-pages/kmods/${DEVICE}/latest/"
-            echo ">>> latest 已更新: gh-pages/kmods/${DEVICE}/latest"
+            # latest：清空重建（必须是真拷贝，软链在 gh-pages 上会变成文本文件）
+            LATEST="gh-pages/kmods/${DEVICE}/latest"
+            rm -rf "${LATEST}"; mkdir -p "${LATEST}"
+            find "${SRC}" -maxdepth 1 -type f -exec cp -f {} "${LATEST}/" \;
+            echo ">>> latest: ${LATEST}  ($(find "${LATEST}" -maxdepth 1 -name '*.apk' | wc -l) 个 apk, $(du -sh "${LATEST}" | cut -f1))"
+
+            # archive：vermagic 保留在路径里，仍可精确指向某一版
+            ARCH="gh-pages/archive/${VERSION}/${DEVICE}/kmods/${VER}"
+            rm -rf "${ARCH}"; mkdir -p "${ARCH}"
+            find "${SRC}" -maxdepth 1 -type f -exec cp -f {} "${ARCH}/" \;
+            echo ">>> archive: ${ARCH}"
+
+            # 清掉旧结构遗留的 kmods/<设备>/<vermagic>/（跑过一次后自然清空）
+            find "gh-pages/kmods/${DEVICE}" -mindepth 1 -maxdepth 1 -type d ! -name latest -exec rm -rf {} + 2>/dev/null || true
           done
+
+      - name: Prune old versions (keep 3)
+        shell: bash
+        run: |
+          set -uxo pipefail
+          KEEP=3
+          prune() {   # $1 = archive 根目录
+            [ -d "$1" ] || return 0
+            # ⚠️ 必须按【名字】排序，不能按时间：--depth=1 clone 后所有目录 mtime 都=检出时间
+            ls -1d "$1"/*/ 2>/dev/null | sort -r | tail -n +$((KEEP+1)) | xargs -r rm -rf
+          }
+          prune gh-pages/archive
+          echo ">>> 剩余 archive:"; ls -1 gh-pages/archive 2>/dev/null || true
 
       - name: Generate indexes
         shell: bash
@@ -192,8 +218,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then echo "无变化，跳过提交"; exit 0; fi
-          git commit -m "Update kmods feed (${VERSION})"
-          git push origin gh-pages
+          # 用孤儿分支单提交覆盖式推送：历史不膨胀，站点内容完全等价
+          git checkout --orphan clean-gh-pages
+          git add -A
+          git commit -m "gh-pages site @ $(date -u +%FT%TZ)"
+          git branch -M clean-gh-pages gh-pages
+          git push -f origin gh-pages
 
       - name: Summary
         if: always()
