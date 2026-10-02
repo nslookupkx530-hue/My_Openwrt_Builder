@@ -23,7 +23,6 @@ KERNEL="$(uname -r)"            # 例如 6.12.103
 
 TMP="$(mktemp)" || exit 0
 cp "$LIST" "$TMP"
-REMOVED=0
 
 REMOVED=0
 
