@@ -819,7 +819,7 @@ jobs:
             src/bin/targets/*
             !src/bin/targets/**/packages/**
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Create Release
         if: success()
