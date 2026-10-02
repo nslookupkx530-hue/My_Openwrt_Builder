@@ -25,6 +25,30 @@ TMP="$(mktemp)" || exit 0
 cp "$LIST" "$TMP"
 REMOVED=0
 
+REMOVED=0
+
+# ---------- 私有 feed 死链清理 ----------
+# 构建时 include/feeds.mk 会给每个 feed 生成一条 distfeeds 行（URL 一律拼成
+# "官方下载站 + feed 名"），但私有 feed（m0eakpatch / fanchmwrt …）并不在
+# downloads.openwrt.org 上 → 这类行必然 404，而一个 404 源会让 apk update
+# 整体失败，必须删掉。
+# 做法：确定性删除，不做网络探测（首启可能还没网，探测会把正常源也删掉）。
+# 以后每新增一个私有 feed，把名字补进下面这个用 | 分隔的列表即可。
+PRIVATE_FEEDS="m0eakpatch|fanchmwrt"
+
+if grep -qE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" 2>/dev/null; then
+    NEW="${TMP}.priv"
+    if grep -vE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" > "$NEW" 2>/dev/null && [ -s "$NEW" ]; then
+        mv "$NEW" "$TMP"
+        REMOVED=$((REMOVED + 1))
+        logger -t drop-kmods-repo "已删除私有 feed 死链源 (${PRIVATE_FEEDS})"
+    else
+        logger -t drop-kmods-repo "私有 feed 清理异常，保持原样"
+    fi
+    rm -f "$NEW" 2>/dev/null || true
+fi
+# ---------- 私有 feed 死链清理 END ----------
+
 while IFS= read -r line; do
     case "$line" in
         *"/kmods/"*) ;;
