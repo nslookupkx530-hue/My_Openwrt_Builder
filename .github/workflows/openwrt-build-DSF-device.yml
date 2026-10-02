@@ -758,43 +758,57 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Diagnose kmod artifacts
-        if: always()
-        shell: bash
-        run: |
-          set -uxo pipefail
-          cd "${WORKSPACE}/src" || exit 0
-          echo ">>> 1) 全仓找 kmods 目录"
-          find bin -type d -name kmods -print 2>/dev/null || true
-          echo ">>> 2) 全仓找 kmod 包（前 30 条）"
-          find bin \( -name 'kmod-*.apk' -o -name 'kmod-*.ipk' \) -print 2>/dev/null | head -30 || true
-          echo ">>> 3) bin/targets/*/*/packages/ 目录"
-          ls -lh bin/targets/*/*/packages/ 2>/dev/null | head -40 || true
-          echo ">>> 4) bin/packages/*/ 目录"
-          ls -lh bin/packages/*/ 2>/dev/null || true
-          echo ">>> 5) 原判据 kmods 目录"
-          ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (仍无 kmods 目录)"
-          echo ">>> 6) 内核版本线索"
-          cat bin/targets/*/*/version.buildinfo 2>/dev/null || true
-
       - name: Verify Images
         if: success()
         shell: bash
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
+          echo ">>> 设备: ${TARGET_DEVICE:-未知}"
+
+          echo ">>> 产物目录:"
           ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,60p' || true
+
           IMG="$(find bin/targets -maxdepth 3 -type f -name '*squashfs-sysupgrade.bin' -print -quit)"
           [ -n "${IMG}" ] || IMG="$(find bin/targets -maxdepth 3 -type f -name '*.bin' ! -name 'mt*-ram-*bl2.bin' -print -quit)"
           [ -n "${IMG}" ] || { echo "ERROR: 没有找到固件镜像"; exit 1; }
           echo ">>> 生成镜像: ${IMG}"
+
           echo ">>> 本设备相关镜像:"
-          find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.itb' -o -name '*.img.gz' \) ! -name 'mt*-ram-*bl2.bin' | sort || true
-          echo ">>> 自有 kmod 库（本次产物）:"; ls -d bin/targets/*/*/kmods/*/ 2>/dev/null || echo "  (无 kmods 目录)"
-          echo ">>> 固件内第三方 apk:"; find files/usr/share/third-party -maxdepth 1 -name '*.apk' -printf '%f\n' 2>/dev/null | sort || echo "  (无)"
-          echo ">>> 首启安装服务:"; ls -l files/etc/rc.d/S99apk-install 2>/dev/null || echo "  (无)"
+          find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.itb' -o -name '*.img.gz' \) \
+            ! -name 'mt*-ram-*bl2.bin' | sort || true
+
+          echo ">>> 自有 kmod 库（本次产物）:"
+          KC="$(ls bin/targets/*/*/packages/ 2>/dev/null | grep -c '^kmod-' || true)"
+          echo "     kmod 包数: ${KC:-0}"
+          echo ">>> kmod 库索引文件:"
+          ls bin/targets/*/*/packages/*.adb bin/targets/*/*/packages/*.json 2>/dev/null || echo "  (无 packages.adb / index.json)"
+
+          echo ">>> 固件内第三方 apk:"
+          find files/usr/share/third-party -maxdepth 1 -name '*.apk' -printf '%f\n' 2>/dev/null | sort || echo "  (无)"
+
+          echo ">>> 首启安装服务:"
+          ls -l files/etc/rc.d/S99apk-install 2>/dev/null || echo "  (无)"
+
           echo ">>> 镜像清单里搜关键包:"
-          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null || echo "  (manifest 里没有，第三方 apk 走首启安装，属正常)"
+          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null \
+            || echo "  (manifest 里没有，第三方 apk 走首启安装，属正常)"
+
+          echo ">>> 构建树里的 apk 源清单（官方 feed 行格式参照）:"
+          find build_dir -maxdepth 8 -type f \( -name 'distfeeds.list' -o -path '*repositories.d/*' \) 2>/dev/null \
+            | head -5 | while read -r f; do echo "--- ${f}"; sed -n '1,10p' "${f}"; done || true
+
+          echo ">>> uci-defaults 目录:"
+          ls -l files/etc/uci-defaults/ 2>/dev/null || echo "  (无该目录)"
+
+          echo ">>> 98 / 99 两个脚本的 URL 写法对比（重点看 98 是不是带 packages.adb）:"
+          for f in files/etc/uci-defaults/98-* \
+                   files/etc/uci-defaults/99-dsf-own-kmods \
+                   ../files/etc/uci-defaults/99-dsf-own-kmods; do
+            [ -f "${f}" ] || continue
+            echo "--- ${f}"; sed -n '1,25p' "${f}"
+          done || true
+          echo ">>> 若上面全空 → 99 不在 src/files/ 下，去构建日志里搜 'Inject own kmods feed' 看它到底写到哪了"
 
       - name: Upload Artifacts
         if: success()
