@@ -855,21 +855,16 @@ jobs:
             echo ">>> 当前设备 ${DEV}，非 x86，跳过"
             exit 0
           fi
-
-          printf '%s\n' \
-            "CONFIG_TARGET_ROOTFS_EXT4FS=y" \
-            # 产出 VMware / ESXi 固件
-            "CONFIG_VMDK_IMAGES=y" \
-            # 产出 VirtualBox 固件
-            "CONFIG_VDI_IMAGES is not set" \
-            # 产出 Hyper-V 固件
-            "CONFIG_VHDX_IMAGES is not set" >> .config
-
+          echo "CONFIG_TARGET_ROOTFS_EXT4FS=y" >> .config
+          # 产出 VMware / ESXi 固件
+          echo "CONFIG_VMDK_IMAGES=y" >> .config
+          # 产出 VirtualBox 固件
+          # echo "CONFIG_VDI_IMAGES is not set" >> .config
+          # 产出 Hyper-V 固件
+          # echo "CONFIG_VHDX_IMAGES is not set >> .config
           make defconfig
-
-          echo ">>> 生效检查（必须看到 4 行 =y）:"
-          grep -E '^CONFIG_(VMDK|VDI|VHDX)_IMAGES=y$|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)=y$' .config || true
-
+          echo ">>> 生效检查:"
+          grep -E '^CONFIG_(VMDK|VDI|VHDX)_IMAGES|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)' .config || true
           if ! grep -q '^CONFIG_VMDK_IMAGES=y$' .config; then
             echo "ERROR: CONFIG_VMDK_IMAGES 未生效（被 defconfig 丢弃）"
             exit 1
