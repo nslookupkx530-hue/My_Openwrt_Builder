@@ -844,6 +844,30 @@ jobs:
             echo "ERROR: 以下裁剪项未生效（可能有别的包 select 了它）:${BAD_TRIM}"; exit 1; }
           echo ">>> 注入/裁剪校验通过"
 
+      - name: Enable x86 VM disk images
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+          DEV="${TARGET_DEVICE:-${{ github.event.inputs.target_device }}}"
+          if [ "${DEV}" != "x86" ]; then
+            echo ">>> 当前设备 ${DEV}，非 x86，跳过"; exit 0
+          fi
+          {
+            echo "CONFIG_TARGET_ROOTFS_EXT4FS=y"
+            # 产出 VMware / ESXi 固件
+            echo "CONFIG_VMDK_IMAGES=y"
+            # 产出 VirtualBox 固件
+            echo "# CONFIG_VDI_IMAGES is not set
+            # 产出 Hyper-V 固件
+            echo "# CONFIG_VHDX_IMAGES is not set"
+          } >> .config
+          make defconfig
+          echo ">>> 生效检查:"
+          grep -E '^(# )?CONFIG_(VMDK|VDI|VHDX)_IMAGES|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)=y' .config
+          grep -qE '^CONFIG_VMDK_IMAGES=y$' .config || { echo "ERROR: VMDK 没开起来"; exit 1; }
+
       - name: Generate release notes
         id: notes
         shell: bash
@@ -1258,12 +1282,25 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${WORKSPACE}/src"
-          ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,60p' || true
+
+          echo ">>> 产物目录:"
+          ls -lh bin/targets/*/*/ 2>/dev/null | sed -n '1,80p' || true
+
+          # 取样：优先"可刷写的系统镜像"，并排除 u-boot/bl2 这类辅助 bin
           IMG="$(find bin/targets -maxdepth 3 -type f \
-                 \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \) \
+                 \( -name '*squashfs-sysupgrade.bin' -o -name '*-combined.img.gz' -o -name '*.vmdk' \) \
                  -print -quit)"
+          [ -n "${IMG}" ] || IMG="$(find bin/targets -maxdepth 3 -type f \
+                 \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' -o -name '*.vmdk' \) \
+                 ! -name 'mt*-ram-*bl2.bin' -print -quit)"
           [ -n "${IMG}" ] || { echo "ERROR: bin/targets 下没有找到固件镜像"; exit 1; }
           echo ">>> 生成镜像示例: ${IMG}"
+
+          echo ">>> 本次全部镜像产物:"
+          find bin/targets -maxdepth 3 -type f \
+            \( -name '*.bin' -o -name '*.img.gz' -o -name '*.itb' -o -name '*.squashfs' \
+               -o -name '*.vmdk' -o -name '*.vdi' -o -name '*.vhdx' -o -name '*.iso' \) \
+            ! -name 'mt*-ram-*bl2.bin' | sort || true
 
       - name: Upload build log
         if: failure()
@@ -1303,6 +1340,9 @@ jobs:
             src/bin/targets/*/*/*.img.gz
             src/bin/targets/*/*/*.itb
             src/bin/targets/*/*/*.squashfs
+            src/bin/targets/*/*/*.vmdk
+            src/bin/targets/*/*/*.vdi
+            src/bin/targets/*/*/*.vhdx
             src/bin/targets/*/*/sha256sums
           fail_on_unmatched_files: false
         env:
