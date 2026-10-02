@@ -30,10 +30,11 @@ drop_line() {
     grep -vxF "$1" "$TMP" > "${TMP}.new" 2>/dev/null || true
     if [ -s "${TMP}.new" ]; then
         mv "${TMP}.new" "$TMP"
-    else
-        logger -t drop-kmods-repo "跳过删除（会导致 distfeeds 为空）: $1"
-        rm -f "${TMP}.new" 2>/dev/null || true
+        return 0
     fi
+    logger -t drop-kmods-repo "跳过删除（会导致 distfeeds 为空）: $1"
+    rm -f "${TMP}.new" 2>/dev/null || true
+    return 1
 }
 
 # ---------- 私有 feed 死链清理 ----------
@@ -43,14 +44,32 @@ drop_line() {
 # 整体失败，必须删掉。
 # 做法：确定性删除，不做网络探测（首启可能还没网，探测会把正常源也删掉）。
 # 以后每新增一个私有 feed，把名字补进下面这个用 | 分隔的列表即可。
+# 静态：私有 feed（不在任何官方下载站上，必然死链）
 PRIVATE_FEEDS="m0eakpatch|fanchmwrt"
 
-if grep -qE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" 2>/dev/null; then
-    grep -vE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" > "${TMP}.priv" 2>/dev/null || true
+# 基线特例：<宿主关键字>:<feed 名>
+#   实测 immortalwrt 25.12-SNAPSHOT 没有 video feed（downloads.immortalwrt.org 上 404），
+#   而 openwrt 基线的 video 是好的 → 所以必须带宿主条件，不能塞进 PRIVATE_FEEDS
+DEAD_BY_HOST="downloads.immortalwrt.org:video"
+
+# 预留：构建期探活结果（暂时留空）
+DEAD_FEEDS=""
+
+HOST="$(grep -m1 -oE 'https?://[^/]+' "$TMP" 2>/dev/null | sed -E 's|^https?://||')"
+PAT="${PRIVATE_FEEDS}"
+for entry in ${DEAD_BY_HOST}; do
+    h="${entry%%:*}"; f="${entry##*:}"
+    case "${HOST}" in *"${h}"*) PAT="${PAT}|${f}" ;; esac
+done
+[ -n "${DEAD_FEEDS}" ] && PAT="${PAT}|$(printf '%s' "${DEAD_FEEDS}" | tr ' ' '|')"
+logger -t drop-kmods-repo "baseline=${HOST:-未知} 生效删除名单=${PAT}"
+
+if grep -qE "/(${PAT})/packages\.adb$" "$TMP" 2>/dev/null; then
+    grep -vE "/(${PAT})/packages\.adb$" "$TMP" > "${TMP}.priv" 2>/dev/null || true
     if [ -s "${TMP}.priv" ]; then
         mv "${TMP}.priv" "$TMP"
         REMOVED=$((REMOVED + 1))
-        logger -t drop-kmods-repo "已删除私有 feed 死链源 (${PRIVATE_FEEDS})"
+        logger -t drop-kmods-repo "已删除私有 feed 死链源 (${PAT})"
     else
         logger -t drop-kmods-repo "私有 feed 清理异常，保持原样"
     fi
@@ -74,8 +93,7 @@ while IFS= read -r line; do
     fi
 
     logger -t drop-kmods-repo "kmods 源内核不匹配 (${ver} != ${KERNEL})，删除该源"
-    drop_line "$line"
-    REMOVED=$((REMOVED + 1))
+    if drop_line "$line"; then REMOVED=$((REMOVED + 1)); fi
 done < "$LIST"
 
 # ---------- 写回 ----------
