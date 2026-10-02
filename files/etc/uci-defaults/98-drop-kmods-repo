@@ -2,8 +2,8 @@
 # ============================================================
 #  98-drop-kmods-repo
 #
-#  目的：distfeeds.list 里的 /kmods/ 源，其内核版本必须与设备实际运行内核
-#        一致，否则 apk update 会因 404 **整体失败**（一个源失败 = 整个事务失败）。
+#  目的：distfeeds.list 里的 /kmods/ 源，内核版本必须与设备实际运行内核一致，
+#        否则 apk update 会因 404 **整体失败**（一个源失败 = 整个事务失败）。
 #
 #  策略：版本一致 → 保留（这样才能装官方/镜像的 kmod-* 包）
 #        版本不一致 → 删掉这一个源
@@ -23,8 +23,18 @@ KERNEL="$(uname -r)"            # 例如 6.12.103
 
 TMP="$(mktemp)" || exit 0
 cp "$LIST" "$TMP"
-
 REMOVED=0
+
+# 删除 TMP 中完全等于 $1 的那一行；保证不会把文件清空
+drop_line() {
+    grep -vxF "$1" "$TMP" > "${TMP}.new" 2>/dev/null || true
+    if [ -s "${TMP}.new" ]; then
+        mv "${TMP}.new" "$TMP"
+    else
+        logger -t drop-kmods-repo "跳过删除（会导致 distfeeds 为空）: $1"
+        rm -f "${TMP}.new" 2>/dev/null || true
+    fi
+}
 
 # ---------- 私有 feed 死链清理 ----------
 # 构建时 include/feeds.mk 会给每个 feed 生成一条 distfeeds 行（URL 一律拼成
@@ -36,18 +46,18 @@ REMOVED=0
 PRIVATE_FEEDS="m0eakpatch|fanchmwrt"
 
 if grep -qE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" 2>/dev/null; then
-    NEW="${TMP}.priv"
-    if grep -vE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" > "$NEW" 2>/dev/null && [ -s "$NEW" ]; then
-        mv "$NEW" "$TMP"
+    grep -vE "/(${PRIVATE_FEEDS})/packages\.adb$" "$TMP" > "${TMP}.priv" 2>/dev/null || true
+    if [ -s "${TMP}.priv" ]; then
+        mv "${TMP}.priv" "$TMP"
         REMOVED=$((REMOVED + 1))
         logger -t drop-kmods-repo "已删除私有 feed 死链源 (${PRIVATE_FEEDS})"
     else
         logger -t drop-kmods-repo "私有 feed 清理异常，保持原样"
     fi
-    rm -f "$NEW" 2>/dev/null || true
+    rm -f "${TMP}.priv" 2>/dev/null || true
 fi
-# ---------- 私有 feed 死链清理 END ----------
 
+# ---------- kmods 源内核版本核对 ----------
 while IFS= read -r line; do
     case "$line" in
         *"/kmods/"*) ;;
@@ -64,16 +74,16 @@ while IFS= read -r line; do
     fi
 
     logger -t drop-kmods-repo "kmods 源内核不匹配 (${ver} != ${KERNEL})，删除该源"
-    grep -vxF "$line" "$TMP" > "${TMP}.new" 2>/dev/null || true
-    mv "${TMP}.new" "$TMP"
+    drop_line "$line"
     REMOVED=$((REMOVED + 1))
 done < "$LIST"
 
+# ---------- 写回 ----------
 if [ "$REMOVED" -gt 0 ]; then
     cp "$TMP" "$LIST"
     rm -f /var/lock/apk* 2>/dev/null || true
-    logger -t drop-kmods-repo "已删除 ${REMOVED} 个不匹配的 kmods 源"
+    logger -t drop-kmods-repo "已清理 ${REMOVED} 处源（kmods 版本不匹配 / 私有 feed 死链）"
 fi
 
-rm -f "$TMP" "${TMP}.new" 2>/dev/null || true
+rm -f "$TMP" "${TMP}.new" "${TMP}.priv" 2>/dev/null || true
 exit 0
