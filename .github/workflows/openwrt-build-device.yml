@@ -1269,7 +1269,7 @@ jobs:
         with:
           name: build-logs-${{ github.run_id }}
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 3
           path: |
             ${{ github.workspace }}/build.log
             ${{ github.workspace }}/src/build.log
