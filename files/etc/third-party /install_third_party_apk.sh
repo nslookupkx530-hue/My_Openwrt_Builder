@@ -100,9 +100,30 @@ install_one() {
     return 1
 }
 
+# ----------   一次性批量安装：让本地文件之间互相满足依赖 ----------
+install_batch() {
+    pkgs="$1"
+    [ -n "$pkgs" ] || return 0
+
+    out="$(apk add $APK_OPTS $pkgs 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "OK   批量安装 $(printf '%s\n' $pkgs | wc -l) 个包"
+        return 0
+    fi
+    log "批量安装未全部成功（rc=${rc}），回退逐包重试"
+    log "  $(printf '%s' "$out" \
+        | grep -iE 'conflict|error|unable|unsatisfied|not found|world' \
+        | tail -n 3 | tr '\n' ' ')"
+    return 1
+}
+
 # ----------   多轮循环安装  ----------
 install_queue() {
     queue="$1"
+    # ① 先整批装：同一事务内，本地文件之间可以互相满足依赖
+    install_batch "$queue" && { FAILED_LIST=""; return 0; }
+    # ② 回退：逐包 + 多轮（原逻辑不变）
     pass=1
     while [ "$pass" -le "$MAX_PASSES" ]; do
         next=""
