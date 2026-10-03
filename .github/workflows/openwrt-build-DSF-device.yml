@@ -767,8 +767,7 @@ jobs:
           echo ">>> 生成镜像: ${IMG}"
 
           echo ">>> 本设备相关镜像:"
-          find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.itb' -o -name '*.img.gz' \) \
-            ! -name 'mt*-ram-*bl2.bin' | sort || true
+          find bin/targets -maxdepth 3 -type f \( -name '*.bin' -o -name '*.itb' -o -name '*.img.gz' \) ! -name 'mt*-ram-*bl2.bin' | sort || true
 
           echo ">>> 自有 kmod 库（本次产物）:"
           KC="$(ls bin/targets/*/*/packages/ 2>/dev/null | grep -c '^kmod-' || true)"
@@ -783,8 +782,7 @@ jobs:
           ls -l files/etc/rc.d/S99apk-install 2>/dev/null || echo "  (无)"
 
           echo ">>> 镜像清单里搜关键包:"
-          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null \
-            || echo "  (manifest 里没有，第三方 apk 走首启安装，属正常)"
+          grep -iE 'store|quickstart|turboacc|passwall|aurora' bin/targets/*/*/*.manifest 2>/dev/null || echo "  (manifest 里没有，第三方 apk 走首启安装，属正常)"
 
       - name: apk feed health check
         # 判据：404 不可怕（98 会在设备首启删掉），
@@ -797,9 +795,15 @@ jobs:
           SUM="${GITHUB_STEP_SUMMARY:-/dev/null}"
           rm -f /tmp/uncovered.txt
 
-          DISTF="$(find build_dir -path '*repositories.d/distfeeds.list' 2>/dev/null | head -1 || true)"
+          DISTF="$(find build_dir -path '*repositories.d/distfeeds.list' 2>/dev/null | grep -v 'root\.orig-' | head -1 || true)"
+          [ -n "${DISTF}" ] || DISTF="$(find build_dir -path '*repositories.d/distfeeds.list' 2>/dev/null | head -1 || true)"
+          [ -n "${DISTF}" ] || echo "::warning::构建树里没找到 distfeeds.list，本次未做体检"
+
           S98="files/etc/uci-defaults/98-drop-kmods-repo"
-          [ -f "${S98}" ] || { echo "::error::找不到 ${S98}"; exit 1; }
+          if [ ! -f "${S98}" ]; then
+            echo "::error::找不到 ${S98}（公共 files/etc 没进构建树？）"
+            exit 1
+          fi
 
           # 98 里"已覆盖"的 feed 名 = 静态名单 + 烘焙名单 + 命中宿主特例的
           COVERED="$(sed -n 's/^PRIVATE_FEEDS="\(.*\)"$/\1/p; s/^DEAD_FEEDS="\(.*\)"$/\1/p' "${S98}" | tr '|' ' ')"
@@ -813,6 +817,7 @@ jobs:
           {
             echo "### apk 源体检"
             echo ""
+            echo "- 设备: \`${TARGET_DEVICE:-未知}\`"
             echo "- baseline host: \`${HOST:-未知}\`"
             echo "- distfeeds: \`${DISTF:-未找到}\`"
             echo "- 98 已覆盖: \`${COVERED:-无}\`"
