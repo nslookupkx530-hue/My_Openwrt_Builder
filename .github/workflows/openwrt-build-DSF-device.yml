@@ -822,6 +822,7 @@ jobs:
             if [ -n "${DISTF}" ]; then
               grep -E '^https?://' "${DISTF}" | while read -r u; do
                 n="$(basename "$(dirname "${u}")")"
+                case "${u}" in */targets/*) n="target-core" ;; esac
                 code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' -L "${u}" || echo 000)"
                 cov="-"
                 case " ${COVERED} " in *" ${n} "*) cov="✅" ;; esac
