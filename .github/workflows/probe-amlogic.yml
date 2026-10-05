@@ -1,0 +1,30 @@
+name: Probe amlogic support
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe targets
+        shell: bash
+        run: |
+          set -uxo pipefail
+          for R in "immortalwrt/immortalwrt" "openwrt/openwrt"; do
+            echo "================ ${R} ================"
+            rm -rf t
+            git -c advice.detachedHead=false clone --depth=1 --filter=blob:none --sparse \
+              "https://github.com/${R}.git" t 2>/dev/null || { echo "  clone 失败"; continue; }
+            cd t
+            git sparse-checkout set target/linux >/dev/null 2>&1 || true
+            echo "--- target/linux/ 下匹配 amlogic|meson 的 ---"
+            ls -1 target/linux/ 2>/dev/null | grep -iE 'amlogic|meson' || echo "  (无)"
+            echo "--- amlogic 子目录（若存在）---"
+            ls -1 target/linux/amlogic/ 2>/dev/null || echo "  (不存在)"
+            echo "--- image/Makefile 里的设备名 ---"
+            grep -rnE 'define Device/|DEVICE_' target/linux/amlogic/image/Makefile 2>/dev/null | head -20 || echo "  (无)"
+            echo "--- 全树搜 phicomm / s905d ---"
+            grep -rn -iE 'phicomm|s905d' target/linux/ 2>/dev/null | head -20 || echo "  (无匹配)"
+            cd ..
+          done
+          echo ">>> 探测完成"
