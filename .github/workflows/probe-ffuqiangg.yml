@@ -1,0 +1,30 @@
+name: Probe ffuqiangg build_openwrt
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe
+        shell: bash
+        run: |
+          set -uxo pipefail
+          rm -rf p
+          git clone --depth=1 https://github.com/ffuqiangg/build_openwrt.git p 2>&1 | tail -3
+          cd p
+          echo "==================== 顶层目录 ===================="
+          ls -la
+          echo "==================== workflows ===================="
+          ls -la .github/workflows/ 2>/dev/null || echo "(无 .github/workflows)"
+          echo "==================== 关键命中（内核/打包/target） ===================="
+          grep -rn -iE 'CONFIG_TARGET|mk_s905d|openwrt_packit|ophub|unifreq|flippy|u-boot|phicomm|s905d|armsr|armvirt|amlogic' \
+            --include='*.yml' --include='*.yaml' --include='*.sh' --include='*.config' --include='*.conf' --include='*.md' --include='*.txt' \
+            . 2>/dev/null | head -80 || true
+          echo "==================== 配置文件（种子） ===================="
+          find . -maxdepth 3 -type f \( -name '*.config' -o -name '*config*' -o -name '*.conf' \) 2>/dev/null | head -20
+          echo "==================== 内核/uboot/packit 相关目录 ===================="
+          find . -maxdepth 3 \( -iname '*kernel*' -o -iname '*uboot*' -o -iname '*u-boot*' -o -iname '*packit*' -o -iname '*n1*' \) 2>/dev/null | head -30
+          echo "==================== 各 workflow 开头 40 行 ===================="
+          for f in .github/workflows/*; do echo "--- $f"; sed -n '1,40p' "$f"; done 2>/dev/null | head -160
+          echo ">>> 探测完成"
