@@ -2,6 +2,19 @@ name: Build PHICOMM-N1 (ImmortalWrt + Amlogic pack)
 
 on:
   workflow_dispatch:
+      include_docker:
+        description: "是否编译 Docker 插件"
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+      enable_store:
+        description: "集成 store 商店"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
