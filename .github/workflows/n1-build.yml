@@ -46,7 +46,7 @@ jobs:
         run: |
           d '
             cd ${wrtdir}
-            cp ${ffdir}/configs/n1/phicomm-n1.config .config
+            cp ${ffdir}/configs/DSF/n1/phicomm-n1.config .config
             make defconfig
           '
           d '
