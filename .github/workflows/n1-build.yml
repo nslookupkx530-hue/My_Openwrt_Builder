@@ -170,6 +170,23 @@ jobs:
         env:
           DOCKER: ${{ inputs.include_docker }}
 
+      - name: 包清单自检
+        run: |
+          d '
+            cd ${wrtdir}
+            p "=== 期望包是否都在 .config ==="
+            for k in luci-app-amlogic luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn \
+                     luci-app-diskman luci-i18n-diskman-zh-cn luci-app-autoreboot luci-i18n-autoreboot-zh-cn \
+                     luci-app-ramfree luci-i18n-ramfree-zh-cn filebrowser luci-app-filebrowser-go \
+                     luci-i18n-filebrowser-go-zh-cn luci-app-samba4 luci-app-hd-idle luci-app-upnp luci-app-ttyd ; do
+              if grep -qx "CONFIG_PACKAGE_${k}=y" .config; then
+                p "  OK   ${k}"
+              else
+                p "  MISS ${k}   ← 大概率缺对应的 feed"
+              fi
+            done
+          '
+
       - name: 开始编译
         run: |
           d '
