@@ -88,54 +88,74 @@ jobs:
       - name: 前置检查（外部依赖）
         run: |
           set -uo pipefail
-          FAIL=0
-          BASE="https://downloads.immortalwrt.org/releases/${IMM_TAG}/targets/armsr/armv8"
+          IMM_VER="${IMM_TAG#v}"
+          WANT_KVER="6.12.103"
+          OK_BASE=""
           KVER=""
           KVG=""
+          FAIL=0
 
-          C1="$(curl -s -o /tmp/profiles.json -w '%{http_code}' -m 25 "${BASE}/profiles.json" || echo 000)"
-          if [ "${C1}" = "200" ]; then
-            KVER="$(jq -r '.linux_kernel.version' /tmp/profiles.json)"
-            KVG="$(jq -r '.linux_kernel.vermagic' /tmp/profiles.json)"
+          echo "=========== 1) immortalwrt 下载站现有版本目录 ==========="
+          curl -s -m 25 "https://downloads.immortalwrt.org/releases/" -o /tmp/idx.html || true
+          grep -oE 'href="[^"]+/"' /tmp/idx.html | sed -E 's/href="//; s|/"$||' | sort -u | tee /tmp/vers.txt || true
+          echo "（以上是真实存在的版本目录，注意有没有 v 前缀）"
+
+          echo "=========== 2) 逐候选探 profiles.json ==========="
+          for M in "https://downloads.immortalwrt.org" "https://downloads.openwrt.org"; do
+            for V in "${IMM_VER}" "v${IMM_VER}"; do
+              B="${M}/releases/${V}/targets/armsr/armv8"
+              C="$(curl -s -o /tmp/p.json -w '%{http_code}' -m 25 "${B}/profiles.json" || echo 000)"
+              KV=""
+              VG=""
+              if [ "${C}" = "200" ]; then
+                KV="$(jq -r '.linux_kernel.version' /tmp/p.json)"
+                VG="$(jq -r '.linux_kernel.vermagic' /tmp/p.json)"
+              fi
+              echo "  HTTP=${C}  kernel=${KV:-?}  vermagic=${VG:-?}  ${B}/profiles.json"
+              if [ "${C}" = "200" ] && [ "${KV}" = "${WANT_KVER}" ] && [ -z "${OK_BASE}" ]; then
+                OK_BASE="${B}"
+                KVER="${KV}"
+                KVG="${VG}"
+              fi
+            done
+          done
+
+          echo "=========== 3) 全是 404 时，看看 armsr 目标在不在 ==========="
+          if [ -z "${OK_BASE}" ]; then
+            curl -s -m 25 "https://downloads.immortalwrt.org/releases/${IMM_VER}/targets/" | grep -oE 'href="[^"]+/"' | sed -E 's/href="//; s|/"$||' | sort -u | head -n 40 || true
+          fi
+
+          echo "=========== 4) kmods 与 ffuqiangg 内核资产 ==========="
+          KMODS=""
+          C2=000
+          if [ -n "${OK_BASE}" ]; then
+            KMODS="${KVER}-1-${KVG}"
+            C2="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "${OK_BASE}/kmods/${KMODS}/packages.adb" || echo 000)"
+            [ "${C2}" = "200" ] || FAIL=1
           else
             FAIL=1
-            echo ">>> ${IMM_TAG} 不可用，immortalwrt 现存 25.12 系列 tag："
-            curl -s -m 25 "https://api.github.com/repos/immortalwrt/immortalwrt/tags?per_page=100" | jq -r '.[].name' | grep -E '25\.12' || echo "（tag 列表拉取失败）"
           fi
-
-          C2=000
-          KMODS=""
-          if [ -n "${KVER}" ]; then
-            KMODS="${KVER}-1-${KVG}"
-            C2="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "${BASE}/kmods/${KMODS}/packages.adb" || echo 000)"
-            [ "${C2}" = "200" ] || FAIL=1
-          fi
-
           C3="$(curl -s -o /tmp/ffkernel.json -w '%{http_code}' -m 25 "https://api.github.com/repos/ffuqiangg/kernel_6.12.y/releases" || echo 000)"
 
           {
             echo "### 前置检查"
             echo ""
-            echo "| 项 | HTTP | 值 |"
-            echo "|---|---|---|"
-            echo "| ${IMM_TAG} profiles.json | ${C1} | version=${KVER} vermagic=${KVG} |"
-            echo "| kmods/${KMODS}/packages.adb | ${C2} | dash 形态目录名 |"
-            echo "| ffuqiangg/kernel_6.12.y | ${C3} | - |"
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 采用的 base | ${OK_BASE:-**无**} |"
+            echo "| linux_kernel.version | ${KVER:-?}（要求 = ${WANT_KVER}） |"
+            echo "| linux_kernel.vermagic | ${KVG:-?} |"
+            echo "| kmods/${KMODS}/packages.adb | ${C2} |"
+            echo "| ffuqiangg/kernel_6.12.y | ${C3} |"
             echo ""
             echo '```'
-            echo "profiles:  ${C1}  version=${KVER} vermagic=${KVG}"
-            echo "kmods:     ${C2}  dir=${KMODS}"
-            echo "kernel:    ${C3}"
             if [ "${C3}" = "200" ] && [ -n "${KVER}" ]; then
-              echo "--- ffuqiangg/kernel_6.12.y 里含 ${KVER} 的资产 ---"
-              jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（没找到 ${KVER} 资产，打包那步会失败）"
+              jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（ffuqiangg 里没有 ${KVER} 的资产 → 打包那步会失败）"
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "profiles.json=${C1} version=${KVER} vermagic=${KVG}"
-          echo "kmods/packages.adb=${C2} dir=${KMODS}"
-          echo "ffuqiangg kernel=${C3}"
+          echo "采用 BASE=${OK_BASE:-无} kernel=${KVER} vermagic=${KVG} kmods=${C2} ffkernel=${C3}"
           [ "${FAIL}" = "0" ] || { echo "::error::前置检查未通过，见 Step Summary"; exit 1; }
 
       # -------------------------------------------------------------- 5 容器
