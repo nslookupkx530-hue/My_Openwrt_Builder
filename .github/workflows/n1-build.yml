@@ -138,8 +138,6 @@ jobs:
         run: bash scripts/n1/init.sh
 
       - name: 准备源码与补丁
-        env:
-          WANT_DOCKER: ${{ inputs.include_docker }}
         run: d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER:-no} bash scripts/n1/prepare.sh"
 
       - name: 构建缓存
@@ -160,17 +158,24 @@ jobs:
 
       - name: 应用可选插件
         run: |
+          set -uo pipefail
+          HOST="${workdir_host:-/mnt/ci}"
+          if [ "${WANT_DOCKER}" = "yes" ]; then
+            printf '%s\n' "CONFIG_PACKAGE_luci-app-dockerman=y" "CONFIG_PACKAGE_dockerd=y" > /tmp/docker-plugins.config
+            echo ">>> 启用 Docker 插件"
+          else
+            : > /tmp/docker-plugins.config
+            echo ">>> 未启用 Docker"
+          fi
+          cp -f /tmp/docker-plugins.config "${HOST}/docker-plugins.config"
           d '
             cd ${wrtdir}
-            if [ "${DOCKER}" = "yes" ]; then
-              p "启用 Docker 插件"
-              echo "CONFIG_PACKAGE_luci-app-dockerman=y" >> .config
-              echo "CONFIG_PACKAGE_dockerd=y" >> .config
+            if [ -s ${workdir}/docker-plugins.config ]; then
+              cat ${workdir}/docker-plugins.config >> .config
+              p "已注入 docker 插件配置"
               make defconfig
             fi
           '
-        env:
-          DOCKER: ${{ inputs.include_docker }}
 
       - name: 包清单自检
         run: |
