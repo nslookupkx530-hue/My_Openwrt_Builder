@@ -156,6 +156,20 @@ jobs:
             grep -E "^CONFIG_TARGET_armsr_armv8_DEVICE_generic=y|^CONFIG_TARGET_ARCH_PACKAGES=|^CONFIG_TARGET_ROOTFS_TARGZ=" .config || true
           '
 
+      - name: 应用可选插件
+        run: |
+          d '
+            cd ${wrtdir}
+            if [ "${DOCKER}" = "yes" ]; then
+              p "启用 Docker 插件"
+              echo "CONFIG_PACKAGE_luci-app-dockerman=y" >> .config
+              echo "CONFIG_PACKAGE_dockerd=y" >> .config
+              make defconfig
+            fi
+          '
+        env:
+          DOCKER: ${{ inputs.include_docker }}
+
       - name: 开始编译
         run: |
           d '
