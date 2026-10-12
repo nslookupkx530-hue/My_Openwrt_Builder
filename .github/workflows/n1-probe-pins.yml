@@ -8,20 +8,20 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
 
-      - name: ① 克隆 ffuqiangg/build_openwrt 并打印 with: 段
+      - name: 抓 ffuqiangg build_openwrt 里的 amlogic 参数
         run: |
           set -uxo pipefail
           git clone --depth 1 https://github.com/ffuqiangg/build_openwrt.git /tmp/bo || true
-          echo "=========== workflow 文件列表 ==========="
+          echo "=== workflow 文件列表 ==="
           ls -l /tmp/bo/.github/workflows/ || true
-          echo "=========== amlogic-s9xxx-openwrt 相关段 ==========="
+          echo "=== amlogic-s9xxx-openwrt 相关段 ==="
           grep -rn -B10 -A25 -- 'amlogic-s9xxx-openwrt' /tmp/bo/.github/workflows/ || echo "(没匹配到)"
 
-      - name: ② 打印 ffuqiangg/kernel_6.12.y 的 tag
+      - name: 打印 kernel 仓库 tag 列表
         run: |
           set -uxo pipefail
           curl -sSL "https://api.github.com/repos/ffuqiangg/kernel_6.12.y/releases?per_page=20" -o /tmp/rel.json || true
-          echo "=========== tag_name ==========="
+          echo "=== tag_name ==="
           grep -oE '"tag_name": *"[^"]*"' /tmp/rel.json | head -30 || echo "(无)"
-          echo "=========== 资产名 ==========="
+          echo "=== 资产名 ==="
           grep -oE '"name": *"[^"]*"' /tmp/rel.json | head -40 || echo "(无)"
