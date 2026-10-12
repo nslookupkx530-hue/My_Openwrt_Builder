@@ -151,14 +151,20 @@ chmod 0755 ./files/etc/uci-defaults/* 2>/dev/null || true
 # N1 不要自建 kmods 源
 rm -f ./files/etc/uci-defaults/99-dsf-own-kmods 2>/dev/null || true
 
-# docker 专用脚本：只有启用 docker 才保留
+# ---- docker 门控：与主 workflow 的 99-docker-firewall 逻辑一致 ----
 WANT_DOCKER="${WANT_DOCKER:-no}"
-if [ -f ./files/etc/uci-defaults/99-docker-firewall ]; then
-    if [ "${WANT_DOCKER}" = "yes" ]; then
-        p "OK   保留 99-docker-firewall（docker 已启用）"
+UCI_DOCKER="./files/etc/uci-defaults/99-docker-firewall"
+if [ "${WANT_DOCKER}" = "yes" ]; then
+    if [ -f "${UCI_DOCKER}" ]; then
+        p "OK   ENABLE_DOCKER=1 → 保留 99-docker-firewall"
     else
-        rm -f ./files/etc/uci-defaults/99-docker-firewall
-        p "OK   移除 99-docker-firewall（未启用 docker）"
+        p "!! 仓库里找不到 files/etc/uci-defaults/99-docker-firewall"
+        FAILED="${FAILED} 99-docker-firewall"
+    fi
+else
+    if [ -f "${UCI_DOCKER}" ]; then
+        rm -f "${UCI_DOCKER}"
+        p "OK   未启用 docker → 已从固件中移除 99-docker-firewall"
     fi
 fi
 
