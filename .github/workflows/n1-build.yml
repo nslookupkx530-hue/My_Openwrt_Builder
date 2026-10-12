@@ -160,6 +160,42 @@ jobs:
           set -euxo pipefail
           d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER} bash scripts/n1/prepare.sh"
 
+      
+      - name: 打印构建树实况
+        # 构建树实况（诊断，长期保留）
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### 构建树实况"
+            echo ""
+            echo '```'
+            echo "--- 宿主侧 ---"
+            echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+            ls -ld /mnt/ci /mnt/ci/openwrt /mnt/ci/ffos 2>&1 || true
+            df -h /mnt/ci 2>&1 | tail -n 2 || true
+            echo ""
+            echo "--- 容器内变量 ---"
+            d "echo workdir=\${workdir}" || true
+            d "echo ffdir=\${ffdir}" || true
+            d "echo wrtdir=\${wrtdir}" || true
+            d "echo pwd=\$(pwd) HOME=\${HOME}" || true
+            echo ""
+            echo "--- 容器内目录 ---"
+            d "ls -ld \${wrtdir} \${ffdir} 2>&1" || true
+            d "ls -l \${wrtdir} 2>&1 | head -n 25" || true
+            d "ls -l \${ffdir}/scripts/n1/ 2>&1" || true
+            d "ls -ld \${ffdir}/files/etc \${ffdir}/files/etc/uci-defaults 2>&1" || true
+            echo ""
+            echo "--- 内核对齐 / 种子 ---"
+            d "echo .vermagic=\$(cat \${wrtdir}/.vermagic 2>/dev/null)" || true
+            d "ls -l \${wrtdir}/.config 2>&1" || true
+            echo ""
+            echo "--- 容器磁盘 ---"
+            d "df -h /ci" 2>&1 | tail -n 3 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 展开种子
         run: |
           set -euxo pipefail
@@ -240,6 +276,41 @@ jobs:
           find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' -exec ls -lh {} \;
           EOS
           )"
+      
+      - name: 打印构建树实况
+        # 构建树实况（诊断，长期保留）
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### 构建树实况"
+            echo ""
+            echo '```'
+            echo "--- 宿主侧 ---"
+            echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+            ls -ld /mnt/ci /mnt/ci/openwrt /mnt/ci/ffos 2>&1 || true
+            df -h /mnt/ci 2>&1 | tail -n 2 || true
+            echo ""
+            echo "--- 容器内变量 ---"
+            d "echo workdir=\${workdir}" || true
+            d "echo ffdir=\${ffdir}" || true
+            d "echo wrtdir=\${wrtdir}" || true
+            d "echo pwd=\$(pwd) HOME=\${HOME}" || true
+            echo ""
+            echo "--- 容器内目录 ---"
+            d "ls -ld \${wrtdir} \${ffdir} 2>&1" || true
+            d "ls -l \${wrtdir} 2>&1 | head -n 25" || true
+            d "ls -l \${ffdir}/scripts/n1/ 2>&1" || true
+            d "ls -ld \${ffdir}/files/etc \${ffdir}/files/etc/uci-defaults 2>&1" || true
+            echo ""
+            echo "--- 内核对齐 / 种子 ---"
+            d "echo .vermagic=\$(cat \${wrtdir}/.vermagic 2>/dev/null)" || true
+            d "ls -l \${wrtdir}/.config 2>&1" || true
+            echo ""
+            echo "--- 容器磁盘 ---"
+            d "df -h /ci" 2>&1 | tail -n 3 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 开始编译
         run: |
