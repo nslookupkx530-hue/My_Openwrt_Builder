@@ -317,19 +317,17 @@ jobs:
       - name: 收集产物 + 校验
         run: |
           set -euxo pipefail
-          CT="$(docker ps -qf name=opbe | head -n1)"
           rm -rf out
           mkdir -p out
-          d "ls -lh /ci/openwrt/bin/targets/armsr/armv8" || true
-          docker cp "${CT}:/ci/openwrt/bin/targets/armsr/armv8/." out/
-          rm -rf out/packages
+          ls -lh /mnt/ci/openwrt/bin/targets/armsr/armv8 || true
+          find /mnt/ci/openwrt/bin/targets/armsr/armv8 -maxdepth 1 -type f -exec cp -v {} out/ \;
           {
             echo "### 产物"
             echo '```'
-            find out -maxdepth 1 -type f -exec ls -lh {} \;
+            ls -lh out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          [ -n "$(find out -maxdepth 1 -type f | head -n 1)" ] || { echo "::error::out/ 是空的，编译没产出"; exit 1; }
+          [ -n "$(find out -type f | head -n 1)" ] || { echo "::error::out/ 是空的，编译没产出"; exit 1; }
 
       # --------------------------------------------------------- 17 发 Release
       - name: 发布 Release
