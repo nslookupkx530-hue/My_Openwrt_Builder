@@ -13,7 +13,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360            # 6 小时上限；ALL_KMODS 首编很重，务必保留缓存
+    timeout-minutes: 360
     steps:
       - name: 释放磁盘空间
         uses: AdityaGarg8/remove-unwanted-software@v5
@@ -48,10 +48,7 @@ jobs:
             cd ${wrtdir}
             cp ${ffdir}/configs/DSF/n1/phicomm-n1.config .config
             make defconfig
-          '
-          d '
-            cd ${wrtdir}
-            p "关键项自检"
+            p "关键项自检:"
             grep -E "^CONFIG_TARGET_armsr_armv8_DEVICE_generic=y|^CONFIG_TARGET_ARCH_PACKAGES=|^CONFIG_TARGET_ROOTFS_TARGZ=" .config || true
           '
 
@@ -77,7 +74,7 @@ jobs:
           retention-days: 7
 
       - name: 打包 Amlogic 镜像
-        uses: ffuqiangg/amlogic-s9xxx-openwrt@<PIN: commit SHA>
+        uses: ffuqiangg/amlogic-s9xxx-openwrt@main      # ← 拿到 SHA 后替换
         with:
           openwrt_path: ${{ env.workdir_host }}/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
           openwrt_board: s905d
@@ -90,17 +87,25 @@ jobs:
 
       - name: 收集产物 + 校验
         if: success()
+        env:
+          OUT: ${{ env.PACKAGED_OUTPUTPATH }}
         run: |
-          mkdir -p "${workdir_host}/artifact"
-          cp ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz "${workdir_host}/artifact/" || true
-          ls -lh "${workdir_host}/artifact/"
-          sha256sum "${workdir_host}/artifact/"*.img.gz > "${workdir_host}/artifact/sha256sums" || true
+          set -uxo pipefail
+          HOST="${workdir_host:-/mnt/ci}"
+          if [ -z "${OUT:-}" ] || [ ! -d "${OUT}" ]; then
+            echo "::error::PACKAGED_OUTPUTPATH 无效: '${OUT:-<空>}'（打包步骤可能失败了）"
+            exit 1
+          fi
+          mkdir -p "${HOST}/artifact"
+          cp -f "${OUT}"/*.img.gz "${HOST}/artifact/" || true
+          ls -lh "${HOST}/artifact/"
+          sha256sum "${HOST}/artifact/"*.img.gz > "${HOST}/artifact/sha256sums" 2>/dev/null || true
           {
             echo "### N1 产物"
             echo '```'
-            ls -lh "${workdir_host}/artifact/"
-            echo "-- 固件包数（来自 manifest）:"
-            wc -l ${workdir_host}/openwrt/bin/targets/armsr/armv8/*.manifest 2>/dev/null || true
+            ls -lh "${HOST}/artifact/"
+            echo "-- 固件包数:"
+            wc -l "${HOST}/openwrt/bin/targets/armsr/armv8/"*.manifest 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
