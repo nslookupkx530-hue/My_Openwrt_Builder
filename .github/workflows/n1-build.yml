@@ -36,13 +36,14 @@ env:
   IMM_TAG: v25.12.2
   AMLOGIC_PIN: '26.10.0301'
   AMLOGIC_ACTION_SHA: 6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
+  KVER_PIN: '6.12.103'
+  OWRT: /mnt/ci/openwrt
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
 
-      # ---------------------------------------------------------------- 1 磁盘
       - name: 释放磁盘空间
         uses: AdityaGarg8/remove-unwanted-software@v5
         with:
@@ -53,12 +54,9 @@ jobs:
           remove-docker-images: 'false'
         continue-on-error: true
 
-      # ---------------------------------------------------------------- 2 检出
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------- 3 功能开关
-      # N1 全程不读 configs/plugins.cfg，只由 input 决定
       - name: 解析功能开关
         env:
           IN_DOCKER: ${{ inputs.include_docker }}
@@ -83,25 +81,24 @@ jobs:
             echo "| WANT_DOCKER | ${D} | inputs.include_docker |"
             echo "| WANT_STORE | ${S} | inputs.enable_store |"
             echo "| BUILD_DATE | ${BD} | date +%Y.%m.%d |"
+            echo "| KVER_PIN | ${KVER_PIN} | 顶层 env |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ---------------------------------------------------------- 4 前置检查
-      - name: 前置检查（外部依赖）
+      - name: 前置检查
         run: |
           set -uo pipefail
           IMM_VER="${IMM_TAG#v}"
-          WANT_KVER="6.12.103"
+          WANT_KVER="${KVER_PIN}"
           OK_BASE=""
           KVER=""
           KVG=""
           FAIL=0
 
-          echo "=========== 1) immortalwrt 下载站现有版本目录 ==========="
+          echo "=========== immortalwrt 下载站现有版本目录 ==========="
           curl -s -m 25 "https://downloads.immortalwrt.org/releases/" -o /tmp/idx.html || true
           grep -oE 'href="[^"]+/"' /tmp/idx.html | sed -E 's/href="//; s|/"$||' | sort -u | tee /tmp/vers.txt || true
-          echo "（以上是真实存在的版本目录，注意有没有 v 前缀）"
 
-          echo "=========== 2) 逐候选探 profiles.json ==========="
+          echo "=========== 逐候选探 profiles.json ==========="
           for M in "https://downloads.immortalwrt.org" "https://downloads.openwrt.org"; do
             for V in "${IMM_VER}" "v${IMM_VER}"; do
               B="${M}/releases/${V}/targets/armsr/armv8"
@@ -121,7 +118,6 @@ jobs:
             done
           done
 
-          echo "=========== 3) kmods 与 ffuqiangg 内核资产 ==========="
           KMODS=""
           C2=000
           if [ -n "${OK_BASE}" ]; then
@@ -146,7 +142,7 @@ jobs:
             echo ""
             echo '```'
             if [ "${C3}" = "200" ] && [ -n "${KVER}" ]; then
-              jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（ffuqiangg 里没有 ${KVER} 的资产 → 打包那步会失败）"
+              jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（ffuqiangg 里没有 ${KVER} 的资产 → 打包会失败）"
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -154,34 +150,16 @@ jobs:
           echo "采用 BASE=${OK_BASE:-无} kernel=${KVER} vermagic=${KVG} kmods=${C2} ffkernel=${C3}"
           [ "${FAIL}" = "0" ] || { echo "::error::前置检查未通过，见 Step Summary"; exit 1; }
 
-      # -------------------------------------------------------------- 5 容器
       - name: 准备容器
         run: |
           set -euxo pipefail
           bash scripts/n1/init.sh
 
-      # ------------------------------------------------------ 6 源码与补丁
-      # WANT_DOCKER 透传进 prepare.sh，由它决定 99-docker-firewall 留不留
       - name: 准备源码与补丁
         run: |
           set -euxo pipefail
           d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER} bash scripts/n1/prepare.sh"
 
-      # --------------------------------------------- 6b 路径实况（可留可删）
-      - name: 打印构建树实况
-        if: always()
-        run: |
-          set -uo pipefail
-          {
-            echo "### N1 路径实况"
-            echo '```'
-            d "echo workdir=\${workdir} ffdir=\${ffdir}" || true
-            d "ls -ld \${wrtdir} \${ffdir} 2>&1" || true
-            d "ls -l \${wrtdir}/.config \${wrtdir}/.vermagic 2>&1" || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------- 8 展开种子
       - name: 展开种子
         run: |
           set -euxo pipefail
@@ -194,23 +172,21 @@ jobs:
             cat /tmp/seed.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' /tmp/seed.txt || { echo "::error::TARGZ 没生效，打包 action 拿不到 rootfs.tar.gz"; exit 1; }
-          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' /tmp/seed.txt || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic，apk 脚本会推错架构目录"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' /tmp/seed.txt || { echo "::error::TARGZ 没生效，打包拿不到 rootfs.tar.gz"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' /tmp/seed.txt || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic"; exit 1; }
 
-      # ------------------------------------------------------ 9 应用可选插件
       - name: 应用可选插件
         run: |
           set -euxo pipefail
           if [ "${WANT_DOCKER}" = "yes" ]; then
             d "grep -qxF 'CONFIG_PACKAGE_dockerd=y' /ci/openwrt/.config || echo 'CONFIG_PACKAGE_dockerd=y' >> /ci/openwrt/.config"
             d "grep -qxF 'CONFIG_PACKAGE_luci-app-dockerman=y' /ci/openwrt/.config || echo 'CONFIG_PACKAGE_luci-app-dockerman=y' >> /ci/openwrt/.config"
-            echo ">>> docker 已注入（包名待与主 workflow 原文校准）"
+            echo ">>> docker 已注入"
           else
             echo ">>> WANT_DOCKER=no，跳过 docker"
           fi
           d "cd /ci/openwrt && make defconfig"
 
-      # -------------------------------------------------------- 10 包清单自检
       - name: 包清单自检
         run: |
           set -uo pipefail
@@ -226,16 +202,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -s /tmp/miss.txt ]; then echo "::error::种子里有包被 defconfig 丢掉，见 Summary"; exit 1; fi
 
-      # ----------------------------------------------- 11 拉取第三方 APK
-      - name: Prepare Third-Party APKs
+      - name: 准备第三方商店
         if: env.WANT_STORE == 'yes'
         run: |
           set -euxo pipefail
           d "cd /ci/ffos && SOURCE_DIR=/ci/openwrt REPO=https://github.com/nslookupkx530-hue/apk.git BRANCHES='My master' ALLOW_MISSING=0 CUSTOM_PACKAGES=luci-app-store bash /ci/ffos/shell/apk-prepare-packages.sh"
           d "ls -lh /ci/openwrt/packages"
 
-      # ----------------------------------------------- 12 装入固件 files/
-      - name: Install Third-Party APKs into image
+      - name: 将第三方商店装入固件
         if: env.WANT_STORE == 'yes'
         run: |
           set -euxo pipefail
@@ -264,27 +238,9 @@ jobs:
           ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
           test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
           find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' -exec ls -lh {} \;
-          ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
           EOS
           )"
 
-      # ------------------------------------------------- 12b 容器挂载探测
-      - name: 探测容器挂载
-        if: always()
-        run: |
-          set -uo pipefail
-          CT="$(docker ps -qf name=opbe | head -n1)"
-          {
-            echo "### 容器挂载探测"
-            echo '```'
-            echo "CT=${CT}"
-            docker inspect -f '{{range .Mounts}}{{.Source}} => {{.Destination}}{{"\n"}}{{end}}' "${CT}" 2>&1 || true
-            echo "--- 宿主 ---"
-            ls -ld /ci "${GITHUB_WORKSPACE}/openwrt" 2>&1 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ------------------------------------------------------------- 13 编译
       - name: 开始编译
         run: |
           set -o pipefail
@@ -294,7 +250,6 @@ jobs:
           d "cd /ci/openwrt && make -j${JOBS}" 2>&1 | tee -a "${LOG}" || d "cd /ci/openwrt && make -j1 V=s" 2>&1 | tee -a "${LOG}"
           zstd -T0 -3 "${LOG}" -o "${LOG}.zst" || true
 
-      # --------------------------------------------------------- 14 上传日志
       - name: 上传编译日志
         if: failure()
         uses: actions/upload-artifact@v4
@@ -306,47 +261,48 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      # ------------------------------------------------------- 15 打包 Amlogic
       - name: 打包 Amlogic 镜像
         uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
         with:
-          openwrt_path: /mnt/ci/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
-          openwrt_board: s905d                 # ★确认：N1 = S905D；也可填 all
+          openwrt_path: /mnt/ci/openwrt/bin/targets/*/*/*rootfs.tar.gz
+          openwrt_board: s905d
           kernel_repo: ffuqiangg/kernel_6.12.y
-          kernel_usage: '6.12.103'             # ★确认：必须是该仓库里存在的 release tag
-          openwrt_kernel: 6.12.y
-          auto_kernel: 'false'                 # 锁版本，别让它自动升级
-          openwrt_ip: 192.168.1.1
+          openwrt_kernel: ${{ env.KVER_PIN }}
+          kernel_usage: stable
+          auto_kernel: false
+          openwrt_ip: 192.168.1.99
           build_date: ${{ env.BUILD_DATE }}
-          # openwrt_size / openwrt_files / builder_name 留空即用默认
 
-      # ------------------------------------------------------- 16 收集 + 校验
-      - name: 收集产物 + 校验
+      - name: 收集产物并核验
         run: |
           set -euxo pipefail
           AP="${PACKAGED_OUTPUTPATH:-}"
-          [ -n "${AP}" ] || { echo "::error::打包 action 没设置 PACKAGED_OUTPUTPATH，说明第 15 步没跑成"; exit 1; }
-          AP="${AP%/openwrt/out}"
-          echo "action_path 推定 = ${AP}"
+          [ -n "${AP}" ] || { echo "::error::PACKAGED_OUTPUTPATH 为空，打包那步没成功"; exit 1; }
+          BASE="${AP%/openwrt/out}"
+          echo "PACKAGED_OUTPUTPATH=${AP}"
           rm -rf out
           mkdir -p out
-          ls -lh "${AP}/openwrt/out" || true
-          ls -lh "${AP}/out" || true
-          find "${AP}" -maxdepth 3 -type f -name '*.img*' -exec cp -v {} out/ \; || true
-          find /mnt/ci/openwrt/bin/targets/armsr/armv8 -maxdepth 1 -type f -name '*rootfs.tar.gz' -exec cp -v {} out/ \; || true
+          ls -lh "${AP}" 2>/dev/null || true
+          ls -lh "${BASE}/out" 2>/dev/null || true
+          find "${BASE}" -maxdepth 4 -type f -name '*.img.gz' -exec cp -v {} out/ \;
+          find /mnt/ci/openwrt/bin/targets/armsr/armv8 -maxdepth 1 -type f -name '*rootfs.tar.gz' -exec cp -v {} out/ \;
           {
             echo "### 产物"
             echo '```'
             ls -lh out
             echo '```'
+            echo ""
+            echo "内核版本核验（必须含 ${KVER_PIN}）"
+            echo '```'
+            ls out | grep -F "${KVER_PIN}" || echo "!! 产物名里没有 ${KVER_PIN}，内核可能被 stable 漂移，kmods 会对不上"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           [ -n "$(find out -type f | head -n 1)" ] || { echo "::error::out/ 是空的"; exit 1; }
 
-      # --------------------------------------------------------- 17 发 Release
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: n1-${{ github.run_number }}-${{ github.run_attempt }}
-          name: N1 build ${{ github.run_number }}
+          name: N1 ImmortalWrt ${{ env.IMM_TAG }} build ${{ github.run_number }}
           files: out/*
           fail_on_unmatched_files: false
