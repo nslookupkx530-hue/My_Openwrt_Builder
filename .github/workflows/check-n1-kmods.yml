@@ -76,3 +76,28 @@ jobs:
           echo "===== 7) 结论提示 ====="
           echo "第 4 段：tilde 200 → 目录名是 ~ 形态（98 要改）；dash 200 → 目录名是 - 形态（98 不用改）"
           echo "第 6 段：全 404 → immortalwrt 没发布 armsr kmods，N1 的 kmods 方案要重做"
+
+      - name: Check exact kmods index + kernel repo
+        shell: bash
+        env:
+          IMM: ${{ inputs.imm_version }}
+        run: |
+          set -uo pipefail
+          B="https://downloads.immortalwrt.org/releases/${IMM}/targets/armsr/armv8"
+          V="$(curl -s "${B}/profiles.json" | jq -r '.linux_kernel.vermagic')"
+          VER="$(curl -s "${B}/profiles.json" | jq -r '.linux_kernel.version')"
+          REL="$(curl -s "${B}/profiles.json" | jq -r '.linux_kernel.release')"
+          KM="${VER}-${REL}-${V}"
+          echo "kmods 目录名 = ${KM}"
+          echo -n "kmods 索引 packages.adb → "
+          curl -s -o /dev/null -w '%{http_code}\n' "${B}/kmods/${KM}/packages.adb" || true
+
+          echo
+          echo "===== ffuqiangg/kernel_${VER%.*}.y 里有没有内核 ${VER} ====="
+          R="ffuqiangg/kernel_${VER%.*}.y"
+          curl -s "https://api.github.com/repos/${R}/releases?per_page=100" -o /tmp/rel.json || true
+          if [ -s /tmp/rel.json ]; then
+            jq -r '.[].assets[].name' /tmp/rel.json 2>/dev/null | grep -F "${VER}" | head -10 || echo "  (没找到含 ${VER} 的资产)"
+          else
+            echo "(取 release 列表失败，仓库可能私有)"
+          fi
