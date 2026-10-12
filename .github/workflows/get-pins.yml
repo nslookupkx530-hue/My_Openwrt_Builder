@@ -1,0 +1,26 @@
+name: Get pins
+on:
+  workflow_dispatch:
+
+jobs:
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect
+        run: |
+          set -uxo pipefail
+          echo "=========== 1) ophub/luci-app-amlogic（看 tag 和 HEAD）==========="
+          git ls-remote --tags https://github.com/ophub/luci-app-amlogic.git | tail -10 || true
+          git ls-remote https://github.com/ophub/luci-app-amlogic.git HEAD || true
+
+          echo "=========== 2) ffuqiangg/amlogic-s9xxx-openwrt（看 tag 和 HEAD）==========="
+          git ls-remote --tags https://github.com/ffuqiangg/amlogic-s9xxx-openwrt.git | tail -10 || true
+          git ls-remote https://github.com/ffuqiangg/amlogic-s9xxx-openwrt.git HEAD || true
+
+          echo "=========== 3) opbe 镜像 digest ==========="
+          docker pull ffuqiangg/opbe >/dev/null 2>&1 || true
+          docker inspect --format='{{index .RepoDigests 0}}' ffuqiangg/opbe || true
+
+          echo "=========== 4) immortalwrt 25.12 的 tag 列表（确认 v25.12.4 存在）==========="
+          git ls-remote --tags https://github.com/immortalwrt/immortalwrt.git \
+            | grep -o 'v25\.12\.[0-9]*' | sort -uV | tail -5 || true
