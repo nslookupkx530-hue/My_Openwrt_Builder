@@ -69,9 +69,11 @@ jobs:
           [ "${D}" = "yes" ] || D=no
           S="${IN_STORE:-yes}"
           [ "${S}" = "yes" ] || S=no
+          BD="$(date +%Y.%m.%d)"
           {
             echo "WANT_DOCKER=${D}"
             echo "WANT_STORE=${S}"
+            echo "BUILD_DATE=${BD}"
           } >> "$GITHUB_ENV"
           {
             echo "### 功能开关"
@@ -80,6 +82,7 @@ jobs:
             echo "|---|---|---|"
             echo "| WANT_DOCKER | ${D} | inputs.include_docker |"
             echo "| WANT_STORE | ${S} | inputs.enable_store |"
+            echo "| BUILD_DATE | ${BD} | date +%Y.%m.%d |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---------------------------------------------------------- 4 前置检查
