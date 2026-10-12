@@ -63,10 +63,14 @@ jobs:
           IN_STORE: ${{ inputs.enable_store }}
         run: |
           set -uo pipefail
-          D="${IN_DOCKER:-no}"
-          [ "${D}" = "yes" ] || D=no
-          S="${IN_STORE:-yes}"
-          [ "${S}" = "yes" ] || S=no
+          norm() {
+            case "$1" in
+              yes|YES|Yes|true|TRUE|True|1|y|Y|on|ON) echo yes ;;
+              *) echo no ;;
+            esac
+          }
+          D="$(norm "${IN_DOCKER:-false}")"
+          S="$(norm "${IN_STORE:-true}")"
           BD="$(date +%Y.%m.%d)"
           {
             echo "WANT_DOCKER=${D}"
@@ -76,13 +80,14 @@ jobs:
           {
             echo "### 功能开关"
             echo ""
-            echo "| 开关 | 值 | 来源 |"
-            echo "|---|---|---|"
-            echo "| WANT_DOCKER | ${D} | inputs.include_docker |"
-            echo "| WANT_STORE | ${S} | inputs.enable_store |"
-            echo "| BUILD_DATE | ${BD} | date +%Y.%m.%d |"
-            echo "| KVER_PIN | ${KVER_PIN} | 顶层 env |"
+            echo "| 项 | 原始输入 | 归一化 | 来源 |"
+            echo "|---|---|---|---|"
+            echo "| WANT_DOCKER | ${IN_DOCKER:-<空>} | ${D} | inputs.include_docker |"
+            echo "| WANT_STORE | ${IN_STORE:-<空>} | ${S} | inputs.enable_store |"
+            echo "| BUILD_DATE | - | ${BD} | date +%Y.%m.%d |"
+            echo "| KVER_PIN | - | ${KVER_PIN} | 顶层 env |"
           } >> "$GITHUB_STEP_SUMMARY"
+
 
       - name: 前置检查
         run: |
