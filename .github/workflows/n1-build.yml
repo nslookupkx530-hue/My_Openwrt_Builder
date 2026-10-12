@@ -44,6 +44,16 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 解析 docker 开关
+        env:
+          IN_DOCKER: ${{ inputs.include_docker }}
+        run: |
+          set -uo pipefail
+          D="${IN_DOCKER:-no}"
+          [ "${D}" = "yes" ] || D=no
+          echo "WANT_DOCKER=${D}" >> "$GITHUB_ENV"
+          echo ">>> WANT_DOCKER=${D}（只由 include_docker 决定，N1 不读 plugins.cfg）"
+
       - name: 前置检查
         # 外部依赖，10 秒；失败就别浪费 3 小时
         shell: bash
