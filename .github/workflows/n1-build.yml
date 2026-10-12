@@ -152,20 +152,29 @@ jobs:
           d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER} bash scripts/n1/prepare.sh"
 
       # --------------------------------------------- 6b 路径实况（临时诊断）
-      # 拿到 SRC_DIR 后删掉这一步
-      - name: 打印构建树实况
+      - name: 打印构建树实况（临时诊断）
         if: always()
         run: |
           set -uo pipefail
           {
             echo "### N1 路径实况"
             echo '```'
+            echo "=========== 宿主 ==========="
             echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
-            echo "--- 容器内 ---"
-            d "echo ffdir=\${ffdir}; ls -ld \${ffdir} \${ffdir}/files 2>&1" || true
-            echo "--- 宿主上找构建树 ---"
             find "${GITHUB_WORKSPACE}" -maxdepth 4 -name 'feeds.conf.default' -not -path '*/feeds/*' 2>/dev/null || true
             find "${GITHUB_WORKSPACE}" -maxdepth 4 -name '.config' -not -path '*/build_dir/*' 2>/dev/null || true
+            echo "=========== 容器内变量 ==========="
+            d "echo ffdir=\${ffdir}" || true
+            d "echo workdir=\${workdir}" || true
+            d "echo srcdir=\${srcdir}" || true
+            d "echo pwd=\$(pwd) HOME=\${HOME}" || true
+            echo "=========== ffdir 里有什么 ==========="
+            d "ls -ld \${ffdir} 2>&1" || true
+            d "ls -l \${ffdir} 2>&1 | head -n 40" || true
+            d "ls -l \${ffdir}/scripts/n1/ 2>&1 | head -n 20" || true
+            d "ls -ld \${ffdir}/files \${ffdir}/files/etc 2>&1" || true
+            echo "=========== 容器内找 OpenWrt 树 ==========="
+            d "find / -maxdepth 4 -name 'feeds.conf.default' -not -path '*/feeds/*' 2>/dev/null | head" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -262,10 +271,10 @@ jobs:
           REPO_FILES_DIR="${WORKSPACE}/files"
           APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
 
-          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
-                   "${FIRMWARE_FILES_DIR}/etc/third-party" \
-                   "${FIRMWARE_FILES_DIR}/etc/init.d" \
-                   "${FIRMWARE_FILES_DIR}/etc/rc.d"
+          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party"
+          mkdir -p "${FIRMWARE_FILES_DIR}/etc/third-party"
+          mkdir -p "${FIRMWARE_FILES_DIR}/etc/init.d"
+          mkdir -p "${FIRMWARE_FILES_DIR}/etc/rc.d"
 
           APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
           [ "${APK_COUNT}" -gt 0 ] || { echo "::error::${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
@@ -311,9 +320,7 @@ jobs:
       # ------------------------------------------------------- 15 打包 Amlogic
       - name: 打包 Amlogic 镜像
         uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
-        # ★核对 3：with: 段落沿用你现有文件，我只把 @ref 换成 SHA
-        with:
-          # ……（此处保留你现有的参数，一字不改）……
+        # ★ 提交后把原有的 with: 段贴回这里；缺参数时这一步会在运行时失败，不影响提交
 
       # ------------------------------------------------------- 16 收集 + 校验
       - name: 收集产物 + 校验
