@@ -201,15 +201,15 @@ jobs:
           set -euxo pipefail
           d "cp -f /ci/ffos/${SEED} /ci/openwrt/.config"
           d "cd /ci/openwrt && make defconfig"
-          d "grep -nE '^#? ?CONFIG_TARGET_(armsr_armv8_DEVICE_generic|ARCH_PACKAGES|ROOTFS_)' /ci/openwrt/.config" > /tmp/seed.txt || true
+          CFG=/mnt/ci/openwrt/.config
           {
             echo "### 种子自检"
             echo '```'
-            cat /tmp/seed.txt
+            grep -nE '^#? ?CONFIG_TARGET_(armsr_armv8_DEVICE_generic|ARCH_PACKAGES|ROOTFS_)' "${CFG}" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' /tmp/seed.txt || { echo "::error::TARGZ 没生效，打包拿不到 rootfs.tar.gz"; exit 1; }
-          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' /tmp/seed.txt || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' "${CFG}" || { echo "::error::TARGZ 没生效，打包拿不到 rootfs.tar.gz"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' "${CFG}" || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic，apk 脚本会推错架构目录"; exit 1; }
 
       - name: 应用可选插件
         run: |
