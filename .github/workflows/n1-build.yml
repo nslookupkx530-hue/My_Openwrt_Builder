@@ -4,18 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       include_docker:
-        description: "是否编译 Docker 插件"
-        required: true
-        default: 'no'
+        description: "是否编译 Docker 插件及防火墙配置"
         type: choice
         options:
-          - 'yes'
-          - 'no'
+          - no
+          - yes
+        default: 'no'
       enable_store:
         description: "集成 store 商店"
-        required: false
-        type: boolean
-        default: true
+        type: choice
+        options:
+          - yes
+          - no
+        default: 'yes'
 
 permissions:
   contents: write
