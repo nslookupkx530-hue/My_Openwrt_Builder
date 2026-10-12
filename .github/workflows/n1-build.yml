@@ -31,13 +31,11 @@ concurrency:
 
 env:
   WORKSPACE: ${{ github.workspace }}
-  SRC_DIR: ${{ github.workspace }}/src
   LOG: ${{ github.workspace }}/build.log
   SEED: configs/DSF/n1/phicomm-n1.config
   IMM_TAG: v25.12.2
   AMLOGIC_PIN: '26.10.0301'
   AMLOGIC_ACTION_SHA: 6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
-  OPBE_IMAGE: ffuqiangg/opbe@sha256:45de14313f3c4d589d56d54653a0e7a386f33057818df2442c21302727e16125
 
 jobs:
   build:
@@ -120,12 +118,7 @@ jobs:
             done
           done
 
-          echo "=========== 3) 全是 404 时，看看 armsr 目标在不在 ==========="
-          if [ -z "${OK_BASE}" ]; then
-            curl -s -m 25 "https://downloads.immortalwrt.org/releases/${IMM_VER}/targets/" | grep -oE 'href="[^"]+/"' | sed -E 's/href="//; s|/"$||' | sort -u | head -n 40 || true
-          fi
-
-          echo "=========== 4) kmods 与 ffuqiangg 内核资产 ==========="
+          echo "=========== 3) kmods 与 ffuqiangg 内核资产 ==========="
           KMODS=""
           C2=000
           if [ -n "${OK_BASE}" ]; then
@@ -171,136 +164,93 @@ jobs:
           set -euxo pipefail
           d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER} bash scripts/n1/prepare.sh"
 
-      # --------------------------------------------- 6b 路径实况（临时诊断）
-      - name: 打印构建树实况（临时诊断）
+      # --------------------------------------------- 6b 路径实况（可留可删）
+      - name: 打印构建树实况
         if: always()
         run: |
           set -uo pipefail
           {
             echo "### N1 路径实况"
             echo '```'
-            echo "=========== 宿主 ==========="
-            echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
-            find "${GITHUB_WORKSPACE}" -maxdepth 4 -name 'feeds.conf.default' -not -path '*/feeds/*' 2>/dev/null || true
-            find "${GITHUB_WORKSPACE}" -maxdepth 4 -name '.config' -not -path '*/build_dir/*' 2>/dev/null || true
-            echo "=========== 容器内变量 ==========="
-            d "echo ffdir=\${ffdir}" || true
-            d "echo workdir=\${workdir}" || true
-            d "echo srcdir=\${srcdir}" || true
-            d "echo pwd=\$(pwd) HOME=\${HOME}" || true
-            echo "=========== ffdir 里有什么 ==========="
-            d "ls -ld \${ffdir} 2>&1" || true
-            d "ls -l \${ffdir} 2>&1 | head -n 40" || true
-            d "ls -l \${ffdir}/scripts/n1/ 2>&1 | head -n 20" || true
-            d "ls -ld \${ffdir}/files \${ffdir}/files/etc 2>&1" || true
-            echo "=========== 容器内找 OpenWrt 树 ==========="
-            d "find / -maxdepth 4 -name 'feeds.conf.default' -not -path '*/feeds/*' 2>/dev/null | head" || true
+            d "echo workdir=\${workdir} ffdir=\${ffdir}" || true
+            d "ls -ld \${wrtdir} \${ffdir} 2>&1" || true
+            d "ls -l \${wrtdir}/.config \${wrtdir}/.vermagic 2>&1" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------- 7 构建缓存
-      - name: 构建缓存
-        uses: HiGarfield/cachewrtbuild@main
-        with:
-          ccache: 'true'
-          mixkey: n1
-          prefix: ${{ github.workflow }}
-        # ★核对 2：若现有文件里有 working-directory / skipccache 等参数，保留原样
 
       # ---------------------------------------------------------- 8 展开种子
       - name: 展开种子
         run: |
           set -euxo pipefail
-          cd "${SRC_DIR}"
-          cp -f "${WORKSPACE}/${SEED}" .config
-          make defconfig
+          d "cp -f /ci/ffos/${SEED} /ci/openwrt/.config"
+          d "cd /ci/openwrt && make defconfig"
+          d "grep -nE '^#? ?CONFIG_TARGET_(armsr_armv8_DEVICE_generic|ARCH_PACKAGES|ROOTFS_)' /ci/openwrt/.config" > /tmp/seed.txt || true
           {
             echo "### 种子自检"
-            echo ""
             echo '```'
-            grep -nE '^#? ?CONFIG_TARGET_(armsr_armv8_DEVICE_generic|ARCH_PACKAGES|ROOTFS_)' .config || true
+            cat /tmp/seed.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' .config || { echo "::error::CONFIG_TARGET_ROOTFS_TARGZ 没生效——打包 action 要 *rootfs.tar.gz，会卡死"; exit 1; }
-          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' .config || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic——apk 脚本会推错架构目录"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' /tmp/seed.txt || { echo "::error::TARGZ 没生效，打包 action 拿不到 rootfs.tar.gz"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' /tmp/seed.txt || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic，apk 脚本会推错架构目录"; exit 1; }
 
       # ------------------------------------------------------ 9 应用可选插件
       - name: 应用可选插件
         run: |
           set -euxo pipefail
-          cd "${SRC_DIR}"
           if [ "${WANT_DOCKER}" = "yes" ]; then
-            grep -qxF 'CONFIG_PACKAGE_dockerd=y' .config || echo 'CONFIG_PACKAGE_dockerd=y' >> .config
-            grep -qxF 'CONFIG_PACKAGE_luci-app-dockerman=y' .config || echo 'CONFIG_PACKAGE_luci-app-dockerman=y' >> .config
-            echo ">>> docker 已注入 .config"
+            d "grep -qxF 'CONFIG_PACKAGE_dockerd=y' /ci/openwrt/.config || echo 'CONFIG_PACKAGE_dockerd=y' >> /ci/openwrt/.config"
+            d "grep -qxF 'CONFIG_PACKAGE_luci-app-dockerman=y' /ci/openwrt/.config || echo 'CONFIG_PACKAGE_luci-app-dockerman=y' >> /ci/openwrt/.config"
+            echo ">>> docker 已注入（包名待与主 workflow 原文校准）"
           else
             echo ">>> WANT_DOCKER=no，跳过 docker"
           fi
-          # iStore 走 apk 那条路（第 11/12 步），不进 .config
-          make defconfig
+          d "cd /ci/openwrt && make defconfig"
 
       # -------------------------------------------------------- 10 包清单自检
-      # 直接用种子文件反查 .config：任何被 defconfig 悄悄丢掉的包都会露出来
       - name: 包清单自检
         run: |
           set -uo pipefail
-          cd "${SRC_DIR}"
-          MISS=""
-          while IFS= read -r want; do
-            grep -qxF "${want}" .config || MISS="${MISS} $(printf '%s' "${want}" | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//')"
-          done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+.-]+=y$' "${WORKSPACE}/${SEED}" || true)
-          if [ -n "${MISS}" ]; then
-            {
-              echo "### 包清单自检：MISS"
-              echo ""
-              echo '```'
-              echo "以下请求的包在 .config 里不存在（该 tag 上没有 / 名字不同 / 已改名）："
-              for m in ${MISS}; do echo "MISS ${m}"; done
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::种子里有 ${MISS}"
-            exit 1
-          fi
-          echo ">>> 包清单自检通过" >> "$GITHUB_STEP_SUMMARY"
+          d "grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+.-]+=y\$' /ci/openwrt/.config" | sort -u > /tmp/have.txt
+          grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+.-]+=y$' "${GITHUB_WORKSPACE}/${SEED}" | sort -u > /tmp/want.txt
+          comm -23 /tmp/want.txt /tmp/have.txt > /tmp/miss.txt || true
+          {
+            echo "### 包清单自检"
+            echo '```'
+            echo "want=$(wc -l < /tmp/want.txt)  have=$(wc -l < /tmp/have.txt)  miss=$(wc -l < /tmp/miss.txt)"
+            sed 's/^/MISS /' /tmp/miss.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s /tmp/miss.txt ]; then echo "::error::种子里有包被 defconfig 丢掉，见 Summary"; exit 1; fi
 
       # ----------------------------------------------- 11 拉取第三方 APK
       - name: Prepare Third-Party APKs
         if: env.WANT_STORE == 'yes'
-        shell: bash
-        env:
-          SOURCE_DIR: ${{ env.SRC_DIR }}
-          REPO: https://github.com/nslookupkx530-hue/apk.git
-          BRANCHES: "My master"
-          ALLOW_MISSING: "0"
-          CUSTOM_PACKAGES: "luci-app-store"
         run: |
           set -euxo pipefail
-          cd "${SOURCE_DIR}"
-          bash "${WORKSPACE}/shell/apk-prepare-packages.sh"
-          ls -lh "${SOURCE_DIR}/packages"
+          d "cd /ci/ffos && SOURCE_DIR=/ci/openwrt REPO=https://github.com/nslookupkx530-hue/apk.git BRANCHES='My master' ALLOW_MISSING=0 CUSTOM_PACKAGES=luci-app-store bash /ci/ffos/shell/apk-prepare-packages.sh"
+          d "ls -lh /ci/openwrt/packages"
 
       # ----------------------------------------------- 12 装入固件 files/
-      # 放在这里是因为 files/ 是在 make 生成 rootfs 时被烤进镜像的
       - name: Install Third-Party APKs into image
         if: env.WANT_STORE == 'yes'
-        shell: bash
         run: |
           set -euxo pipefail
-          OPENWRT_DIR="${SRC_DIR}"
+          d "$(cat <<'EOS'
+          #!/bin/bash
+          set -euxo pipefail
+          OPENWRT_DIR=/ci/openwrt
           FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
-          REPO_FILES_DIR="${WORKSPACE}/files"
+          REPO_FILES_DIR=/ci/ffos/files
           APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
-
           mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party"
           mkdir -p "${FIRMWARE_FILES_DIR}/etc/third-party"
           mkdir -p "${FIRMWARE_FILES_DIR}/etc/init.d"
           mkdir -p "${FIRMWARE_FILES_DIR}/etc/rc.d"
-
           APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
-          [ "${APK_COUNT}" -gt 0 ] || { echo "::error::${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
+          echo ">>> apk 数量 = ${APK_COUNT}"
+          [ "${APK_COUNT}" -gt 0 ]
           find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
-          echo ">>> 已拷入 ${APK_COUNT} 个第三方 apk"
-
           SRC_INIT="$(find "${REPO_FILES_DIR}" -type f -name 'apk-install' -print -quit 2>/dev/null || true)"
           SRC_INSTALLER="$(find "${REPO_FILES_DIR}" -type f -name 'install_third_party_apk.sh' -print -quit 2>/dev/null || true)"
           DST_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
@@ -308,21 +258,37 @@ jobs:
           [ -f "${DST_INIT}" ] || { [ -n "${SRC_INIT}" ] && install -m 0755 "${SRC_INIT}" "${DST_INIT}"; }
           [ -f "${DST_INSTALLER}" ] || { [ -n "${SRC_INSTALLER}" ] && install -m 0755 "${SRC_INSTALLER}" "${DST_INSTALLER}"; }
           chmod 0755 "${DST_INIT}" "${DST_INSTALLER}" 2>/dev/null || true
-
           ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
           test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
-          echo ">>> 首启服务已启用: /etc/rc.d/S99apk-install" >> "$GITHUB_STEP_SUMMARY"
-          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' -exec ls -lh {} \; >> "$GITHUB_STEP_SUMMARY"
+          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' -exec ls -lh {} \;
+          ls -l "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+          EOS
+          )"
+
+      # ------------------------------------------------- 12b 容器挂载探测
+      - name: 探测容器挂载
+        if: always()
+        run: |
+          set -uo pipefail
+          CT="$(docker ps -qf name=opbe | head -n1)"
+          {
+            echo "### 容器挂载探测"
+            echo '```'
+            echo "CT=${CT}"
+            docker inspect -f '{{range .Mounts}}{{.Source}} => {{.Destination}}{{"\n"}}{{end}}' "${CT}" 2>&1 || true
+            echo "--- 宿主 ---"
+            ls -ld /ci "${GITHUB_WORKSPACE}/openwrt" 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ------------------------------------------------------------- 13 编译
       - name: 开始编译
         run: |
           set -o pipefail
-          NPROC="$(nproc)"
-          JOBS="$((NPROC + 1))"
+          JOBS="$(( $(nproc) + 1 ))"
           : > "${LOG}"
-          d "cd \${srcdir} && make download -j8" 2>&1 | tee -a "${LOG}" || d "cd \${srcdir} && make download -j1 V=s" 2>&1 | tee -a "${LOG}" || echo "::warning::download 有失败项，继续编译"
-          d "cd \${srcdir} && make -j${JOBS}" 2>&1 | tee -a "${LOG}" || d "cd \${srcdir} && make -j1 V=s" 2>&1 | tee -a "${LOG}"
+          d "cd /ci/openwrt && make download -j8" 2>&1 | tee -a "${LOG}" || d "cd /ci/openwrt && make download -j1 V=s" 2>&1 | tee -a "${LOG}" || echo "::warning::download 有失败项"
+          d "cd /ci/openwrt && make -j${JOBS}" 2>&1 | tee -a "${LOG}" || d "cd /ci/openwrt && make -j1 V=s" 2>&1 | tee -a "${LOG}"
           zstd -T0 -3 "${LOG}" -o "${LOG}.zst" || true
 
       # --------------------------------------------------------- 14 上传日志
@@ -338,24 +304,32 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------- 15 打包 Amlogic
-      - name: 打包 Amlogic 镜像
-        uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
-        # ★ 提交后把原有的 with: 段贴回这里；缺参数时这一步会在运行时失败，不影响提交
+      # ★ 先注释掉：构建树在容器内，宿主上的 action 大概率看不到它。
+      #   等「探测容器挂载」给出 Mounts 结果后再决定：
+      #     - 若 /ci 在宿主有来源 → 取消注释并把 with: 段补回来
+      #     - 若是匿名卷（/var/lib/docker/volumes/...）→ 这一步改成容器内执行
+      # - name: 打包 Amlogic 镜像
+      #   uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
+      #   with:
+      #     <你原有的参数>
 
       # ------------------------------------------------------- 16 收集 + 校验
       - name: 收集产物 + 校验
         run: |
           set -euxo pipefail
+          CT="$(docker ps -qf name=opbe | head -n1)"
+          rm -rf out
           mkdir -p out
-          find "${SRC_DIR}/bin/targets/armsr/armv8" -maxdepth 1 -type f -name '*rootfs.tar.gz' -exec cp -v {} out/ \;
-          find "${SRC_DIR}" -maxdepth 3 -type f -name '*.img' -exec cp -v {} out/ \; || true
-          [ -n "$(find out -type f | head -n 1)" ] || { echo "::error::out/ 是空的"; exit 1; }
+          d "ls -lh /ci/openwrt/bin/targets/armsr/armv8" || true
+          docker cp "${CT}:/ci/openwrt/bin/targets/armsr/armv8/." out/
+          rm -rf out/packages
           {
             echo "### 产物"
             echo '```'
-            ls -lh out
+            find out -maxdepth 1 -type f -exec ls -lh {} \;
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          [ -n "$(find out -maxdepth 1 -type f | head -n 1)" ] || { echo "::error::out/ 是空的，编译没产出"; exit 1; }
 
       # --------------------------------------------------------- 17 发 Release
       - name: 发布 Release
@@ -365,4 +339,3 @@ jobs:
           name: N1 build ${{ github.run_number }}
           files: out/*
           fail_on_unmatched_files: false
-        # ★核对 3：tag 规则以你现有文件为准
