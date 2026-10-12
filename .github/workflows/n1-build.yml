@@ -51,6 +51,16 @@ jobs:
           echo "immortalwrt ${IMM} / armsr-armv8"
           chk "${B}/profiles.json" "profiles.json"
 
+          # ★ 新增①：profiles.json 拿不到就当场说清楚，别让 jq 抛一堆看不懂的错误
+          if [ "${FAIL}" != "0" ]; then
+            echo "::error::profiles.json 拿不到 —— IMM_TAG（${IMM}）这个版本在 immortalwrt 不存在"
+            echo ">>> immortalwrt 现有的 25.12 版本："
+            git ls-remote --tags https://github.com/immortalwrt/immortalwrt.git 2>/dev/null \
+              | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v25\.12\.[0-9]+$' | sort -uV | tr '\n' ' ' || true
+            echo
+            exit 1
+          fi
+
           KJSON="$(curl -s "${B}/profiles.json")"
           VER="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.version')"
           REL="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.release')"
@@ -62,6 +72,12 @@ jobs:
           echo "-- kernel_${VER%.*}.y 里 ${VER} 的资产："
           curl -s "https://api.github.com/repos/ffuqiangg/kernel_${VER%.*}.y/releases?per_page=100" \
             | jq -r '.[].assets[].name' 2>/dev/null | grep -F "${VER}" || { echo "  (没有！打包会失败)"; FAIL=1; }
+
+          # ★ 新增②：kmods 索引失败时，把目录实况打出来（判断是否目录名形态变了）
+          if [ "${FAIL}" != "0" ]; then
+            echo "-- 诊断：kmods 目录实况"
+            curl -fsSL "${B}/kmods/" 2>/dev/null | grep -oE '6\.[0-9]+\.[0-9]+[^"<>]*' | sort -u | tail -5 || echo "  (拿不到目录列表)"
+          fi
 
           {
             echo "### N1 前置检查"
