@@ -1,80 +1,27 @@
-# ============================================================================
-# N1 探针：只为拿到 ffuqiangg 侧的 kernel tag 与官方 with: 段
-# 用完即删（结论固化到 VERSIONS.md / docs/n1-maintenance.md）
-# ============================================================================
-name: N1 Probe Pins
+name: N1 Probe
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   probe:
     runs-on: ubuntu-22.04
-    env:
-      GH: https://api.github.com
-      TK: ${{ github.token }}
     steps:
 
-      # ---------------------------------------------------------- ① kernel tag
-      - name: ① kernel_6.12.y 的 release tag 与资产
+      - name: ① 克隆 ffuqiangg/build_openwrt 并打印 with: 段
         run: |
-          set -uo pipefail
-          {
-            echo "## ① ffuqiangg/kernel_6.12.y releases"
-            echo ""
-            echo '```'
-            curl -fsSL -H "Authorization: Bearer ${TK}" "${GH}/repos/ffuqiangg/kernel_6.12.y/releases?per_page=20" | jq -r '.[] | "\(.tag_name)\t\(.published_at)\t\(.assets[].name)"' || echo "(拉取失败)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -uxo pipefail
+          git clone --depth 1 https://github.com/ffuqiangg/build_openwrt.git /tmp/bo || true
+          echo "=========== workflow 文件列表 ==========="
+          ls -l /tmp/bo/.github/workflows/ || true
+          echo "=========== amlogic-s9xxx-openwrt 相关段 ==========="
+          grep -rn -B10 -A25 -- 'amlogic-s9xxx-openwrt' /tmp/bo/.github/workflows/ || echo "(没匹配到)"
 
-      # ------------------------------------------------------ ② workflow 列表
-      - name: ② build_openwrt 的 workflow 文件列表
+      - name: ② 打印 ffuqiangg/kernel_6.12.y 的 tag
         run: |
-          set -uo pipefail
-          BRANCH="main"
-          LIST=""
-          for BR in main master; do
-            LIST="$(curl -fsSL -H "Authorization: Bearer ${TK}" "${GH}/repos/ffuqiangg/build_openwrt/contents/.github/workflows?ref=${BR}" | jq -r '.[].path' 2>/dev/null || true)"
-            if [ -n "${LIST}" ]; then BRANCH="${BR}"; break; fi
-          done
-          {
-            echo "## ② ffuqiangg/build_openwrt workflows（branch=${BRANCH}）"
-            echo ""
-            echo '```'
-            printf '%s\n' "${LIST}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------------------------------------------------------- ③ with: 段
-      - name: ③ 抓出 amlogic action 的 with: 段
-        run: |
-          set -uo pipefail
-          BRANCH="main"
-          LIST=""
-          for BR in main master; do
-            LIST="$(curl -fsSL -H "Authorization: Bearer ${TK}" "${GH}/repos/ffuqiangg/build_openwrt/contents/.github/workflows?ref=${BR}" | jq -r '.[].path' 2>/dev/null || true)"
-            if [ -n "${LIST}" ]; then BRANCH="${BR}"; break; fi
-          done
-          : > /tmp/all.txt
-          printf '%s\n' "${LIST}" | while IFS= read -r f; do
-            [ -n "${f}" ] || continue
-            echo "===== FILE: ${f} =====" >> /tmp/all.txt
-            curl -fsSL "https://raw.githubusercontent.com/ffuqiangg/build_openwrt/${BRANCH}/${f}" >> /tmp/all.txt 2>/dev/null || true
-            echo "" >> /tmp/all.txt
-          done
-          {
-            echo "## ③ amlogic-s9xxx-openwrt 相关行（带上下 20 行，行号）"
-            echo ""
-            echo '```'
-            grep -n -B12 -A20 'amlogic-s9xxx-openwrt' /tmp/all.txt || echo "(没找到 amlogic-s9xxx-openwrt)"
-            echo '```'
-            echo ""
-            echo "## ③b 抓到的全文（按 ===== FILE 分隔）"
-            echo ""
-            echo '```'
-            cat /tmp/all.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -uxo pipefail
+          curl -sSL "https://api.github.com/repos/ffuqiangg/kernel_6.12.y/releases?per_page=20" -o /tmp/rel.json || true
+          echo "=========== tag_name ==========="
+          grep -oE '"tag_name": *"[^"]*"' /tmp/rel.json | head -30 || echo "(无)"
+          echo "=========== 资产名 ==========="
+          grep -oE '"name": *"[^"]*"' /tmp/rel.json | head -40 || echo "(无)"
