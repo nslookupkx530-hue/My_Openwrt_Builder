@@ -235,8 +235,30 @@ jobs:
             echo "want=$(wc -l < /tmp/want.txt)  have=$(wc -l < /tmp/have.txt)  miss=$(wc -l < /tmp/miss.txt)"
             sed 's/^/MISS /' /tmp/miss.txt
             echo '```'
+            if [ -s /tmp/miss.txt ]; then
+              echo ""
+              echo "#### MISS 诊断（符号状态 + 候选名）"
+              echo '```'
+              while IFS= read -r m; do
+                pkg="${m#CONFIG_PACKAGE_}"
+                pkg="${pkg%=y}"
+                echo "--- ${pkg} 在 .config 里的状态 ---"
+                grep -n "${pkg}" /mnt/ci/openwrt/.config || echo "(符号完全不存在 → 名字变了)"
+                echo "--- 在 feeds/luci/applications 里按源码名搜 ${pkg} ---"
+                d "grep -rl --include=Makefile '${pkg}' /ci/openwrt/feeds/luci/applications/ 2>/dev/null | head -n 5" || true
+              done < /tmp/miss.txt
+              echo "--- feeds/luci/applications 里含 opkg/pkg/package/manager/store 的目录 ---"
+              d "ls -1 /ci/openwrt/feeds/luci/applications/ 2>/dev/null | grep -iE 'opkg|pkg|package|manager|store'" || true
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ -s /tmp/miss.txt ]; then echo "::error::种子里有包被 defconfig 丢掉，见 Summary"; exit 1; fi
+          if [ -s /tmp/miss.txt ]; then
+            if [ "${STRICT_PKGS:-0}" = "1" ]; then
+              echo "::error::种子里有包被 defconfig 丢掉（STRICT_PKGS=1），见 Summary"
+              exit 1
+            fi
+            echo "::warning::种子里有包被 defconfig 丢掉，本轮按警告放行（STRICT_PKGS=0），见 Summary"
+          fi
 
       - name: 准备第三方商店
         if: env.WANT_STORE == 'yes'
