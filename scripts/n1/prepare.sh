@@ -142,11 +142,25 @@ else
     FAILED="${FAILED} 晶晨宝盒"
 fi
 
-# ============ 自定义文件（公共层；N1 不要 99）============
+# ============ 自定义文件（公共层）============
 p "复制自定义文件"
 mkdir -p ./files
 cp -rf "${ffdir}/files/etc" ./files/ 2>/dev/null || true
+chmod 0755 ./files/etc/uci-defaults/* 2>/dev/null || true
+
+# N1 不要自建 kmods 源
 rm -f ./files/etc/uci-defaults/99-dsf-own-kmods 2>/dev/null || true
+
+# docker 专用脚本：只有启用 docker 才保留
+WANT_DOCKER="${WANT_DOCKER:-no}"
+if [ -f ./files/etc/uci-defaults/99-docker-firewall ]; then
+    if [ "${WANT_DOCKER}" = "yes" ]; then
+        p "OK   保留 99-docker-firewall（docker 已启用）"
+    else
+        rm -f ./files/etc/uci-defaults/99-docker-firewall
+        p "OK   移除 99-docker-firewall（未启用 docker）"
+    fi
+fi
 
 # ============ 清理 ============
 p "清理"
