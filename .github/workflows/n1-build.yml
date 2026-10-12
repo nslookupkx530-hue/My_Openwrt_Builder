@@ -304,30 +304,40 @@ jobs:
           if-no-files-found: warn
 
       # ------------------------------------------------------- 15 打包 Amlogic
-      # ★ 先注释掉：构建树在容器内，宿主上的 action 大概率看不到它。
-      #   等「探测容器挂载」给出 Mounts 结果后再决定：
-      #     - 若 /ci 在宿主有来源 → 取消注释并把 with: 段补回来
-      #     - 若是匿名卷（/var/lib/docker/volumes/...）→ 这一步改成容器内执行
-      # - name: 打包 Amlogic 镜像
-      #   uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
-      #   with:
-      #     <你原有的参数>
+      - name: 打包 Amlogic 镜像
+        uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
+        with:
+          openwrt_path: /mnt/ci/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
+          openwrt_board: s905d                 # ★确认：N1 = S905D；也可填 all
+          kernel_repo: ffuqiangg/kernel_6.12.y
+          kernel_usage: '6.12.103'             # ★确认：必须是该仓库里存在的 release tag
+          openwrt_kernel: 6.12.y
+          auto_kernel: 'false'                 # 锁版本，别让它自动升级
+          openwrt_ip: 192.168.1.1
+          build_date: ${{ env.BUILD_DATE }}
+          # openwrt_size / openwrt_files / builder_name 留空即用默认
 
       # ------------------------------------------------------- 16 收集 + 校验
       - name: 收集产物 + 校验
         run: |
           set -euxo pipefail
+          AP="${PACKAGED_OUTPUTPATH:-}"
+          [ -n "${AP}" ] || { echo "::error::打包 action 没设置 PACKAGED_OUTPUTPATH，说明第 15 步没跑成"; exit 1; }
+          AP="${AP%/openwrt/out}"
+          echo "action_path 推定 = ${AP}"
           rm -rf out
           mkdir -p out
-          ls -lh /mnt/ci/openwrt/bin/targets/armsr/armv8 || true
-          find /mnt/ci/openwrt/bin/targets/armsr/armv8 -maxdepth 1 -type f -exec cp -v {} out/ \;
+          ls -lh "${AP}/openwrt/out" || true
+          ls -lh "${AP}/out" || true
+          find "${AP}" -maxdepth 3 -type f -name '*.img*' -exec cp -v {} out/ \; || true
+          find /mnt/ci/openwrt/bin/targets/armsr/armv8 -maxdepth 1 -type f -name '*rootfs.tar.gz' -exec cp -v {} out/ \; || true
           {
             echo "### 产物"
             echo '```'
             ls -lh out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          [ -n "$(find out -type f | head -n 1)" ] || { echo "::error::out/ 是空的，编译没产出"; exit 1; }
+          [ -n "$(find out -type f | head -n 1)" ] || { echo "::error::out/ 是空的"; exit 1; }
 
       # --------------------------------------------------------- 17 发 Release
       - name: 发布 Release
