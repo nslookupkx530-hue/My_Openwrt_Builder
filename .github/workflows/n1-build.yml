@@ -1,0 +1,118 @@
+name: Build PHICOMM-N1 (ImmortalWrt + Amlogic pack)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-n1
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360            # 6 小时上限；ALL_KMODS 首编很重，务必保留缓存
+    steps:
+      - name: 释放磁盘空间
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+          remove-large-packages: true
+          remove-cached-tools: true
+          remove-swapfile: true
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备容器
+        run: bash scripts/n1/init.sh
+
+      - name: 准备源码与补丁
+        run: d "cd \${ffdir} && bash scripts/n1/prepare.sh"
+
+      - name: 构建缓存
+        uses: HiGarfield/cachewrtbuild@main
+        with:
+          mixkey: n1
+          prefix: ${{ env.workdir_host }}/openwrt
+
+      - name: 展开种子
+        run: |
+          d '
+            cd ${wrtdir}
+            cp ${ffdir}/configs/n1/phicomm-n1.config .config
+            make defconfig
+          '
+          d '
+            cd ${wrtdir}
+            p "关键项自检"
+            grep -E "^CONFIG_TARGET_armsr_armv8_DEVICE_generic=y|^CONFIG_TARGET_ARCH_PACKAGES=|^CONFIG_TARGET_ROOTFS_TARGZ=" .config || true
+          '
+
+      - name: 开始编译
+        run: |
+          d '
+            cd ${wrtdir}
+            p "下载"
+            make download -j$(nproc)
+            p "编译"
+            make -j$(($(nproc)+1)) || make -j1 V=s
+            p "打包日志"
+            tar -cf - logs/ 2>/dev/null | zstd -19 -T0 > "${workdir}/logs_n1.tar.zst" || true
+          '
+
+      - name: 上传日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-n1-${{ github.run_id }}
+          path: ${{ env.workdir_host }}/logs_n1.tar.zst
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 打包 Amlogic 镜像
+        uses: ffuqiangg/amlogic-s9xxx-openwrt@<PIN: commit SHA>
+        with:
+          openwrt_path: ${{ env.workdir_host }}/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
+          openwrt_board: s905d
+          kernel_repo: ffuqiangg/kernel_${{ env.current_version }}.y
+          openwrt_kernel: ${{ env.kernel_version }}
+          kernel_usage: stable
+          auto_kernel: false
+          openwrt_ip: 192.168.100.1
+          build_date: ${{ env.build_date }}
+
+      - name: 收集产物 + 校验
+        if: success()
+        run: |
+          mkdir -p "${workdir_host}/artifact"
+          cp ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz "${workdir_host}/artifact/" || true
+          ls -lh "${workdir_host}/artifact/"
+          sha256sum "${workdir_host}/artifact/"*.img.gz > "${workdir_host}/artifact/sha256sums" || true
+          {
+            echo "### N1 产物"
+            echo '```'
+            ls -lh "${workdir_host}/artifact/"
+            echo "-- 固件包数（来自 manifest）:"
+            wc -l ${workdir_host}/openwrt/bin/targets/armsr/armv8/*.manifest 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布 Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: N1-immortalwrt-${{ env.build_date }}-${{ github.run_id }}
+          name: N1-immortalwrt-${{ env.build_date }}-${{ github.run_id }}
+          files: |
+            ${{ env.workdir_host }}/artifact/*.img.gz
+            ${{ env.workdir_host }}/artifact/sha256sums
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
