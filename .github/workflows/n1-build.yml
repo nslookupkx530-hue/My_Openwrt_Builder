@@ -204,6 +204,19 @@ jobs:
             done
           '
 
+      - name: 准备 iStore APK
+        if: env.WANT_STORE == 'yes'
+        env:
+          SOURCE_DIR: ${{ github.workspace }}/src
+          REPO: nslookupkx530-hue/apk
+          BRANCHES: "My master"
+          ALLOW_MISSING: "1"
+          MATCH_OVERRIDE: "luci-app-store=<该包在 apk 仓库里的目录名>"
+        run: |
+          set -euxo pipefail
+          bash shell/apk-prepare-packages.sh
+          ls -l "${SOURCE_DIR}/packages"/*.apk
+
       - name: 开始编译
         run: |
           d '
