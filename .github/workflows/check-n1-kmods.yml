@@ -1,0 +1,78 @@
+name: Check N1 kmods repo (immortalwrt armsr)
+
+on:
+  workflow_dispatch:
+    inputs:
+      imm_version:
+        description: "immortalwrt 版本（默认 25.12.2）"
+        required: false
+        default: "25.12.2"
+        type: string
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check armsr kmods repo
+        shell: bash
+        env:
+          IMM: ${{ inputs.imm_version }}
+        run: |
+          set -uo pipefail
+          B="https://downloads.immortalwrt.org/releases/${IMM}/targets/armsr/armv8"
+          echo "base = ${B}"
+
+          echo
+          echo "===== 1) profiles.json 是否存在 ====="
+          echo -n "profiles.json : "
+          curl -s -o /dev/null -w '%{http_code}\n' "${B}/profiles.json" || true
+
+          echo
+          echo "===== 2) 内核版本 / vermagic ====="
+          curl -s "${B}/profiles.json" -o /tmp/p.json || true
+          if [ -s /tmp/p.json ]; then
+            jq -r '.linux_kernel' /tmp/p.json 2>/dev/null || head -c 300 /tmp/p.json
+          else
+            echo "(下载 profiles.json 失败)"
+          fi
+
+          echo
+          echo "===== 3) kmods 目录名实况（dash 还是 tilde）====="
+          curl -fsSL "${B}/kmods/" -o /tmp/k.html 2>/dev/null || true
+          if [ -s /tmp/k.html ]; then
+            grep -oE '6\.[0-9]+\.[0-9]+[^"<>]*' /tmp/k.html | sort -u | tail -10 || true
+          else
+            echo "(拿不到 kmods/ 目录列表)"
+          fi
+
+          echo
+          echo "===== 4) 两种候选 URL 各探一次 ====="
+          V="$(jq -r '.linux_kernel.vermagic // empty' /tmp/p.json 2>/dev/null || true)"
+          K="$(printf '%s' "$V" | sed 's/[~-].*//')"
+          H="$(printf '%s' "$V" | sed 's/.*[~-]//')"
+          echo "vermagic = ${V:-<空>}   K=${K:-<空>}   H=${H:-<空>}"
+          if [ -n "${V}" ]; then
+            echo -n "tilde 形态 → "
+            curl -s -o /dev/null -w '%{http_code}\n' "${B}/kmods/${V}/packages.adb" || true
+            echo -n "dash  形态 → "
+            curl -s -o /dev/null -w '%{http_code}\n' "${B}/kmods/${K}-1-${H}/packages.adb" || true
+          else
+            echo "(vermagic 取不到，跳过)"
+          fi
+
+          echo
+          echo "===== 5) 架构 feed 是否活着（确认源站正常）====="
+          echo -n "feed base : "
+          curl -s -o /dev/null -w '%{http_code}\n' "https://downloads.immortalwrt.org/releases/${IMM}/packages/aarch64_generic/base/packages.adb" || true
+
+          echo
+          echo "===== 6) 各 25.12.x 的 armsr kmods 目录是否存在 ====="
+          for v in 25.12.0 25.12.1 25.12.2; do
+            printf '%s  kmods/ → ' "$v"
+            curl -s -o /dev/null -w '%{http_code}\n' "https://downloads.immortalwrt.org/releases/${v}/targets/armsr/armv8/kmods/" || true
+          done
+
+          echo
+          echo "===== 7) 结论提示 ====="
+          echo "第 4 段：tilde 200 → 目录名是 ~ 形态（98 要改）；dash 200 → 目录名是 - 形态（98 不用改）"
+          echo "第 6 段：全 404 → immortalwrt 没发布 armsr kmods，N1 的 kmods 方案要重做"
