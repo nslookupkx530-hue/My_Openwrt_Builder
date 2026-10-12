@@ -138,7 +138,9 @@ jobs:
         run: bash scripts/n1/init.sh
 
       - name: 准备源码与补丁
-        run: d "cd \${ffdir} && bash scripts/n1/prepare.sh"
+        env:
+          WANT_DOCKER: ${{ inputs.include_docker }}
+        run: d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER:-no} bash scripts/n1/prepare.sh"
 
       - name: 构建缓存
         uses: HiGarfield/cachewrtbuild@main
