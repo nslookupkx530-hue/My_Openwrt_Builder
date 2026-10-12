@@ -88,12 +88,31 @@ append_line() {   # append_line <文件> <整行> <验证正则> <说明>
 # ============ P0 必需：与官方内核/kmods 对齐 ============
 p ">>>> P0 必需补丁"
 
-VV_URL="https://downloads.immortalwrt.org/releases/${imm_version}/targets/armsr/armv8/profiles.json"
+DL_BASE="https://downloads.immortalwrt.org/releases/${imm_version}/targets/armsr/armv8"
+VV_URL="${DL_BASE}/profiles.json"
+OFF_KVER=""
 if wget -qO /tmp/p.json "${VV_URL}" 2>/dev/null || curl -fsSL "${VV_URL}" -o /tmp/p.json 2>/dev/null; then
     jq -r '.linux_kernel.vermagic' /tmp/p.json > .vermagic 2>/dev/null || true
+    OFF_KVER="$(jq -r '.linux_kernel.version // empty' /tmp/p.json 2>/dev/null)"
+    [ -n "${OFF_KVER}" ] && . set_env "official_kernel_version" "${OFF_KVER}"
+else
+    p "!! profiles.json 拉取失败：${VV_URL}"
+    FAILED="${FAILED} profiles.json"
 fi
+
 if [ -s .vermagic ] && grep -qE '^[0-9a-f]{32}$' .vermagic; then
-    p "OK   官方 vermagic = $(cat .vermagic)"
+    VG_OFF="$(cat .vermagic)"
+    p "OK   官方 vermagic = ${VG_OFF}（kernel ${OFF_KVER:-未知}）"
+    # 官方 kmods 目录必须真的存在：98 会保留官方 kmods 行，死链会让 apk update 整体失败
+    if [ -n "${OFF_KVER}" ]; then
+        KCODE="$(curl -s -o /dev/null -w '%{http_code}' -m 20 "${DL_BASE}/kmods/${OFF_KVER}-1-${VG_OFF}/packages.adb" || echo 000)"
+        if [ "${KCODE}" = "200" ]; then
+            p "OK   官方 kmods = ${OFF_KVER}-1-${VG_OFF}（packages.adb 200）"
+        else
+            p "!! 官方 kmods 目录不可达：HTTP=${KCODE}（${OFF_KVER}-1-${VG_OFF}）"
+            FAILED="${FAILED} 官方kmods"
+        fi
+    fi
 else
     p "!! 官方 vermagic 抓取失败或格式异常: $(head -c 60 .vermagic 2>/dev/null)"
     FAILED="${FAILED} vermagic抓取"
@@ -145,18 +164,31 @@ fi
 # ============ 自定义文件（公共层）============
 p "复制自定义文件"
 mkdir -p ./files
-cp -rf "${ffdir}/files/etc" ./files/ 2>/dev/null || true
+rm -rf ./files/etc
+cp -rf "${ffdir}/files/etc" ./files/
+if [ -d ./files/etc/uci-defaults ] && [ -n "$(ls -A ./files/etc/uci-defaults 2>/dev/null)" ]; then
+    p "OK   自定义文件已复制 → ./files/etc（uci-defaults $(ls -1 ./files/etc/uci-defaults | wc -l) 个）"
+else
+    p "!! 复制失败：./files/etc/uci-defaults 为空（源：${ffdir}/files/etc）"
+    FAILED="${FAILED} 自定义文件"
+fi
 chmod 0755 ./files/etc/uci-defaults/* 2>/dev/null || true
+find ./files/etc/uci-defaults -maxdepth 1 -type f -exec ls -l {} \;
 
 # N1 不要自建 kmods 源
 rm -f ./files/etc/uci-defaults/99-dsf-own-kmods 2>/dev/null || true
+if [ -f ./files/etc/uci-defaults/98-drop-kmods-repo ]; then
+    p "OK   98-drop-kmods-repo 在位（N1 用官方 kmods，此脚本保持原样）"
+else
+    p "??   没有 98-drop-kmods-repo（N1 官方 kmods 不依赖它，仅提示）"
+fi
 
 # ---- docker 门控：与主 workflow 的 99-docker-firewall 逻辑一致 ----
 WANT_DOCKER="${WANT_DOCKER:-no}"
 UCI_DOCKER="./files/etc/uci-defaults/99-docker-firewall"
 if [ "${WANT_DOCKER}" = "yes" ]; then
     if [ -f "${UCI_DOCKER}" ]; then
-        p "OK   ENABLE_DOCKER=1 → 保留 99-docker-firewall"
+        p "OK   WANT_DOCKER=yes → 保留 99-docker-firewall"
     else
         p "!! 仓库里找不到 files/etc/uci-defaults/99-docker-firewall"
         FAILED="${FAILED} 99-docker-firewall"
@@ -173,6 +205,16 @@ p "清理"
 rm -rf "${otherdir}"
 find ./ -name '*.orig' -delete 2>/dev/null || true
 find ./ -name '*.rej' -delete 2>/dev/null || true
+
+# ============ 关键值汇总（便于日志核对）============
+p "关键值汇总"
+p "  wrtdir          = ${wrtdir}"
+p "  本仓库(ffdir)   = ${ffdir}"
+p "  内核            = ${current_version}.y / ${kernel_version}"
+p "  官方内核/vermagic = ${OFF_KVER:-未知} / $(cat .vermagic 2>/dev/null)"
+p "  AMLOGIC_PIN     = ${AMLOGIC_PIN}"
+p "  WANT_DOCKER     = ${WANT_DOCKER:-no}"
+p "  files 文件数     = $(find ./files -type f 2>/dev/null | wc -l)"
 
 [ -z "${FAILED}" ] || { p "!! 以下步骤未生效，构建中止:${FAILED}"; exit 1; }
 p "容器内脚本结束"
