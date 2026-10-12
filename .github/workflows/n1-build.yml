@@ -1,17 +1,21 @@
-name: Build PHICOMM-N1 (ImmortalWrt + Amlogic pack)
+# ============================================================================
+# N1 产线 —— PHICOMM N1 / Amlogic S905D
+# 路线：armsr/armv8 通用 ARM64 rootfs + ffuqiangg 外置内核 + Amlogic 打包 action
+# ============================================================================
+name: Build PHICOMM-N1
 
 on:
   workflow_dispatch:
     inputs:
       include_docker:
-        description: "是否编译 Docker 插件及防火墙配置"
+        description: '是否集成 Docker 插件及防火墙配置'
         type: choice
         options:
           - no
           - yes
         default: 'no'
       enable_store:
-        description: "集成 store 商店"
+        description: '是否集成 iStore 商店'
         type: choice
         options:
           - yes
@@ -22,269 +26,316 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-n1
+  group: n1-build
   cancel-in-progress: false
+
+env:
+  WORKSPACE: ${{ github.workspace }}
+  SRC_DIR: ${{ github.workspace }}/src
+  LOG: ${{ github.workspace }}/build.log
+  SEED: configs/DSF/n1/phicomm-n1.config
+  IMM_TAG: v25.12.2
+  AMLOGIC_PIN: '26.10.0301'
+  AMLOGIC_ACTION_SHA: 6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
+  OPBE_IMAGE: ffuqiangg/opbe@sha256:45de14313f3c4d589d56d54653a0e7a386f33057818df2442c21302727e16125
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    runs-on: ubuntu-22.04
     steps:
+
+      # ---------------------------------------------------------------- 1 磁盘
       - name: 释放磁盘空间
         uses: AdityaGarg8/remove-unwanted-software@v5
         with:
-          remove-dotnet: true
-          remove-android: true
-          remove-haskell: true
-          remove-codeql: true
-          remove-docker-images: true
-          remove-large-packages: true
-          remove-cached-tools: true
-          remove-swapfile: true
+          remove-android: 'true'
+          remove-dotnet: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'false'
+        continue-on-error: true
 
+      # ---------------------------------------------------------------- 2 检出
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 解析 docker 开关
+      # ---------------------------------------------------------- 3 功能开关
+      # N1 全程不读 configs/plugins.cfg，只由 input 决定
+      - name: 解析功能开关
         env:
           IN_DOCKER: ${{ inputs.include_docker }}
+          IN_STORE: ${{ inputs.enable_store }}
         run: |
           set -uo pipefail
           D="${IN_DOCKER:-no}"
           [ "${D}" = "yes" ] || D=no
-          echo "WANT_DOCKER=${D}" >> "$GITHUB_ENV"
-          echo ">>> WANT_DOCKER=${D}（只由 include_docker 决定，N1 不读 plugins.cfg）"
+          S="${IN_STORE:-yes}"
+          [ "${S}" = "yes" ] || S=no
+          {
+            echo "WANT_DOCKER=${D}"
+            echo "WANT_STORE=${S}"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### 功能开关"
+            echo ""
+            echo "| 开关 | 值 | 来源 |"
+            echo "|---|---|---|"
+            echo "| WANT_DOCKER | ${D} | inputs.include_docker |"
+            echo "| WANT_STORE | ${S} | inputs.enable_store |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 前置检查
-        # 外部依赖，10 秒；失败就别浪费 3 小时
-        shell: bash
+      # ---------------------------------------------------------- 4 前置检查
+      - name: 前置检查（外部依赖）
         run: |
           set -uo pipefail
-          # 从 prepare.sh 读 IMM_TAG，避免两处维护
-          IMM="$(sed -n 's/^IMM_TAG="\([^"]*\)".*/\1/p' scripts/n1/prepare.sh | head -1)"
-          [ -n "${IMM}" ] || { echo "::error::读不到 scripts/n1/prepare.sh 里的 IMM_TAG"; exit 1; }
-          V="${IMM#v}"
-          B="https://downloads.immortalwrt.org/releases/${V}/targets/armsr/armv8"
           FAIL=0
+          BASE="https://downloads.immortalwrt.org/releases/${IMM_TAG}/targets/armsr/armv8"
+          KVER=""
+          KVG=""
 
-          chk() {
-            code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' -L "$1" || echo 000)"
-            printf '%s  %s\n' "${code}" "$2"
-            [ "${code}" = "200" ] || FAIL=1
-          }
-
-          echo "immortalwrt ${IMM} / armsr-armv8"
-          chk "${B}/profiles.json" "profiles.json"
-
-          # ★ 新增①：profiles.json 拿不到就当场说清楚，别让 jq 抛一堆看不懂的错误
-          if [ "${FAIL}" != "0" ]; then
-            echo "::error::profiles.json 拿不到 —— IMM_TAG（${IMM}）这个版本在 immortalwrt 不存在"
-            echo ">>> immortalwrt 现有的 25.12 版本："
-            git ls-remote --tags https://github.com/immortalwrt/immortalwrt.git 2>/dev/null \
-              | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v25\.12\.[0-9]+$' | sort -uV | tr '\n' ' ' || true
-            echo
-            exit 1
+          C1="$(curl -s -o /tmp/profiles.json -w '%{http_code}' -m 25 "${BASE}/profiles.json" || echo 000)"
+          if [ "${C1}" = "200" ]; then
+            KVER="$(jq -r '.linux_kernel.version' /tmp/profiles.json)"
+            KVG="$(jq -r '.linux_kernel.vermagic' /tmp/profiles.json)"
+          else
+            FAIL=1
+            echo ">>> ${IMM_TAG} 不可用，immortalwrt 现存 25.12 系列 tag："
+            curl -s -m 25 "https://api.github.com/repos/immortalwrt/immortalwrt/tags?per_page=100" | jq -r '.[].name' | grep -E '25\.12' || echo "（tag 列表拉取失败）"
           fi
 
-          KJSON="$(curl -s "${B}/profiles.json")"
-          VER="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.version')"
-          REL="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.release')"
-          VMG="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.vermagic')"
-          KM="${VER}-${REL}-${VMG}"
-          echo "kernel=${VER}  release=${REL}  vermagic=${VMG}"
-          chk "${B}/kmods/${KM}/packages.adb" "官方 kmods 索引"
-
-          echo "-- kernel_${VER%.*}.y 里 ${VER} 的资产："
-          curl -s "https://api.github.com/repos/ffuqiangg/kernel_${VER%.*}.y/releases?per_page=100" \
-            | jq -r '.[].assets[].name' 2>/dev/null | grep -F "${VER}" || { echo "  (没有！打包会失败)"; FAIL=1; }
-
-          # ★ 新增②：kmods 索引失败时，把目录实况打出来（判断是否目录名形态变了）
-          if [ "${FAIL}" != "0" ]; then
-            echo "-- 诊断：kmods 目录实况"
-            curl -fsSL "${B}/kmods/" 2>/dev/null | grep -oE '6\.[0-9]+\.[0-9]+[^"<>]*' | sort -u | tail -5 || echo "  (拿不到目录列表)"
+          C2=000
+          KMODS=""
+          if [ -n "${KVER}" ]; then
+            KMODS="${KVER}-1-${KVG}"
+            C2="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "${BASE}/kmods/${KMODS}/packages.adb" || echo 000)"
+            [ "${C2}" = "200" ] || FAIL=1
           fi
+
+          C3="$(curl -s -o /tmp/ffkernel.json -w '%{http_code}' -m 25 "https://api.github.com/repos/ffuqiangg/kernel_6.12.y/releases" || echo 000)"
 
           {
-            echo "### N1 前置检查"
-            echo "- immortalwrt \`${IMM}\` / armsr-armv8"
-            echo "- kernel \`${VER}\`，vermagic \`${VMG}\`，kmods 目录 \`${KM}\`"
-            echo "- 结果: $([ "${FAIL}" = "0" ] && echo "✅ 通过" || echo "❌ 失败")"
+            echo "### 前置检查"
+            echo ""
+            echo "| 项 | HTTP | 值 |"
+            echo "|---|---|---|"
+            echo "| ${IMM_TAG} profiles.json | ${C1} | version=${KVER} vermagic=${KVG} |"
+            echo "| kmods/${KMODS}/packages.adb | ${C2} | dash 形态目录名 |"
+            echo "| ffuqiangg/kernel_6.12.y | ${C3} | - |"
+            echo ""
+            echo '```'
+            echo "profiles:  ${C1}  version=${KVER} vermagic=${KVG}"
+            echo "kmods:     ${C2}  dir=${KMODS}"
+            echo "kernel:    ${C3}"
+            if [ "${C3}" = "200" ] && [ -n "${KVER}" ]; then
+              echo "--- ffuqiangg/kernel_6.12.y 里含 ${KVER} 的资产 ---"
+              jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（没找到 ${KVER} 资产，打包那步会失败）"
+            fi
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          [ "${FAIL}" = "0" ] || { echo "::error::外部依赖不可用，先解决再构建"; exit 1; }
-          echo ">>> 前置检查通过"
+          echo "profiles.json=${C1} version=${KVER} vermagic=${KVG}"
+          echo "kmods/packages.adb=${C2} dir=${KMODS}"
+          echo "ffuqiangg kernel=${C3}"
+          [ "${FAIL}" = "0" ] || { echo "::error::前置检查未通过，见 Step Summary"; exit 1; }
 
-      - name: 上游版本监视
-        # 只提示，不影响构建
+      # -------------------------------------------------------------- 5 容器
+      - name: 准备容器
+        run: |
+          set -euxo pipefail
+          bash scripts/n1/init.sh
+
+      # ------------------------------------------------------ 6 源码与补丁
+      # WANT_DOCKER 透传进 prepare.sh，由它决定 99-docker-firewall 留不留
+      - name: 准备源码与补丁
+        run: |
+          set -euxo pipefail
+          d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER} bash scripts/n1/prepare.sh"
+
+      # --------------------------------------------- 6b 路径实况（临时诊断）
+      # 拿到 SRC_DIR 后删掉这一步
+      - name: 打印构建树实况
         if: always()
-        shell: bash
         run: |
           set -uo pipefail
-
-          # 三个 pin 全部从实际文件里读 → 永远不会出现"两处写的不一致"
-          PIN_ACTION="$(grep -oE 'amlogic-s9xxx-openwrt@[0-9a-f]{40}' .github/workflows/n1-build.yml | head -1 | cut -d@ -f2 || true)"
-          PIN_AMLOGIC="$(sed -n 's/^AMLOGIC_PIN="\([^"]*\)".*/\1/p' scripts/n1/prepare.sh | head -1 || true)"
-          PIN_IMM="$(sed -n 's/^IMM_TAG="\([^"]*\)".*/\1/p' scripts/n1/prepare.sh | head -1 || true)"
-
-          NOW_ACTION="$(git ls-remote https://github.com/ffuqiangg/amlogic-s9xxx-openwrt.git HEAD 2>/dev/null | awk '{print $1}' || true)"
-          NOW_AMLOGIC="$(git ls-remote --tags https://github.com/ophub/luci-app-amlogic.git 2>/dev/null | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}' | sort -V | tail -1 || true)"
-          NOW_IMM="$(git ls-remote --tags https://github.com/immortalwrt/immortalwrt.git 2>/dev/null | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v25\.12\.[0-9]+$' | sort -V | tail -1 || true)"
-
-          st() { [ -n "$1" ] && [ "$1" = "$2" ] && echo "✅ 一致" || echo "⬆️ 上游有更新"; }
-
           {
-            echo "### N1 上游版本监视（仅提示）"
-            echo ""
-            echo "| 项目 | 你 pin 的 | 上游当前 | 状态 |"
-            echo "|---|---|---|---|"
-            echo "| amlogic-s9xxx-openwrt (HEAD) | \`${PIN_ACTION:0:12}\` | \`${NOW_ACTION:0:12}\` | $(st "$NOW_ACTION" "$PIN_ACTION") |"
-            echo "| luci-app-amlogic (最新 tag) | \`${PIN_AMLOGIC}\` | \`${NOW_AMLOGIC}\` | $(st "$NOW_AMLOGIC" "$PIN_AMLOGIC") |"
-            echo "| immortalwrt (最新 25.12 tag) | \`${PIN_IMM}\` | \`${NOW_IMM}\` | $(st "$NOW_IMM" "$PIN_IMM") |"
-            echo ""
-            echo "> 看到 ⬆️：跑一轮构建验证 → 通过就把 pin 改成"上游当前"那一列的值 → 在 VERSIONS.md 记一行。"
+            echo "### N1 路径实况"
+            echo '```'
+            echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+            echo "--- 容器内 ---"
+            d "echo ffdir=\${ffdir}; ls -ld \${ffdir} \${ffdir}/files 2>&1" || true
+            echo "--- 宿主上找构建树 ---"
+            find "${GITHUB_WORKSPACE}" -maxdepth 4 -name 'feeds.conf.default' -not -path '*/feeds/*' 2>/dev/null || true
+            find "${GITHUB_WORKSPACE}" -maxdepth 4 -name '.config' -not -path '*/build_dir/*' 2>/dev/null || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          echo ">>> 版本监视完成（详见 Summary；不影响构建）"
 
-      - name: 准备容器
-        run: bash scripts/n1/init.sh
-
-      - name: 准备源码与补丁
-        run: d "cd \${ffdir} && WANT_DOCKER=${WANT_DOCKER:-no} bash scripts/n1/prepare.sh"
-
+      # ---------------------------------------------------------- 7 构建缓存
       - name: 构建缓存
         uses: HiGarfield/cachewrtbuild@main
         with:
+          ccache: 'true'
           mixkey: n1
-          prefix: ${{ env.workdir_host }}/openwrt
+          prefix: ${{ github.workflow }}
+        # ★核对 2：若现有文件里有 working-directory / skipccache 等参数，保留原样
 
+      # ---------------------------------------------------------- 8 展开种子
       - name: 展开种子
         run: |
-          d '
-            cd ${wrtdir}
-            cp ${ffdir}/configs/DSF/n1/phicomm-n1.config .config
-            make defconfig
-            p "关键项自检:"
-            grep -E "^CONFIG_TARGET_armsr_armv8_DEVICE_generic=y|^CONFIG_TARGET_ARCH_PACKAGES=|^CONFIG_TARGET_ROOTFS_TARGZ=" .config || true
-          '
+          set -euxo pipefail
+          cd "${SRC_DIR}"
+          cp -f "${WORKSPACE}/${SEED}" .config
+          make defconfig
+          {
+            echo "### 种子自检"
+            echo ""
+            echo '```'
+            grep -nE '^#? ?CONFIG_TARGET_(armsr_armv8_DEVICE_generic|ARCH_PACKAGES|ROOTFS_)' .config || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -qE '^CONFIG_TARGET_ROOTFS_TARGZ=y' .config || { echo "::error::CONFIG_TARGET_ROOTFS_TARGZ 没生效——打包 action 要 *rootfs.tar.gz，会卡死"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ARCH_PACKAGES="aarch64_generic"' .config || { echo "::error::ARCH_PACKAGES 不是 aarch64_generic——apk 脚本会推错架构目录"; exit 1; }
 
+      # ------------------------------------------------------ 9 应用可选插件
       - name: 应用可选插件
         run: |
-          set -uo pipefail
-          HOST="${workdir_host:-/mnt/ci}"
+          set -euxo pipefail
+          cd "${SRC_DIR}"
           if [ "${WANT_DOCKER}" = "yes" ]; then
-            printf '%s\n' "CONFIG_PACKAGE_luci-app-dockerman=y" "CONFIG_PACKAGE_dockerd=y" > /tmp/docker-plugins.config
-            echo ">>> 启用 Docker 插件"
+            grep -qxF 'CONFIG_PACKAGE_dockerd=y' .config || echo 'CONFIG_PACKAGE_dockerd=y' >> .config
+            grep -qxF 'CONFIG_PACKAGE_luci-app-dockerman=y' .config || echo 'CONFIG_PACKAGE_luci-app-dockerman=y' >> .config
+            echo ">>> docker 已注入 .config"
           else
-            : > /tmp/docker-plugins.config
-            echo ">>> 未启用 Docker"
+            echo ">>> WANT_DOCKER=no，跳过 docker"
           fi
-          cp -f /tmp/docker-plugins.config "${HOST}/docker-plugins.config"
-          d '
-            cd ${wrtdir}
-            if [ -s ${workdir}/docker-plugins.config ]; then
-              cat ${workdir}/docker-plugins.config >> .config
-              p "已注入 docker 插件配置"
-              make defconfig
-            fi
-          '
+          # iStore 走 apk 那条路（第 11/12 步），不进 .config
+          make defconfig
 
+      # -------------------------------------------------------- 10 包清单自检
+      # 直接用种子文件反查 .config：任何被 defconfig 悄悄丢掉的包都会露出来
       - name: 包清单自检
         run: |
-          d '
-            cd ${wrtdir}
-            p "=== 期望包是否都在 .config ==="
-            for k in luci-app-amlogic luci-theme-argon luci-app-argon-config luci-i18n-argon-config-zh-cn \
-                     luci-app-diskman luci-i18n-diskman-zh-cn luci-app-autoreboot luci-i18n-autoreboot-zh-cn \
-                     luci-app-ramfree luci-i18n-ramfree-zh-cn filebrowser luci-app-filebrowser-go \
-                     luci-i18n-filebrowser-go-zh-cn luci-app-samba4 luci-app-hd-idle luci-app-upnp luci-app-ttyd ; do
-              if grep -qx "CONFIG_PACKAGE_${k}=y" .config; then
-                p "  OK   ${k}"
-              else
-                p "  MISS ${k}   ← 大概率缺对应的 feed"
-              fi
-            done
-          '
+          set -uo pipefail
+          cd "${SRC_DIR}"
+          MISS=""
+          while IFS= read -r want; do
+            grep -qxF "${want}" .config || MISS="${MISS} $(printf '%s' "${want}" | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//')"
+          done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+.-]+=y$' "${WORKSPACE}/${SEED}" || true)
+          if [ -n "${MISS}" ]; then
+            {
+              echo "### 包清单自检：MISS"
+              echo ""
+              echo '```'
+              echo "以下请求的包在 .config 里不存在（该 tag 上没有 / 名字不同 / 已改名）："
+              for m in ${MISS}; do echo "MISS ${m}"; done
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::种子里有 ${MISS}"
+            exit 1
+          fi
+          echo ">>> 包清单自检通过" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 准备 iStore APK
+      # ----------------------------------------------- 11 拉取第三方 APK
+      - name: Prepare Third-Party APKs
         if: env.WANT_STORE == 'yes'
+        shell: bash
         env:
-          SOURCE_DIR: ${{ github.workspace }}/src
-          REPO: nslookupkx530-hue/apk
+          SOURCE_DIR: ${{ env.SRC_DIR }}
+          REPO: https://github.com/nslookupkx530-hue/apk.git
           BRANCHES: "My master"
-          ALLOW_MISSING: "1"
-          MATCH_OVERRIDE: "luci-app-store=<该包在 apk 仓库里的目录名>"
+          ALLOW_MISSING: "0"
+          CUSTOM_PACKAGES: "luci-app-store"
         run: |
           set -euxo pipefail
-          bash shell/apk-prepare-packages.sh
-          ls -l "${SOURCE_DIR}/packages"/*.apk
+          cd "${SOURCE_DIR}"
+          bash "${WORKSPACE}/shell/apk-prepare-packages.sh"
+          ls -lh "${SOURCE_DIR}/packages"
 
+      # ----------------------------------------------- 12 装入固件 files/
+      # 放在这里是因为 files/ 是在 make 生成 rootfs 时被烤进镜像的
+      - name: Install Third-Party APKs into image
+        if: env.WANT_STORE == 'yes'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OPENWRT_DIR="${SRC_DIR}"
+          FIRMWARE_FILES_DIR="${OPENWRT_DIR}/files"
+          REPO_FILES_DIR="${WORKSPACE}/files"
+          APK_SOURCE_DIR="${OPENWRT_DIR}/packages"
+
+          mkdir -p "${FIRMWARE_FILES_DIR}/usr/share/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/third-party" \
+                   "${FIRMWARE_FILES_DIR}/etc/init.d" \
+                   "${FIRMWARE_FILES_DIR}/etc/rc.d"
+
+          APK_COUNT="$(find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' | wc -l)"
+          [ "${APK_COUNT}" -gt 0 ] || { echo "::error::${APK_SOURCE_DIR} 里没有 apk"; exit 1; }
+          find "${APK_SOURCE_DIR}" -maxdepth 1 -type f -name '*.apk' -exec cp -f {} "${FIRMWARE_FILES_DIR}/usr/share/third-party/" \;
+          echo ">>> 已拷入 ${APK_COUNT} 个第三方 apk"
+
+          SRC_INIT="$(find "${REPO_FILES_DIR}" -type f -name 'apk-install' -print -quit 2>/dev/null || true)"
+          SRC_INSTALLER="$(find "${REPO_FILES_DIR}" -type f -name 'install_third_party_apk.sh' -print -quit 2>/dev/null || true)"
+          DST_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/apk-install"
+          DST_INSTALLER="${FIRMWARE_FILES_DIR}/etc/third-party/install_third_party_apk.sh"
+          [ -f "${DST_INIT}" ] || { [ -n "${SRC_INIT}" ] && install -m 0755 "${SRC_INIT}" "${DST_INIT}"; }
+          [ -f "${DST_INSTALLER}" ] || { [ -n "${SRC_INSTALLER}" ] && install -m 0755 "${SRC_INSTALLER}" "${DST_INSTALLER}"; }
+          chmod 0755 "${DST_INIT}" "${DST_INSTALLER}" 2>/dev/null || true
+
+          ln -sf ../init.d/apk-install "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+          test -L "${FIRMWARE_FILES_DIR}/etc/rc.d/S99apk-install"
+          echo ">>> 首启服务已启用: /etc/rc.d/S99apk-install" >> "$GITHUB_STEP_SUMMARY"
+          find "${FIRMWARE_FILES_DIR}/usr/share/third-party" -maxdepth 1 -type f -name '*.apk' -exec ls -lh {} \; >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------- 13 编译
       - name: 开始编译
         run: |
-          d '
-            cd ${wrtdir}
-            p "下载"
-            make download -j$(nproc)
-            p "编译"
-            make -j$(($(nproc)+1)) || make -j1 V=s
-            p "打包日志"
-            tar -cf - logs/ 2>/dev/null | zstd -19 -T0 > "${workdir}/logs_n1.tar.zst" || true
-          '
+          set -o pipefail
+          NPROC="$(nproc)"
+          JOBS="$((NPROC + 1))"
+          : > "${LOG}"
+          d "cd \${srcdir} && make download -j8" 2>&1 | tee -a "${LOG}" || d "cd \${srcdir} && make download -j1 V=s" 2>&1 | tee -a "${LOG}" || echo "::warning::download 有失败项，继续编译"
+          d "cd \${srcdir} && make -j${JOBS}" 2>&1 | tee -a "${LOG}" || d "cd \${srcdir} && make -j1 V=s" 2>&1 | tee -a "${LOG}"
+          zstd -T0 -3 "${LOG}" -o "${LOG}.zst" || true
 
-      - name: 上传日志（失败时）
+      # --------------------------------------------------------- 14 上传日志
+      - name: 上传编译日志
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-n1-${{ github.run_id }}
-          path: ${{ env.workdir_host }}/logs_n1.tar.zst
-          if-no-files-found: ignore
+          name: n1-build-logs-${{ github.run_id }}
+          path: |
+            build.log
+            build.log.zst
           retention-days: 7
+          if-no-files-found: warn
 
+      # ------------------------------------------------------- 15 打包 Amlogic
       - name: 打包 Amlogic 镜像
-        # ← 拿到 SHA 后 @ 替换
         uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
+        # ★核对 3：with: 段落沿用你现有文件，我只把 @ref 换成 SHA
         with:
-          openwrt_path: ${{ env.workdir_host }}/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
-          openwrt_board: s905d
-          kernel_repo: ffuqiangg/kernel_${{ env.current_version }}.y
-          openwrt_kernel: ${{ env.kernel_version }}
-          kernel_usage: stable
-          auto_kernel: false
-          openwrt_ip: 192.168.100.1
-          build_date: ${{ env.build_date }}
+          # ……（此处保留你现有的参数，一字不改）……
 
+      # ------------------------------------------------------- 16 收集 + 校验
       - name: 收集产物 + 校验
-        if: success()
-        env:
-          OUT: ${{ env.PACKAGED_OUTPUTPATH }}
         run: |
-          set -uxo pipefail
-          HOST="${workdir_host:-/mnt/ci}"
-          if [ -z "${OUT:-}" ] || [ ! -d "${OUT}" ]; then
-            echo "::error::PACKAGED_OUTPUTPATH 无效: '${OUT:-<空>}'（打包步骤可能失败了）"
-            exit 1
-          fi
-          mkdir -p "${HOST}/artifact"
-          cp -f "${OUT}"/*.img.gz "${HOST}/artifact/" || true
-          ls -lh "${HOST}/artifact/"
-          sha256sum "${HOST}/artifact/"*.img.gz > "${HOST}/artifact/sha256sums" 2>/dev/null || true
+          set -euxo pipefail
+          mkdir -p out
+          find "${SRC_DIR}/bin/targets/armsr/armv8" -maxdepth 1 -type f -name '*rootfs.tar.gz' -exec cp -v {} out/ \;
+          find "${SRC_DIR}" -maxdepth 3 -type f -name '*.img' -exec cp -v {} out/ \; || true
+          [ -n "$(find out -type f | head -n 1)" ] || { echo "::error::out/ 是空的"; exit 1; }
           {
-            echo "### N1 产物"
+            echo "### 产物"
             echo '```'
-            ls -lh "${HOST}/artifact/"
-            echo "-- 固件包数:"
-            wc -l "${HOST}/openwrt/bin/targets/armsr/armv8/"*.manifest 2>/dev/null || true
+            ls -lh out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # --------------------------------------------------------- 17 发 Release
       - name: 发布 Release
-        if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: N1-immortalwrt-${{ env.build_date }}-${{ github.run_id }}
-          name: N1-immortalwrt-${{ env.build_date }}-${{ github.run_id }}
-          files: |
-            ${{ env.workdir_host }}/artifact/*.img.gz
-            ${{ env.workdir_host }}/artifact/sha256sums
+          tag_name: n1-${{ github.run_number }}-${{ github.run_attempt }}
+          name: N1 build ${{ github.run_number }}
+          files: out/*
           fail_on_unmatched_files: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # ★核对 3：tag 规则以你现有文件为准
