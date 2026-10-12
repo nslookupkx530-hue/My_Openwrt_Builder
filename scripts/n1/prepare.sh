@@ -4,7 +4,7 @@
 set -u
 
 # ================== 升级时只改这一段 ==================
-IMM_TAG="v25.12.4"                       # ← 钉死 immortalwrt tag，不要"现抓最新"
+IMM_TAG="v25.12.2"                       # ← 钉死 immortalwrt tag，不要"现抓最新"
 AMLOGIC_PIN="<PIN: ophub/luci-app-amlogic 的 commit>"   # ← 唯一保留的第三方 feed
 # ======================================================
 
