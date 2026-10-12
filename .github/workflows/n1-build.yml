@@ -30,6 +30,80 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 前置检查
+        # 外部依赖，10 秒；失败就别浪费 3 小时
+        shell: bash
+        run: |
+          set -uo pipefail
+          # 从 prepare.sh 读 IMM_TAG，避免两处维护
+          IMM="$(sed -n 's/^IMM_TAG="\([^"]*\)".*/\1/p' scripts/n1/prepare.sh | head -1)"
+          [ -n "${IMM}" ] || { echo "::error::读不到 scripts/n1/prepare.sh 里的 IMM_TAG"; exit 1; }
+          V="${IMM#v}"
+          B="https://downloads.immortalwrt.org/releases/${V}/targets/armsr/armv8"
+          FAIL=0
+
+          chk() {
+            code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' -L "$1" || echo 000)"
+            printf '%s  %s\n' "${code}" "$2"
+            [ "${code}" = "200" ] || FAIL=1
+          }
+
+          echo "immortalwrt ${IMM} / armsr-armv8"
+          chk "${B}/profiles.json" "profiles.json"
+
+          KJSON="$(curl -s "${B}/profiles.json")"
+          VER="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.version')"
+          REL="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.release')"
+          VMG="$(printf '%s' "${KJSON}" | jq -r '.linux_kernel.vermagic')"
+          KM="${VER}-${REL}-${VMG}"
+          echo "kernel=${VER}  release=${REL}  vermagic=${VMG}"
+          chk "${B}/kmods/${KM}/packages.adb" "官方 kmods 索引"
+
+          echo "-- kernel_${VER%.*}.y 里 ${VER} 的资产："
+          curl -s "https://api.github.com/repos/ffuqiangg/kernel_${VER%.*}.y/releases?per_page=100" \
+            | jq -r '.[].assets[].name' 2>/dev/null | grep -F "${VER}" || { echo "  (没有！打包会失败)"; FAIL=1; }
+
+          {
+            echo "### N1 前置检查"
+            echo "- immortalwrt \`${IMM}\` / armsr-armv8"
+            echo "- kernel \`${VER}\`，vermagic \`${VMG}\`，kmods 目录 \`${KM}\`"
+            echo "- 结果: $([ "${FAIL}" = "0" ] && echo "✅ 通过" || echo "❌ 失败")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "${FAIL}" = "0" ] || { echo "::error::外部依赖不可用，先解决再构建"; exit 1; }
+          echo ">>> 前置检查通过"
+
+      - name: 上游版本监视
+        # 只提示，不影响构建
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # 三个 pin 全部从实际文件里读 → 永远不会出现"两处写的不一致"
+          PIN_ACTION="$(grep -oE 'amlogic-s9xxx-openwrt@[0-9a-f]{40}' .github/workflows/n1-build.yml | head -1 | cut -d@ -f2 || true)"
+          PIN_AMLOGIC="$(sed -n 's/^AMLOGIC_PIN="\([^"]*\)".*/\1/p' scripts/n1/prepare.sh | head -1 || true)"
+          PIN_IMM="$(sed -n 's/^IMM_TAG="\([^"]*\)".*/\1/p' scripts/n1/prepare.sh | head -1 || true)"
+
+          NOW_ACTION="$(git ls-remote https://github.com/ffuqiangg/amlogic-s9xxx-openwrt.git HEAD 2>/dev/null | awk '{print $1}' || true)"
+          NOW_AMLOGIC="$(git ls-remote --tags https://github.com/ophub/luci-app-amlogic.git 2>/dev/null | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}' | sort -V | tail -1 || true)"
+          NOW_IMM="$(git ls-remote --tags https://github.com/immortalwrt/immortalwrt.git 2>/dev/null | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v25\.12\.[0-9]+$' | sort -V | tail -1 || true)"
+
+          st() { [ -n "$1" ] && [ "$1" = "$2" ] && echo "✅ 一致" || echo "⬆️ 上游有更新"; }
+
+          {
+            echo "### N1 上游版本监视（仅提示）"
+            echo ""
+            echo "| 项目 | 你 pin 的 | 上游当前 | 状态 |"
+            echo "|---|---|---|---|"
+            echo "| amlogic-s9xxx-openwrt (HEAD) | \`${PIN_ACTION:0:12}\` | \`${NOW_ACTION:0:12}\` | $(st "$NOW_ACTION" "$PIN_ACTION") |"
+            echo "| luci-app-amlogic (最新 tag) | \`${PIN_AMLOGIC}\` | \`${NOW_AMLOGIC}\` | $(st "$NOW_AMLOGIC" "$PIN_AMLOGIC") |"
+            echo "| immortalwrt (最新 25.12 tag) | \`${PIN_IMM}\` | \`${NOW_IMM}\` | $(st "$NOW_IMM" "$PIN_IMM") |"
+            echo ""
+            echo "> 看到 ⬆️：跑一轮构建验证 → 通过就把 pin 改成"上游当前"那一列的值 → 在 VERSIONS.md 记一行。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo ">>> 版本监视完成（详见 Summary；不影响构建）"
+
       - name: 准备容器
         run: bash scripts/n1/init.sh
 
@@ -74,7 +148,8 @@ jobs:
           retention-days: 7
 
       - name: 打包 Amlogic 镜像
-        uses: ffuqiangg/amlogic-s9xxx-openwrt@main      # ← 拿到 SHA 后替换
+        # ← 拿到 SHA 后 @ 替换
+        uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
         with:
           openwrt_path: ${{ env.workdir_host }}/openwrt/bin/targets/armsr/armv8/*rootfs.tar.gz
           openwrt_board: s905d
