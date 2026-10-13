@@ -38,6 +38,7 @@ env:
   AMLOGIC_ACTION_SHA: 6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
   KVER_PIN: '6.12.103'
   OWRT: /mnt/ci/openwrt
+  N1_LAN_IP: '192.168.1.99'
 
 jobs:
   build:
@@ -361,7 +362,7 @@ jobs:
           openwrt_kernel: ${{ env.KVER_PIN }}
           kernel_usage: stable
           auto_kernel: false
-          openwrt_ip: 192.168.1.99
+          openwrt_ip: ${{ env.N1_LAN_IP }}
           build_date: ${{ env.BUILD_DATE }}
 
       - name: 收集产物并核验
@@ -456,7 +457,7 @@ jobs:
             echo "刷机提示："
             echo ""
             echo "1. 用 Amlogic 烧录工具写入 U 盘/SD 卡或 emmc"
-            echo "2. 首次启动约 2~3 分钟，默认 IP 192.168.1.99"
+            echo "2. 首次启动约 2~3 分钟，默认 IP ${N1_LAN_IP}"
             echo "3. 核验内核：uname -r 应为 ${KVER_PIN}"
           } > release_body.md
           echo ">>> release_body.md 已生成（$(wc -l < release_body.md) 行）"
