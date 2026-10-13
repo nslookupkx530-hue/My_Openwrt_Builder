@@ -391,10 +391,82 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           [ -n "$(find out -type f | head -n 1)" ] || echo "::warning::out/ 是空的（编译或打包未产出）"
 
+      - name: 生成 Release 说明
+        if: always()
+        run: |
+          set -uo pipefail
+          dcap() { d "$1" 2>/dev/null | grep -v '>> runner@opbe:'; }
+          CFG=/mnt/ci/openwrt/.config
+          TARGET_DIR=/mnt/ci/openwrt/bin/targets/armsr/armv8
+
+          COMMIT="$(dcap 'git -C /ci/openwrt rev-parse HEAD' | head -n1 | tr -d '[:space:]')"
+          [ -n "${COMMIT}" ] || COMMIT="unknown"
+          VG="$(cat /mnt/ci/openwrt/.vermagic 2>/dev/null || true)"
+          [ -n "${VG}" ] || VG="unknown"
+
+          MAN="$(find "${TARGET_DIR}" -maxdepth 1 -type f -name '*.manifest' 2>/dev/null | head -n1)"
+          LUCILIST=""
+          if [ -n "${MAN}" ]; then
+            LUCILIST="$(grep -E '^luci' "${MAN}" | sed -E 's/ - .*//' | sort -u)"
+          fi
+          if [ -z "${LUCILIST}" ]; then
+            LUCILIST="$(grep -oE '^CONFIG_PACKAGE_\(luci[A-Za-z0-9_+.-]*\)=y' "${CFG}" 2>/dev/null | sed -E 's/^CONFIG_PACKAGE_//; s/=y$//' | sort -u)"
+          fi
+
+          TPLIST="$(ls -1 /mnt/ci/openwrt/packages/*.apk 2>/dev/null | xargs -r -n1 basename | sed -E 's/\.apk$//' | sort -u)"
+          FILES="$(cd out 2>/dev/null && ls -1 || true)"
+
+          {
+            echo "ImmortalWrt automated build release (N1 官方源)"
+            echo ""
+            echo "Device:"
+            echo ""
+            echo "PHICOMM-N1 (Amlogic S905D)"
+            echo ""
+            echo "Source:"
+            echo ""
+            echo "https://github.com/immortalwrt/immortalwrt"
+            echo "tag ${IMM_TAG} commit ${COMMIT}"
+            echo "target armsr/armv8 profile generic"
+            echo "kernel ${KVER_PIN} vermagic ${VG}"
+            echo ""
+            echo "Kernel source:"
+            echo ""
+            echo "https://github.com/ffuqiangg/kernel_6.12.y"
+            echo "tag kernel_${KVER_PIN}"
+            echo ""
+            echo "Run ID:"
+            echo ""
+            echo "${{ github.run_id }}"
+            echo ""
+            echo "Firmware:"
+            echo ""
+            printf '%s\n' "${FILES}" | sed 's/^/- /'
+            echo ""
+            echo "LuCI package list"
+            echo ""
+            echo "PHICOMM-N1"
+            echo ""
+            printf '%s\n' "${LUCILIST}" | sed 's/^/- /'
+            echo ""
+            echo "Third-Party package list"
+            echo ""
+            if [ -n "${TPLIST}" ]; then printf '%s\n' "${TPLIST}" | sed 's/^/- /'; else echo "- (未集成)"; fi
+            echo ""
+            echo "刷机提示："
+            echo ""
+            echo "1. 用 Amlogic 烧录工具写入 U 盘/SD 卡或 emmc"
+            echo "2. 首次启动约 2~3 分钟，默认 IP 192.168.1.99"
+            echo "3. 核验内核：uname -r 应为 ${KVER_PIN}"
+          } > release_body.md
+          echo ">>> release_body.md 已生成（$(wc -l < release_body.md) 行）"
+          head -n 20 release_body.md
+
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: n1-${{ github.run_number }}-${{ github.run_attempt }}
+          tag_name: N1-ImmortalWrt-${{ env.BUILD_DATE }}-${{ github.run_id }}
           name: N1 ImmortalWrt ${{ env.IMM_TAG }} build ${{ github.run_number }}
+          body_path: release_body.md          # ← 新增：用我们生成的正文
           files: out/*
           fail_on_unmatched_files: false
