@@ -133,7 +133,14 @@ jobs:
           else
             FAIL=1
           fi
-          C3="$(curl -s -o /tmp/ffkernel.json -w '%{http_code}' -m 25 "https://api.github.com/repos/ffuqiangg/kernel_6.12.y/releases" || echo 000)"
+          # 原（走 API，会被限流）
+          # C3="$(curl -s -o /tmp/ffkernel.json -w '%{http_code}' -m 25 "https://api.github.com/repos/ffuqiangg/kernel_6.12.y/releases" || echo 000)"
+
+          # 新（直链 HEAD，无限流）
+          K_TAG="kernel_${WANT_KVER}"
+          K_BASE="https://github.com/ffuqiangg/kernel_6.12.y/releases/download/${K_TAG}"
+          C3="$(curl -sIL -o /dev/null -w '%{http_code}' -m 30 "${K_BASE}/${WANT_KVER}.tar.gz" || echo 000)"
+          C3B="$(curl -sIL -o /dev/null -w '%{http_code}' -m 30 "${K_BASE}/deb-${WANT_KVER}.tar.gz" || echo 000)"
 
           {
             echo "### 前置检查"
@@ -144,16 +151,27 @@ jobs:
             echo "| linux_kernel.version | ${KVER:-?}（要求 = ${WANT_KVER}） |"
             echo "| linux_kernel.vermagic | ${KVG:-?} |"
             echo "| kmods/${KMODS}/packages.adb | ${C2} |"
-            echo "| ffuqiangg/kernel_6.12.y | ${C3} |"
+            #echo "| ffuqiangg/kernel_6.12.y | ${C3} |"
+            echo "| ffuqiangg ${K_TAG}/${WANT_KVER}.tar.gz | ${C3} | 直链，不走 API |"
+            echo "| ffuqiangg ${K_TAG}/deb-${WANT_KVER}.tar.gz | ${C3B} | 直链 |"
             echo ""
             echo '```'
-            if [ "${C3}" = "200" ] && [ -n "${KVER}" ]; then
-              jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（ffuqiangg 里没有 ${KVER} 的资产 → 打包会失败）"
+            # 原（走 API，会被限流）
+            #if [ "${C3}" = "200" ] && [ -n "${KVER}" ]; then
+            #  jq -r '.[].assets[].name' /tmp/ffkernel.json | grep -F "${KVER}" || echo "（ffuqiangg 里没有 ${KVER} 的资产 → 打包会失败）"
+            #fi
+            # 新（直链 HEAD，无限流）
+            if [ "${C3}" != "200" ] || [ "${C3B}" != "200" ]; then
+              echo "（内核资产不可达 → 列出现有 tag，走 atom 源，同样不限流）"
+              curl -sL -m 25 "https://github.com/ffuqiangg/kernel_6.12.y/releases.atom" | grep -oE '<title>[^<]*</title>' | sed -E 's|</?title>||g' | head -n 20 || true
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "采用 BASE=${OK_BASE:-无} kernel=${KVER} vermagic=${KVG} kmods=${C2} ffkernel=${C3}"
+          # 原（走 API，会被限流）
+          #echo "采用 BASE=${OK_BASE:-无} kernel=${KVER} vermagic=${KVG} kmods=${C2} ffkernel=${C3}"
+          # 新（直链 HEAD，无限流）
+          echo "采用 BASE=${OK_BASE:-无} kernel=${KVER} vermagic=${KVG} kmods=${C2} ffkernel=${C3}/${C3B}"
           [ "${FAIL}" = "0" ] || { echo "::error::前置检查未通过，见 Step Summary"; exit 1; }
 
       - name: 准备容器
