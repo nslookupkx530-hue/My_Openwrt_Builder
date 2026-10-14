@@ -863,10 +863,32 @@ jobs:
           # 产出 Hyper-V 固件
           echo "# CONFIG_VHDX_IMAGES is not set" >> .config
           make defconfig
+
+          # docker（dockerd / containerd / runc + luci-app-dockerman）体积大，
+          # 300MiB 的 ext4 rootfs 装不下，会报：
+          #   ext4_allocate_best_fit_partial: failed to allocate 203 blocks, out of space?
+          if grep -qxF 'CONFIG_PACKAGE_docker' "${WORKSPACE}/src/tmp/injected-plugins.txt" 2>/dev/null || grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null; then
+            PART_SIZE=1024
+            echo ">>> 检测到 docker 启用 → rootfs 分区放大到 ${PART_SIZE} MiB"
+          else
+            PART_SIZE=300
+            echo ">>> 未启用 docker → rootfs 分区维持 ${PART_SIZE} MiB"
+          fi
+          if grep -qE '^CONFIG_TARGET_ROOTFS_PARTSIZE=' .config; then
+            sed -i -E "s|^CONFIG_TARGET_ROOTFS_PARTSIZE=.*|CONFIG_TARGET_ROOTFS_PARTSIZE=${PART_SIZE}|" .config
+          else
+            echo "CONFIG_TARGET_ROOTFS_PARTSIZE=${PART_SIZE}" >> .config
+          fi
+
+          make defconfig
           echo ">>> 生效检查:"
-          grep -E '^CONFIG_(VMDK|VDI|VHDX)_IMAGES|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)' .config || true
+          grep -E '^CONFIG_(VMDK|VDI|VHDX)_IMAGES|^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS|PARTSIZE)' .config || true
           if ! grep -q '^CONFIG_VMDK_IMAGES=y$' .config; then
             echo "ERROR: CONFIG_VMDK_IMAGES 未生效（被 defconfig 丢弃）"
+            exit 1
+          fi
+          if ! grep -q "^CONFIG_TARGET_ROOTFS_PARTSIZE=${PART_SIZE}$" .config; then
+            echo "ERROR: CONFIG_TARGET_ROOTFS_PARTSIZE 未生效（期望 ${PART_SIZE}）"
             exit 1
           fi
           echo ">>> x86 VM 镜像选项已启用"
