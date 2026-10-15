@@ -262,6 +262,49 @@ jobs:
           bash ../shell/DSF/dsf_seed_config.sh "${SEED_CONFIG}" "${PROFILE}"
           test -f .config || { echo "ERROR: .config 未生成"; exit 1; }
 
+      - name: Resolve docker switch (device whitelist)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DEV="${TARGET_DEVICE:-${{ github.event.inputs.target_device }}}"
+
+          # 总开关：DSF 专属文件 或 公共文件，任一为真即算开（保持你原门控的 OR 语义）
+          CFG_ON=no
+          for f in "${WORKSPACE}/configs/DSF/plugins.cfg" "${WORKSPACE}/configs/plugins.cfg"; do
+            [ -f "$f" ] || continue
+            if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "$f"; then CFG_ON=yes; fi
+          done
+
+          # 白名单：DSF 专属文件若写了就覆盖公共文件
+          WL=""
+          for f in "${WORKSPACE}/configs/plugins.cfg" "${WORKSPACE}/configs/DSF/plugins.cfg"; do
+            [ -f "$f" ] || continue
+            v="$(grep -E '^[[:space:]]*ENABLE_DOCKER_DEVICES=' "$f" | head -n1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+            [ -n "$v" ] && WL="$v"
+          done
+
+          IN_WL=no
+          for one in $(printf '%s' "${WL}" | tr ',' ' '); do
+            if [ "${one}" = "${DEV}" ]; then IN_WL=yes; fi
+          done
+
+          DOCKER_ENABLED=no
+          if [ "${CFG_ON}" = "yes" ] && [ "${IN_WL}" = "yes" ]; then DOCKER_ENABLED=yes; fi
+          echo "DOCKER_ENABLED=${DOCKER_ENABLED}" >> "$GITHUB_ENV"
+
+          {
+            echo "### docker 开关（DSF）"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| TARGET_DEVICE | ${DEV} |"
+            echo "| ENABLE_DOCKER | ${CFG_ON} |"
+            echo "| ENABLE_DOCKER_DEVICES | ${WL:-<空>} |"
+            echo "| 设备在白名单内 | ${IN_WL} |"
+            echo "| **DOCKER_ENABLED** | **${DOCKER_ENABLED}** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo ">>> device=${DEV} cfg=${CFG_ON} whitelist=${IN_WL} → DOCKER_ENABLED=${DOCKER_ENABLED}"
+
       - name: Load Third-Party Config & Inject Plugins (DSF)
         # 第三方包清单：公共 + DSF(可选) → 注入 .config（源码包走这条路）
         #   apk 包在这里必然 MISS，属正常（见 Prepare Third-Party APKs）
@@ -296,6 +339,13 @@ jobs:
             case " ${APK_ONLY} " in
               *" ${p} "*) echo "  SKIP ${p}（apk 交付，见 Prepare Third-Party APKs）"; continue ;;
             esac
+            # docker 走设备白名单：不在白名单的机器，即使 CUSTOM_PACKAGES 里有也不注入
+            if [ "${DOCKER_ENABLED:-no}" != "yes" ]; then
+              case "${p}" in
+                docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)
+                  echo "  SKIP ${p}（DOCKER_ENABLED=${DOCKER_ENABLED:-no}，设备不在白名单）"; continue ;;
+              esac
+            fi
             if grep -qE "^[[:space:]]*config[[:space:]]+PACKAGE_${p}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
               ./scripts/config --enable "CONFIG_PACKAGE_${p}"
               echo "CONFIG_PACKAGE_${p}" >> tmp/injected-plugins.txt
@@ -365,14 +415,14 @@ jobs:
           [ -f "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/init.d/apk-install" || true
           [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
-          # 5) docker 门控
+          # 5) docker 门控（DOCKER_ENABLED = 总开关 + 设备白名单，见 Resolve docker switch）
           UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
-          if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/DSF/plugins.cfg" 2>/dev/null \
-             || grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null \
-             || grep -qxF 'CONFIG_PACKAGE_docker' "${SOURCE_DIR}/tmp/injected-plugins.txt" 2>/dev/null; then
-            echo ">>> ENABLE_DOCKER=1 → 打包 99-docker-firewall"
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
+            [ -f "${UCI_DOCKER}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但找不到 ${UCI_DOCKER}"; exit 1; }
+            echo ">>> DOCKER_ENABLED=yes → 保留 99-docker-firewall"
           else
-            rm -f "${UCI_DOCKER}"; echo ">>> 未启用 docker → 已移除 99-docker-firewall"
+            rm -f "${UCI_DOCKER}"
+            echo ">>> DOCKER_ENABLED=no → 已移除 99-docker-firewall"
           fi
           echo ">>> 网络配置预览:"; cat "${NET_CONF}"
 
