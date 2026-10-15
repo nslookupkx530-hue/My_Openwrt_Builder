@@ -639,6 +639,24 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo ">>> tag=${TAG}"
 
+          # ========== 新增 1/3：docker 交付清单（只有 DOCKER_ENABLED=yes 才输出）==========
+          #   DSF ：docker 编进 rootfs（DOCKER_SYMS 有值）
+          #   A 线：docker 走 apk → usr/share/third-party → 首启安装（DOCKER_APKS 有值）
+          #   —— 两条线共用这段文本
+          DOCKER_SEC="no"
+          DOCKER_APKS=""
+          DOCKER_APK_DIR=""
+          DOCKER_SYMS=""
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
+            DOCKER_SEC="yes"
+            for d in "${WORKSPACE}/src/files/usr/share/third-party" "${WORKSPACE}/files/usr/share/third-party" "${WORKSPACE}/src/packages"; do
+              [ -d "$d" ] || continue
+              DOCKER_APKS="$(find "$d" -maxdepth 1 -type f -name '*.apk' -printf '%f\n' 2>/dev/null | grep -Ex 'docker-[0-9].*|dockerd-[0-9].*|containerd-[0-9].*|runc-[0-9].*|docker-compose-[0-9].*|luci-app-dockerman-[0-9].*|luci-i18n-dockerman-zh-cn-[0-9].*' | sort -u)"
+              if [ -n "${DOCKER_APKS}" ]; then DOCKER_APK_DIR="$d"; break; fi
+            done
+            DOCKER_SYMS="$(grep -E '^CONFIG_PACKAGE_(docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)=y$' .config | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort -u)"
+          fi
+
           {
             echo "device      : ${TARGET_DEVICE}"
             echo "repo        : ${REPO_URL}"
@@ -653,6 +671,7 @@ jobs:
             echo "build_time  : $(date -u '+%F %T UTC')"
             echo "run_id      : ${{ github.run_id }}"
             echo "config_md5  : $(md5sum .config | cut -d' ' -f1)"
+            echo "docker      : ${DOCKER_ENABLED:-no}"
             echo "kmods_feed  : ${KMODS_FEED_URL:-<未设置>}"
           } > "${WORKSPACE}/BUILDINFO.txt"
 
@@ -691,6 +710,33 @@ jobs:
             echo "Third-Party package list"
             echo
             printf '%s\n' "${CUSTOM_PACKAGES:-}" | tr ' ' '\n' | sed '/^$/d' | sort | sed 's/^/- /'
+
+            # ========== 新增 2/3：docker 段落（放行设备才会出现在正文里）==========
+            if [ "${DOCKER_SEC}" = "yes" ]; then
+              echo
+              echo "Docker（设备白名单放行）"
+              echo
+              echo "开关：ENABLE_DOCKER=1 且 ${TARGET_DEVICE} 在 ENABLE_DOCKER_DEVICES 内"
+              if [ -n "${DOCKER_APKS}" ]; then
+                echo
+                echo "交付方式：构建期拉取 apk → 固件 usr/share/third-party/ → 首启安装"
+                echo
+                echo "来源目录：${DOCKER_APK_DIR#${WORKSPACE}/}/"
+                echo
+                printf '%s\n' "${DOCKER_APKS}" | sed 's/^/- /'
+              fi
+              if [ -n "${DOCKER_SYMS}" ]; then
+                echo
+                echo "交付方式：编译进 rootfs（.config 直接注入）"
+                echo
+                printf '%s\n' "${DOCKER_SYMS}" | sed 's/^/- /'
+              fi
+              if [ -z "${DOCKER_APKS}" ] && [ -z "${DOCKER_SYMS}" ]; then
+                echo
+                echo "WARNING: DOCKER_ENABLED=yes 但没找到任何 docker 交付物（apk 未拉到 / .config 未注入？）"
+              fi
+            fi
+
             echo
             echo "自建 Kmod 源"
             echo
@@ -698,6 +744,12 @@ jobs:
             echo "自有 kmods 源：${KMODS_FEED_URL:-<未设置>}"
           } > "${WORKSPACE}/release-notes.md"
           rm -f "${PLIST}"
+
+          # ========== 新增 3/3：CI 侧警示 ==========
+          if [ "${DOCKER_SEC}" = "yes" ] && [ -z "${DOCKER_APKS}" ] && [ -z "${DOCKER_SYMS}" ]; then
+            echo "::warning::DOCKER_ENABLED=yes 但 release notes 未记录到任何 docker 交付物"
+          fi
+
           echo ">>> release-notes.md 预览:"; cat "${WORKSPACE}/release-notes.md"
 
       - name: Prepare build download
