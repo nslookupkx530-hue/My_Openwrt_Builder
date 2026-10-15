@@ -190,20 +190,24 @@ refresh_luci() {
     log "已清理 LuCI 缓存并重启 rpcd/uhttpd"
 }
 
-# ----------   docker 服务：装完自动启用（apk 自带 /etc/init.d/docker） ----------
+# ----------   docker 服务：装完自动启用 ----------
+#   ⚠️ OpenWrt 的包名是 dockerd → init 脚本是 /etc/init.d/dockerd
+#      （个别版本提供 /etc/init.d/docker 别名）→ 两个都试
 enable_docker() {
-    [ -x /etc/init.d/docker ] || return 0
+    SVC=""
+    [ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
+    [ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
+    [ -n "$SVC" ] || return 0
 
-    if /etc/init.d/docker enabled 2>/dev/null; then
+    if "$SVC" enabled 2>/dev/null; then
         log "docker 服务已是开机自启"
     else
-        /etc/init.d/docker enable 2>/dev/null && log "已把 docker 设为开机自启" || log "docker enable 失败"
+        "$SVC" enable 2>/dev/null && log "已把 docker 设为开机自启" || log "docker enable 失败"
     fi
-
-    if /etc/init.d/docker running 2>/dev/null; then
+    if "$SVC" running 2>/dev/null; then
         log "docker 服务已在运行"
     else
-        /etc/init.d/docker start >/dev/null 2>&1 && log "已启动 docker 服务" || log "docker start 失败（可手动 /etc/init.d/docker start）"
+        "$SVC" start >/dev/null 2>&1 && log "已启动 docker 服务" || log "docker start 失败（可手动 $SVC start）"
     fi
     return 0
 }
