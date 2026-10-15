@@ -647,8 +647,12 @@ jobs:
           DOCKER_APKS=""
           DOCKER_APK_DIR=""
           DOCKER_SYMS=""
+          # 通用清单（PLIST）里要剔掉的 docker 包名，避免与下面 Docker 段落重复；
+          # 未放行时保持哨兵值 = 一个都不过滤（不影响 seed 里可能本来就有的 dockerman）
+          DOCKER_NAMES_RE='^@@never@@$'
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
             DOCKER_SEC="yes"
+            DOCKER_NAMES_RE='^(docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)$'
             for d in "${WORKSPACE}/src/files/usr/share/third-party" "${WORKSPACE}/files/usr/share/third-party" "${WORKSPACE}/src/packages"; do
               [ -d "$d" ] || continue
               DOCKER_APKS="$(find "$d" -maxdepth 1 -type f -name '*.apk' -printf '%f\n' 2>/dev/null | grep -Ex 'docker-[0-9].*|dockerd-[0-9].*|containerd-[0-9].*|runc-[0-9].*|docker-compose-[0-9].*|luci-app-dockerman-[0-9].*|luci-i18n-dockerman-zh-cn-[0-9].*' | sort -u)"
@@ -677,8 +681,8 @@ jobs:
 
           PLIST="$(mktemp)"
           grep -E '^CONFIG_PACKAGE_luci[A-Za-z0-9._-]*=y$' .config | grep -v '_INCLUDE_' | grep -vx 'CONFIG_PACKAGE_luci' \
-            | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' >> "${PLIST}" || true
-          [ -f tmp/injected-plugins.txt ] && grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt | sed 's/^CONFIG_PACKAGE_//' >> "${PLIST}" || true
+            | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | grep -vE "${DOCKER_NAMES_RE}" >> "${PLIST}" || true
+          [ -f tmp/injected-plugins.txt ] && grep -v '^CONFIG_PACKAGE_luci' tmp/injected-plugins.txt | sed 's/^CONFIG_PACKAGE_//' | grep -vE "${DOCKER_NAMES_RE}" >> "${PLIST}" || true
           sort -u "${PLIST}" -o "${PLIST}"
           echo ">>> LuCI/插件条目数: $(wc -l < "${PLIST}")"
 
@@ -751,17 +755,6 @@ jobs:
           fi
 
           echo ">>> release-notes.md 预览:"; cat "${WORKSPACE}/release-notes.md"
-
-      - name: Prepare build download
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${WORKSPACE}/src"
-          make download -j"$(nproc)" 2>&1 | tee build_download.log || {
-            echo ">>> 并行下载失败，降级单线程重试一次"
-            make download -j1 V=s 2>&1 | tee -a build_download.log
-          }
-          grep -Ei "error|warning" build_download.log || true
 
       - name: Build firmware
         shell: bash
