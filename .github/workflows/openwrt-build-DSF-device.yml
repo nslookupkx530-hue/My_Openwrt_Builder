@@ -97,6 +97,11 @@ jobs:
           for f in shell/*.sh shell/DSF/*.sh; do check_bash "$f"; done
           check_bash "Third-Party/third-party.config"
           check_bash "Third-Party/DSF/third-party.config"
+          # ---- docker-firewall（本次新增）：check_bash/check_sh 对不存在的文件是"静默 return 0"，
+          #      所以先硬断言文件存在，避免路径写错/没落盘时这步假绿；再 bash -n + sh -n 各过一遍（目标机是 ash）
+          [ -f files/etc/init.d/docker-firewall ] || { echo "FAIL 缺少 files/etc/init.d/docker-firewall"; exit 1; }
+          check_bash "files/etc/init.d/docker-firewall"
+          check_sh   "files/etc/init.d/docker-firewall"
           for d in "files/${TARGET_DEVICE:-GL-MT5000}" "files/DSF/${TARGET_DEVICE:-GL-MT5000}"; do
             for f in "$d/etc/uci-defaults/"*; do check_sh "$f"; done
           done
@@ -335,11 +340,16 @@ jobs:
           : > tmp/injected-plugins.txt
           APK_ONLY="${APK_ONLY_PKGS:-luci-app-store luci-app-quickstart luci-i18n-quickstart-zh-cn}"
 
+          # ---- docker 包集合（单一来源：注入清单 = 拦截名单 = A 线 Fetch Docker APKs 的 WANT）----
+          # 该 feed 是拆包的：docker=客户端 CLI，dockerd=守护进程（+containerd/+runc 为其依赖）
+          # 源树里不存在的符号只会 MISS(warning)；多写零成本，少写会静默缺功能
+          DOCKER_PKGS="docker dockerd containerd runc docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn"
+
           # ---- docker：白名单放行时加入注入清单（不动 CUSTOM_PACKAGES，避免串到 apk 通道）----
           INJECT_PKGS="${CUSTOM_PACKAGES}"
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
-            INJECT_PKGS="$(printf '%s %s' "${INJECT_PKGS}" "docker docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn" | xargs)"
-            echo ">>> DOCKER_ENABLED=yes → docker 包已加入注入清单"
+            INJECT_PKGS="$(printf '%s %s' "${INJECT_PKGS}" "${DOCKER_PKGS}" | xargs)"
+            echo ">>> DOCKER_ENABLED=yes → docker 包已加入注入清单: ${DOCKER_PKGS}"
           else
             echo ">>> DOCKER_ENABLED=${DOCKER_ENABLED:-no} → 不加入 docker"
           fi
@@ -360,9 +370,8 @@ jobs:
             esac
             # 双保险：不在白名单时，即使有人手动把 docker 写进 CUSTOM_PACKAGES 也拦住
             if [ "${DOCKER_ENABLED:-no}" != "yes" ]; then
-              case "${p}" in
-                docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)
-                  echo "  SKIP ${p}（DOCKER_ENABLED=${DOCKER_ENABLED:-no}，设备不在白名单）"; continue ;;
+              case " ${DOCKER_PKGS} " in
+                *" ${p} "*) echo "  SKIP ${p}（DOCKER_ENABLED=${DOCKER_ENABLED:-no}，设备不在白名单）"; continue ;;
               esac
             fi
             if grep -qE "^[[:space:]]*config[[:space:]]+PACKAGE_${p}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
@@ -375,6 +384,11 @@ jobs:
           done
           [ -z "${MISS}" ] || echo "::warning::以下包在本源树不存在（若为 apk 包请加入 APK_ONLY_PKGS）:${MISS}"
           echo ">>> 已记录注入项 $(wc -l < tmp/injected-plugins.txt) 个"
+
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
+            echo ">>> docker 注入结果（期望至少看到 CONFIG_PACKAGE_dockerd=y）:"
+            grep -E '^CONFIG_PACKAGE_(docker|dockerd|containerd|runc)=y$' tmp/injected-plugins.txt | sed 's/^/    /' || true
+          fi
 
           echo "=== STEP 3: 可选裁剪脚本 ==="
           if [ -f ../shell/DSF/trim_config.sh ]; then
@@ -442,25 +456,26 @@ jobs:
 
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
             rm -f "${UCI_DOCKER_OLD}"
-
             [ -f "${UCI_DOCKER_INIT}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但找不到 ${UCI_DOCKER_INIT}"; exit 1; }
             chmod 0755 "${UCI_DOCKER_INIT}"
             mkdir -p "$(dirname "${UCI_DOCKER_LINK}")"
             ln -sf ../init.d/docker-firewall "${UCI_DOCKER_LINK}"
 
-            # DSF 的 docker 是编进镜像的，没有"首启安装"那一步来 enable 它 → 生成脚本
             mkdir -p "$(dirname "${UCI_DOCKER_EN}")"
             cat > "${UCI_DOCKER_EN}" <<'EOS'
-            #!/bin/sh
-            # 首启启用 docker（构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
-            SVC=""
-            [ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
-            [ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
-            [ -n "$SVC" ] || exit 0
-            "$SVC" enable >/dev/null 2>&1
-            "$SVC" start  >/dev/null 2>&1
-            exit 0
-            EOS
+          #!/bin/sh
+          # 首启启用 docker（构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
+          SVC=""
+          [ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
+          [ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
+          [ -n "$SVC" ] || exit 0
+          "$SVC" enable >/dev/null 2>&1
+          "$SVC" start  >/dev/null 2>&1
+          exit 0
+          EOS
+            # 落盘自检（专治这个 heredoc 缩进坑）
+            [ "$(head -n1 "${UCI_DOCKER_EN}")" = "#!/bin/sh" ] || { echo "ERROR: 99-docker-enable 首行不是 #!/bin/sh（heredoc 缩进问题）"; exit 1; }
+            sh -n "${UCI_DOCKER_EN}" || { echo "ERROR: 99-docker-enable 语法错误"; exit 1; }
             chmod 0755 "${UCI_DOCKER_EN}"
             echo ">>> DOCKER_ENABLED=yes → docker-firewall(init.d) + S99 软链 + 99-docker-enable 已就位"
           else
@@ -593,6 +608,23 @@ jobs:
             done < tmp/injected-plugins.txt
             mv "${TMPF}" tmp/injected-plugins.txt
             echo ">>> 已从注入清单剔除，剩余 $(wc -l < tmp/injected-plugins.txt) 项"
+          fi
+
+          # ---- docker 门控落地硬校验：MISS 只是 warning，这里升级为"白名单放行了就必须真进 .config" ----
+          #      feed 拆包：dockerd=守护进程 / docker=CLI，任一存在即认为 docker 已编进镜像
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
+            DOCKER_HIT=""
+            if grep -qx 'CONFIG_PACKAGE_dockerd=y' tmp/enabled-symbols.txt; then DOCKER_HIT="dockerd"; fi
+            if [ -z "${DOCKER_HIT}" ]; then
+              if grep -qx 'CONFIG_PACKAGE_docker=y' tmp/enabled-symbols.txt; then DOCKER_HIT="docker"; fi
+            fi
+            if [ -z "${DOCKER_HIT}" ]; then
+              echo "::error::DOCKER_ENABLED=yes 但 CONFIG_PACKAGE_dockerd/docker 都没进 .config（看注入步骤的 MISS 行）"
+              exit 1
+            fi
+            echo ">>> [docker 校验] docker 已进 .config，符号来源: ${DOCKER_HIT}"
+          else
+            echo ">>> [docker 校验] DOCKER_ENABLED=${DOCKER_ENABLED:-no} → 跳过（本机不该有 docker）"
           fi
           echo ">>> 配置校验通过"
 
