@@ -657,14 +657,14 @@ jobs:
           [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && \
             chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
-          # ---- 构建期门控：只有开启 Docker 才把 docker 防火墙脚本打包进固件 ----
+          # ---- 构建期门控：DOCKER_ENABLED=yes 才把 docker 防火墙脚本打包进固件 ----
           UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
-          if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${WORKSPACE}/configs/plugins.cfg" 2>/dev/null \
-             || grep -qxF 'CONFIG_PACKAGE_docker' "${SOURCE_DIR}/tmp/injected-plugins.txt" 2>/dev/null; then
-            echo ">>> ENABLE_DOCKER=1 → 打包 99-docker-firewall"
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
+            [ -f "${UCI_DOCKER}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但固件里找不到 ${UCI_DOCKER}"; exit 1; }
+            echo ">>> DOCKER_ENABLED=yes → 保留 99-docker-firewall"
           else
             rm -f "${UCI_DOCKER}"
-            echo ">>> 未启用 docker → 已从固件中移除 99-docker-firewall"
+            echo ">>> DOCKER_ENABLED=no → 已从固件中移除 99-docker-firewall"
           fi
 
           echo ">>> 网络配置预览:"
