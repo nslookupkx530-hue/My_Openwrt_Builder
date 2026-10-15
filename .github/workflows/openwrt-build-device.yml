@@ -710,6 +710,10 @@ jobs:
 
           DEST="${WORKSPACE}/src/files/usr/share/third-party"
           mkdir -p "${DEST}"
+
+          # docker 走"运行时安装"：这里只把 apk 下进固件，首启由 install_third_party_apk.sh 装
+          #   dockerd 是本体；containerd / runc / kmod-* 是它的依赖
+          #   （containerd/runc 一起打进固件，首启时能少解析一半依赖）
           WANT="docker dockerd containerd runc docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn"
 
           CORE_DIR="${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/packages"
@@ -722,8 +726,13 @@ jobs:
           # apk 文件名 = <包名>-<版本>.apk
           curl -fsSL --retry 3 --max-time 180 "${CORE_DIR}/index.json" -o /tmp/idx-core.json
           curl -fsSL --retry 3 --max-time 180 "${LUCI_DIR}/index.json" -o /tmp/idx-luci.json
-          echo ">>> core: arch=$(jq -r '.architecture // "?"' /tmp/idx-core.json)  包数=$(jq -r '.packages | length' /tmp/idx-core.json)"
-          echo ">>> luci: arch=$(jq -r '.architecture // "?"' /tmp/idx-luci.json)  包数=$(jq -r '.packages | length' /tmp/idx-luci.json)"
+
+          CORE_N="$(jq -r '.packages | length' /tmp/idx-core.json)"
+          LUCI_N="$(jq -r '.packages | length' /tmp/idx-luci.json)"
+          echo ">>> core: arch=$(jq -r '.architecture // "?"' /tmp/idx-core.json)  包数=${CORE_N}"
+          echo ">>> luci: arch=$(jq -r '.architecture // "?"' /tmp/idx-luci.json)  包数=${LUCI_N}"
+          [ "${CORE_N}" -gt 100 ] || { echo "ERROR: core 索引异常（包数=${CORE_N}），路径可能不对：${CORE_DIR}"; exit 1; }
+          [ "${LUCI_N}" -gt 50 ]  || { echo "ERROR: luci 索引异常（包数=${LUCI_N}），路径可能不对：${LUCI_DIR}"; exit 1; }
 
           get_ver() { jq -r --arg n "$1" '.packages[$n] // empty' "$2" 2>/dev/null; }
 
@@ -756,11 +765,12 @@ jobs:
             echo "|---|---|"
             echo "| 设备 | ${TARGET_DEVICE} |"
             echo "| 架构 | ${ARCH_PACKAGES} |"
-            echo "| 索引 | ${CORE_DIR}/index.json + ${LUCI_DIR}/index.json |"
+            echo "| core 索引 | ${CORE_N} 个包（arch=$(jq -r '.architecture // "?"' /tmp/idx-core.json)） |"
+            echo "| luci 索引 | ${LUCI_N} 个包（arch=$(jq -r '.architecture // "?"' /tmp/idx-luci.json)） |"
             echo ""
             echo "拉取到的版本："
             echo '```'
-            printf '%s\n' "${RESOLVED[@]}"
+            if [ "${#RESOLVED[@]}" -gt 0 ]; then printf '%s\n' "${RESOLVED[@]}"; else echo "(无)"; fi
             echo '```'
             echo "固件内第三方 apk："
             echo '```'
@@ -776,7 +786,7 @@ jobs:
             jq -r '.packages | keys[] | select(test("dockerman"))' /tmp/idx-luci.json | head -n 20 || true
             exit 1
           fi
-          echo ">>> Docker APK 拉取完成（架构 ${ARCH_PACKAGES}）"
+          echo ">>> Docker APK 拉取完成（架构 ${ARCH_PACKAGES}，共 ${#RESOLVED[@]} 个包）"
 
       - name: Install Third-Party APKs into image
         shell: bash
