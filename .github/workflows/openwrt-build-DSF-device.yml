@@ -655,10 +655,10 @@ jobs:
             DOCKER_NAMES_RE='^(docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)$'
             for d in "${WORKSPACE}/src/files/usr/share/third-party" "${WORKSPACE}/files/usr/share/third-party" "${WORKSPACE}/src/packages"; do
               [ -d "$d" ] || continue
-              DOCKER_APKS="$(find "$d" -maxdepth 1 -type f -name '*.apk' -printf '%f\n' 2>/dev/null | grep -Ex 'docker-[0-9].*|dockerd-[0-9].*|containerd-[0-9].*|runc-[0-9].*|docker-compose-[0-9].*|luci-app-dockerman-[0-9].*|luci-i18n-dockerman-zh-cn-[0-9].*' | sort -u)"
+              DOCKER_APKS="$(find "$d" -maxdepth 1 -type f -name '*.apk' -printf '%f\n' 2>/dev/null | grep -Ex 'docker-[0-9].*|dockerd-[0-9].*|containerd-[0-9].*|runc-[0-9].*|docker-compose-[0-9].*|luci-app-dockerman-[0-9].*|luci-i18n-dockerman-zh-cn-[0-9].*' | sort -u || true)"
               if [ -n "${DOCKER_APKS}" ]; then DOCKER_APK_DIR="$d"; break; fi
             done
-            DOCKER_SYMS="$(grep -E '^CONFIG_PACKAGE_(docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)=y$' .config | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort -u)"
+            DOCKER_SYMS="$(grep -E '^CONFIG_PACKAGE_(docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)=y$' .config | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort -u || true)"
           fi
 
           {
