@@ -335,23 +335,30 @@ jobs:
           : > tmp/injected-plugins.txt
           APK_ONLY="${APK_ONLY_PKGS:-luci-app-store luci-app-quickstart luci-i18n-quickstart-zh-cn}"
 
-          # ---- docker：设备白名单放行时加入注入清单 ----
-          #  ① 不动 CUSTOM_PACKAGES —— 它还要给 Prepare Third-Party APKs 的 apk 通道用
-          #  ② 不依赖任何配置文件，只看 configs/plugins.cfg 白名单算出的 DOCKER_ENABLED
+          # ---- docker：白名单放行时加入注入清单（不动 CUSTOM_PACKAGES，避免串到 apk 通道）----
           INJECT_PKGS="${CUSTOM_PACKAGES}"
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
             INJECT_PKGS="$(printf '%s %s' "${INJECT_PKGS}" "docker docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn" | xargs)"
-            echo ">>> DOCKER_ENABLED=yes → docker 包已加入注入清单: docker docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn"
+            echo ">>> DOCKER_ENABLED=yes → docker 包已加入注入清单"
           else
             echo ">>> DOCKER_ENABLED=${DOCKER_ENABLED:-no} → 不加入 docker"
           fi
+
+          # ---- 幂等写入 .config：直接改文本，不依赖 scripts/config ----
+          #   （有些源码树里 scripts/config 是目录，不能当命令用）
+          set_opt_on() {   # $1 = 不带 CONFIG_PACKAGE_ 前缀的包名
+              sym="CONFIG_PACKAGE_$1"
+              sed -i -e "/^${sym}=/d" -e "/^# ${sym} is not set[[:space:]]*$/d" .config
+              printf '%s=y\n' "$sym" >> .config
+              printf '%s\n'   "$sym" >> tmp/injected-plugins.txt
+          }
 
           MISS=""
           for p in $(printf '%s\n' "${INJECT_PKGS}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
             case " ${APK_ONLY} " in
               *" ${p} "*) echo "  SKIP ${p}（apk 交付，见 Prepare Third-Party APKs）"; continue ;;
             esac
-            # 双保险：万一有人手动把 docker 写进 CUSTOM_PACKAGES，不在白名单时也拦住
+            # 双保险：不在白名单时，即使有人手动把 docker 写进 CUSTOM_PACKAGES 也拦住
             if [ "${DOCKER_ENABLED:-no}" != "yes" ]; then
               case "${p}" in
                 docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)
@@ -359,8 +366,8 @@ jobs:
               esac
             fi
             if grep -qE "^[[:space:]]*config[[:space:]]+PACKAGE_${p}([[:space:]]|$)" tmp/.config-package.in 2>/dev/null; then
-              ./scripts/config --enable "CONFIG_PACKAGE_${p}"
-              echo "CONFIG_PACKAGE_${p}" >> tmp/injected-plugins.txt
+              set_opt_on "${p}"
+              echo "  ON  CONFIG_PACKAGE_${p}"
             else
               echo "  MISS CONFIG_PACKAGE_${p}（本源码树没有这个包）"
               MISS="${MISS} ${p}"
@@ -428,28 +435,37 @@ jobs:
           [ -d "${FIRMWARE_FILES_DIR}/etc/third-party" ] && chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
           # 5) docker 门控（DOCKER_ENABLED = 总开关 + 设备白名单，见 Resolve docker switch）
-          UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
+          UCI_DOCKER_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/docker-firewall"
+          UCI_DOCKER_LINK="${FIRMWARE_FILES_DIR}/etc/rc.d/S99docker-firewall"
+          UCI_DOCKER_OLD="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
           UCI_DOCKER_EN="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-enable"
 
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
-            [ -f "${UCI_DOCKER}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但找不到 ${UCI_DOCKER}"; exit 1; }
+            rm -f "${UCI_DOCKER_OLD}"
 
-            # DSF 的 docker 是编进镜像的，没有"首启安装"那一步来 enable 它
-            # 这里现场生成一个 uci-defaults，首启自动 enable + start
+            [ -f "${UCI_DOCKER_INIT}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但找不到 ${UCI_DOCKER_INIT}"; exit 1; }
+            chmod 0755 "${UCI_DOCKER_INIT}"
+            mkdir -p "$(dirname "${UCI_DOCKER_LINK}")"
+            ln -sf ../init.d/docker-firewall "${UCI_DOCKER_LINK}"
+
+            # DSF 的 docker 是编进镜像的，没有"首启安装"那一步来 enable 它 → 生成脚本
             mkdir -p "$(dirname "${UCI_DOCKER_EN}")"
             cat > "${UCI_DOCKER_EN}" <<'EOS'
-            #!/bin/sh
-            # 首启启用 docker（由 DSF workflow 在构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
-            [ -x /etc/init.d/docker ] || exit 0
-            /etc/init.d/docker enable >/dev/null 2>&1
-            /etc/init.d/docker start  >/dev/null 2>&1
-            exit 0
-            EOS
+#!/bin/sh
+# 首启启用 docker（构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
+SVC=""
+[ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
+[ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
+[ -n "$SVC" ] || exit 0
+"$SVC" enable >/dev/null 2>&1
+"$SVC" start  >/dev/null 2>&1
+exit 0
+EOS
             chmod 0755 "${UCI_DOCKER_EN}"
-            echo ">>> DOCKER_ENABLED=yes → 保留 99-docker-firewall + 生成 99-docker-enable"
+            echo ">>> DOCKER_ENABLED=yes → docker-firewall(init.d) + S99 软链 + 99-docker-enable 已就位"
           else
-            rm -f "${UCI_DOCKER}" "${UCI_DOCKER_EN}"
-            echo ">>> DOCKER_ENABLED=no → 已移除 99-docker-firewall / 99-docker-enable"
+            rm -f "${UCI_DOCKER_INIT}" "${UCI_DOCKER_LINK}" "${UCI_DOCKER_OLD}" "${UCI_DOCKER_EN}"
+            echo ">>> DOCKER_ENABLED=no → 已移除 docker 相关脚本"
           fi
           echo ">>> 网络配置预览:"; cat "${NET_CONF}"
 
