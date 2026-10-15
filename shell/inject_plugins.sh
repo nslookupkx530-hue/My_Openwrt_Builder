@@ -47,12 +47,26 @@ PLUGIN_MAP=(
     "ENABLE_AUTOREBOOT|luci-app-autoreboot luci-i18n-autoreboot-zh-cn"
     "ENABLE_SMARTDNS|smartdns luci-app-smartdns luci-i18n-smartdns-zh-cn"
     "ENABLE_RAMFREE|luci-app-ramfree luci-i18n-ramfree-zh-cn"
-    "ENABLE_DOCKER|docker luci-app-dockerman luci-i18n-dockerman-zh-cn"
+
+    # ⚠️ docker 【不在这里注入】！务必先读完这段注释：
+    #     CONFIG_PACKAGE_docker 会拉起 dockerd 的 kmod-* 依赖（veth / br-netfilter / nf-nat…），
+    #     这些包带 KCONFIG:= 会改变内核配置 → .vermagic（内核配置的 md5）跟着变
+    #       → distfeeds 里拼出的官方 kmods 目录名在镜像站不存在
+    #       → 首启 apk update 报 "wget: exited with error 8" / "1 unavailable"，
+    #         并且以后再也装不了官方内核模块。
+    #     现在 docker 走【运行时安装】：
+    #       构建期只把它那几个 apk 下载到 files/usr/share/third-party/
+    #       首启由 apk-install 安装（kmod 依赖那时从官方源在线解析，内核没被污染，vermagic 对齐）
+    #     总开关 ENABLE_DOCKER / 白名单 ENABLE_DOCKER_DEVICES 仍留在 configs/plugins.cfg，
+    #     但只被 workflow 的 "Resolve docker switch" 和 "Fetch Docker APKs" 使用。
 )
 
 # 读开关（plugins.cfg 里形如 ENABLE_SQM=1）
 # shellcheck disable=SC1090
 . "$PLUGIN_CFG"
+
+# docker 不在此注入（见 PLUGIN_MAP 尾部注释）：仅打印判定结果，便于排查
+echo ">>> docker: ENABLE_DOCKER=${ENABLE_DOCKER:-0} / DOCKER_ENABLED=${DOCKER_ENABLED:-no} → 运行时安装，不注入 .config"
 
 is_on() {
     local flag="$1" val=""
