@@ -451,16 +451,16 @@ jobs:
             # DSF 的 docker 是编进镜像的，没有"首启安装"那一步来 enable 它 → 生成脚本
             mkdir -p "$(dirname "${UCI_DOCKER_EN}")"
             cat > "${UCI_DOCKER_EN}" <<'EOS'
-#!/bin/sh
-# 首启启用 docker（构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
-SVC=""
-[ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
-[ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
-[ -n "$SVC" ] || exit 0
-"$SVC" enable >/dev/null 2>&1
-"$SVC" start  >/dev/null 2>&1
-exit 0
-EOS
+            #!/bin/sh
+            # 首启启用 docker（构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
+            SVC=""
+            [ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
+            [ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
+            [ -n "$SVC" ] || exit 0
+            "$SVC" enable >/dev/null 2>&1
+            "$SVC" start  >/dev/null 2>&1
+            exit 0
+            EOS
             chmod 0755 "${UCI_DOCKER_EN}"
             echo ">>> DOCKER_ENABLED=yes → docker-firewall(init.d) + S99 软链 + 99-docker-enable 已就位"
           else
