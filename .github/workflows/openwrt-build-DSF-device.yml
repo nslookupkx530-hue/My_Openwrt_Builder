@@ -429,12 +429,27 @@ jobs:
 
           # 5) docker 门控（DOCKER_ENABLED = 总开关 + 设备白名单，见 Resolve docker switch）
           UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
+          UCI_DOCKER_EN="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-enable"
+
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
             [ -f "${UCI_DOCKER}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但找不到 ${UCI_DOCKER}"; exit 1; }
-            echo ">>> DOCKER_ENABLED=yes → 保留 99-docker-firewall"
+
+            # DSF 的 docker 是编进镜像的，没有"首启安装"那一步来 enable 它
+            # 这里现场生成一个 uci-defaults，首启自动 enable + start
+            mkdir -p "$(dirname "${UCI_DOCKER_EN}")"
+            cat > "${UCI_DOCKER_EN}" <<'EOS'
+            #!/bin/sh
+            # 首启启用 docker（由 DSF workflow 在构建期生成；仅 DOCKER_ENABLED=yes 的固件里有）
+            [ -x /etc/init.d/docker ] || exit 0
+            /etc/init.d/docker enable >/dev/null 2>&1
+            /etc/init.d/docker start  >/dev/null 2>&1
+            exit 0
+            EOS
+            chmod 0755 "${UCI_DOCKER_EN}"
+            echo ">>> DOCKER_ENABLED=yes → 保留 99-docker-firewall + 生成 99-docker-enable"
           else
-            rm -f "${UCI_DOCKER}"
-            echo ">>> DOCKER_ENABLED=no → 已移除 99-docker-firewall"
+            rm -f "${UCI_DOCKER}" "${UCI_DOCKER_EN}"
+            echo ">>> DOCKER_ENABLED=no → 已移除 99-docker-firewall / 99-docker-enable"
           fi
           echo ">>> 网络配置预览:"; cat "${NET_CONF}"
 
