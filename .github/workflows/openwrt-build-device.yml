@@ -491,6 +491,7 @@ jobs:
 
           ARCH_PACKAGES="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           echo ">>> CONFIG_TARGET_ARCH_PACKAGES=${ARCH_PACKAGES:-<none>}"
+          echo "ARCH_PACKAGES=${ARCH_PACKAGES}" >> "$GITHUB_ENV"
 
           # a) 基线（prepare_base_config.sh 用的就是这个文件）
           probe "${RELEASE_BASE}/config.buildinfo" "target 基线 buildinfo"
