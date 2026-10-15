@@ -538,6 +538,43 @@ jobs:
             echo "ERROR: 有源不可用 —— 一个 404 就会让整个 apk 安装事务失败"; exit 1; }
           echo ">>> 镜像检查通过"
 
+      - name: Resolve docker switch (device whitelist)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DEV="${TARGET_DEVICE:-${{ github.event.inputs.target_device }}}"
+          CFG="${WORKSPACE}/configs/plugins.cfg"
+          [ -f "${CFG}" ] || { echo "ERROR: 找不到 ${CFG}"; exit 1; }
+
+          # 1) 总开关
+          CFG_ON=no
+          if grep -qE '^[[:space:]]*ENABLE_DOCKER=[1yY]' "${CFG}"; then CFG_ON=yes; fi
+
+          # 2) 设备白名单（逗号分隔）
+          WL="$(grep -E '^[[:space:]]*ENABLE_DOCKER_DEVICES=' "${CFG}" | head -n1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+          IN_WL=no
+          for one in $(printf '%s' "${WL}" | tr ',' ' '); do
+            if [ "${one}" = "${DEV}" ]; then IN_WL=yes; fi
+          done
+
+          # 3) 两个条件同时满足才启用
+          DOCKER_ENABLED=no
+          if [ "${CFG_ON}" = "yes" ] && [ "${IN_WL}" = "yes" ]; then DOCKER_ENABLED=yes; fi
+          echo "DOCKER_ENABLED=${DOCKER_ENABLED}" >> "$GITHUB_ENV"
+
+          {
+            echo "### docker 开关"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| TARGET_DEVICE | ${DEV} |"
+            echo "| ENABLE_DOCKER | ${CFG_ON} |"
+            echo "| ENABLE_DOCKER_DEVICES | ${WL:-<空>} |"
+            echo "| 设备在白名单内 | ${IN_WL} |"
+            echo "| **DOCKER_ENABLED** | **${DOCKER_ENABLED}** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo ">>> device=${DEV} cfg=${CFG_ON} whitelist=${IN_WL} → DOCKER_ENABLED=${DOCKER_ENABLED}"
+
       - name: Load Third-Party Config & Inject Plugins
         shell: bash
         run: |
