@@ -659,13 +659,20 @@ jobs:
             chmod 0755 "${FIRMWARE_FILES_DIR}/etc/third-party/"* || true
 
           # ---- 构建期门控：DOCKER_ENABLED=yes 才把 docker 防火墙脚本打包进固件 ----
-          UCI_DOCKER="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
+          UCI_DOCKER_INIT="${FIRMWARE_FILES_DIR}/etc/init.d/docker-firewall"
+          UCI_DOCKER_LINK="${FIRMWARE_FILES_DIR}/etc/rc.d/S99docker-firewall"
+          UCI_DOCKER_OLD="${FIRMWARE_FILES_DIR}/etc/uci-defaults/99-docker-firewall"
+
           if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
-            [ -f "${UCI_DOCKER}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但固件里找不到 ${UCI_DOCKER}"; exit 1; }
-            echo ">>> DOCKER_ENABLED=yes → 保留 99-docker-firewall"
+            rm -f "${UCI_DOCKER_OLD}"          # 老脚本一律清掉
+            [ -f "${UCI_DOCKER_INIT}" ] || { echo "ERROR: DOCKER_ENABLED=yes 但找不到 ${UCI_DOCKER_INIT}"; exit 1; }
+            chmod 0755 "${UCI_DOCKER_INIT}"
+            mkdir -p "$(dirname "${UCI_DOCKER_LINK}")"
+            ln -sf ../init.d/docker-firewall "${UCI_DOCKER_LINK}"
+            echo ">>> DOCKER_ENABLED=yes → docker-firewall（init.d）+ S99 软链 已就位"
           else
-            rm -f "${UCI_DOCKER}"
-            echo ">>> DOCKER_ENABLED=no → 已从固件中移除 99-docker-firewall"
+            rm -f "${UCI_DOCKER_INIT}" "${UCI_DOCKER_LINK}" "${UCI_DOCKER_OLD}"
+            echo ">>> DOCKER_ENABLED=no → 已移除 docker 相关防火墙脚本"
           fi
 
           echo ">>> 网络配置预览:"
