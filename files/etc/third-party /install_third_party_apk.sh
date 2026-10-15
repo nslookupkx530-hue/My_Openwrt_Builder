@@ -25,6 +25,9 @@ LOCK_STALE_SEC=1800          # 锁超过 30min 视为陈旧可接管
 KEEPALIVE_INTERVAL=60        # 心跳间隔
 NET_MAX_RETRIES=12           # apk update 最多探 12 次
 NET_INTERVAL=10              # 每次间隔 10s（最坏 120s）
+MAX_FAIL_BOOTS=6             # 连续失败这么多次开机后，停止自动重试
+FAIL_COUNT_FILE="/etc/third-party-apk.failcount"
+FAIL_MARK_FILE="/etc/third-party-apk.failed"
 
 KEEPALIVE_PID=""
 FAILED_LIST=""
@@ -187,6 +190,24 @@ refresh_luci() {
     log "已清理 LuCI 缓存并重启 rpcd/uhttpd"
 }
 
+# ----------   docker 服务：装完自动启用（apk 自带 /etc/init.d/docker） ----------
+enable_docker() {
+    [ -x /etc/init.d/docker ] || return 0
+
+    if /etc/init.d/docker enabled 2>/dev/null; then
+        log "docker 服务已是开机自启"
+    else
+        /etc/init.d/docker enable 2>/dev/null && log "已把 docker 设为开机自启" || log "docker enable 失败"
+    fi
+
+    if /etc/init.d/docker running 2>/dev/null; then
+        log "docker 服务已在运行"
+    else
+        /etc/init.d/docker start >/dev/null 2>&1 && log "已启动 docker 服务" || log "docker start 失败（可手动 /etc/init.d/docker start）"
+    fi
+    return 0
+}
+
 # ----------   main   ----------
 main() {
     log "===== 第三方 apk 安装开始 ($(date '+%F %T')) ====="
@@ -229,6 +250,8 @@ main() {
         run_post_config
         printf '%s\n' "$MANIFEST" > "$STAMP_FILE"
         refresh_luci
+        enable_docker
+        rm -f "$FAIL_COUNT_FILE" "$FAIL_MARK_FILE" 2>/dev/null
         return 0
     fi
 
@@ -238,10 +261,25 @@ main() {
         run_post_config
         printf '%s\n' "$MANIFEST" > "$STAMP_FILE"
         refresh_luci
+        enable_docker
+        rm -f "$FAIL_COUNT_FILE" "$FAIL_MARK_FILE" 2>/dev/null
         return 0
     fi
 
-    log "仍有包未装成功，不写 stamp，下次开机重试:${FAILED_LIST}"
+    # ---- ② "定义多次开机失败"停止自动重试（避免每次开机白跑） ----
+    cnt="$(cat "$FAIL_COUNT_FILE" 2>/dev/null || echo 0)"
+    case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+    cnt=$((cnt + 1))
+    printf '%s\n' "$cnt" > "$FAIL_COUNT_FILE"
+
+    if [ "$cnt" -ge "$MAX_FAIL_BOOTS" ]; then
+        log "已连续 ${cnt} 次开机安装失败，停止自动重试（避免每次开机白跑）"
+        log "  失败清单:${FAILED_LIST}"
+        printf '%s\n' "$MANIFEST" > "$STAMP_FILE"
+        touch "$FAIL_MARK_FILE"
+    else
+        log "仍有包未装成功（第 ${cnt}/${MAX_FAIL_BOOTS} 次），下次开机重试:${FAILED_LIST}"
+    fi
     run_post_config
     return 1
 }
