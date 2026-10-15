@@ -1,0 +1,119 @@
+#!/bin/sh /etc/rc.common
+# ============================================================
+#  /etc/init.d/docker-firewall
+#
+#  作用：在 dockerd 启动【之后】补齐 docker 相关的 fw4 forwarding，
+#        让「局域网设备访问容器发布的端口」这条路通。
+#
+#  为什么是 init.d + START=99，而不是 uci-defaults：
+#    · docker zone（/etc/config/firewall 里的 docker）由 dockerd 包创建，
+#      只可能在 dockerd 起来之后才存在；
+#    · uci-defaults 跑在首启很早的阶段（那时 docker 还没起来/还没装），
+#      在那里加 forwarding 引用不到 zone，等于白写；
+#    · 所以必须排在 dockerd 之后（S99）。
+#
+#  铁律（踩过的坑）：
+#    ✗ 不自己写 config zone 'docker'
+#        —— 包的 zone 带 network='docker' / blocked_interfaces 等关键语义，
+#           我们写个同名 zone 会让包跳过创建（丢语义）或被包覆盖（白写）；
+#    ✗ 不 uci delete firewall.docker
+#        —— 删掉的是包的 zone；
+#    ✓ 只做「缺了就补」，幂等，每次开机跑一遍也无副作用。
+#
+#  容器 -> WAN 由 dockerd 包的 blocked_interfaces 控制，本脚本【不碰】：
+#      uci del_list dockerd.firewall.blocked_interfaces='wan'
+#      uci commit dockerd && /etc/init.d/dockerd restart
+# ============================================================
+START=99
+STOP=10
+
+LOG_TAG="docker-firewall"
+
+log() {
+    logger -t "$LOG_TAG" "$*"
+    echo "[$LOG_TAG] $*"
+}
+
+# ---------- 等 docker zone 出现（最多 60 秒） ----------
+wait_docker_zone() {
+    i=0
+    while [ "$i" -lt 12 ]; do
+        [ -n "$(uci -q get firewall.docker.name)" ] && return 0
+        sleep 5
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# ---------- forwarding 查询 / 添加 ----------
+has_forwarding() {   # $1=src $2=dest
+    local idx s d
+    for idx in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.@forwarding\[\([0-9]\+\)\]=forwarding$/\1/p'); do
+        s="$(uci -q get "firewall.@forwarding[$idx].src")"
+        d="$(uci -q get "firewall.@forwarding[$idx].dest")"
+        if [ "$s" = "$1" ] && [ "$d" = "$2" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+add_forwarding() {   # $1=src $2=dest
+    if has_forwarding "$1" "$2"; then
+        log "forwarding $1 -> $2 已存在，跳过"
+        return 0
+    fi
+    uci add firewall forwarding >/dev/null 2>&1
+    uci set "firewall.@forwarding[-1].src=$1"
+    uci set "firewall.@forwarding[-1].dest=$2"
+    log "已添加 forwarding: $1 -> $2"
+    return 0
+}
+
+# ---------- 兜底：docker 若把 iptables 的 FORWARD 默认策略改成 DROP，改回来 ----------
+#   正常本来就该是 ACCEPT，只有真被改成 DROP 时才动，避免干扰别人的策略设置
+fix_forward_policy() {
+    command -v iptables >/dev/null 2>&1 || return 0
+    pol="$(iptables -L FORWARD -n 2>/dev/null | sed -n '1s/.*policy \([A-Z]*\).*/\1/p')"
+    if [ "$pol" = "DROP" ]; then
+        if iptables -P FORWARD ACCEPT 2>/dev/null; then
+            log "检测到 FORWARD 默认策略为 DROP（docker 所致），已改回 ACCEPT"
+        else
+            log "FORWARD 策略为 DROP，改回失败（可手动执行 iptables -P FORWARD ACCEPT）"
+        fi
+    fi
+    return 0
+}
+
+start() {
+    if [ ! -x /etc/init.d/dockerd ] && [ ! -x /etc/init.d/docker ]; then
+        log "未检测到 Docker，跳过"
+        return 0
+    fi
+
+    if ! wait_docker_zone; then
+        log "docker zone 一直没出现（dockerd 可能没起来），本次跳过"
+        return 0
+    fi
+
+    # 只补我们确实需要的（缺什么补什么，已有的不动）
+    add_forwarding lan docker      # 局域网设备 -> 容器（访问容器发布的端口）
+    add_forwarding docker lan      # 容器 -> 局域网设备
+
+    uci commit firewall
+    fix_forward_policy
+
+    if command -v fw4 >/dev/null 2>&1; then
+        if fw4 reload >/dev/null 2>&1; then
+            log "fw4 reload 完成"
+        else
+            log "fw4 reload 失败（配置已写入，可手动执行 fw4 reload）"
+        fi
+    else
+        /etc/init.d/firewall reload >/dev/null 2>&1 || log "firewall reload 失败（配置已写入）"
+    fi
+
+    log "完成"
+}
+
+stop() { :; }
