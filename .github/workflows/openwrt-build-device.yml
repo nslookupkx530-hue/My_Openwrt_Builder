@@ -717,44 +717,32 @@ jobs:
           echo ">>> CORE_DIR=${CORE_DIR}"
           echo ">>> LUCI_DIR=${LUCI_DIR}"
 
-          # 用目录列表找文件名（不依赖 index.json 的字段结构）
-          list_apks() {
-            curl -fsSL --retry 3 --max-time 180 "${1}/" | grep -oE 'href="[^"]+\.apk"' | sed -E 's|href="||; s|"$||' | sort -u
-          }
-
-          CORE_LIST="$(list_apks "${CORE_DIR}")"
-          LUCI_LIST="$(list_apks "${LUCI_DIR}")"
-          echo ">>> core 目录 apk 数: $(printf '%s\n' "${CORE_LIST}" | grep -c . || true)"
-          echo ">>> luci 目录 apk 数: $(printf '%s\n' "${LUCI_LIST}" | grep -c . || true)"
-
-          if [ -z "${CORE_LIST}" ] || [ -z "${LUCI_LIST}" ]; then
-            echo "ERROR: 目录列表拿不到（镜像站可能关了 autoindex），改天用 index.json 方案"
-            exit 1
-          fi
-
-          pick() {   # pick <列表> <包名> → 输出匹配到的相对路径（兼容扁平/子目录两种布局）
-            printf '%s\n' "$1" | awk -v p="$2" '{ n=$0; sub(/.*\//,"",n); if (n ~ "^"p"-[0-9]") { print; exit } }'
-          }
+          # index.json = { "包名": "版本", ... }；apk 文件名 = <包名>-<版本>.apk
+          curl -fsSL --retry 3 --max-time 180 "${CORE_DIR}/index.json" -o /tmp/idx-core.json
+          curl -fsSL --retry 3 --max-time 180 "${LUCI_DIR}/index.json" -o /tmp/idx-luci.json
+          echo ">>> core 索引条目数: $(jq -r 'length' /tmp/idx-core.json)"
+          echo ">>> luci 索引条目数: $(jq -r 'length' /tmp/idx-luci.json)"
 
           MISS=""
-          GOT=""
+          RESOLVED=()
           for p in ${WANT}; do
-            rel="$(pick "${CORE_LIST}" "${p}")"
+            ver="$(jq -r --arg n "${p}" '.[$n] // empty' /tmp/idx-core.json)"
             dir="${CORE_DIR}"
-            if [ -z "${rel}" ]; then
-              rel="$(pick "${LUCI_LIST}" "${p}")"
+            if [ -z "${ver}" ]; then
+              ver="$(jq -r --arg n "${p}" '.[$n] // empty' /tmp/idx-luci.json)"
               dir="${LUCI_DIR}"
             fi
-            if [ -z "${rel}" ]; then
+            if [ -z "${ver}" ]; then
               echo "MISS ${p}"
               MISS="${MISS} ${p}"
               continue
             fi
-            echo "GET  ${p}  ←  ${dir}/${rel}"
-            curl -fsSL --retry 3 --max-time 600 "${dir}/${rel}" -o "${DEST}/$(basename "${rel}")"
-            sz="$(stat -c '%s' "${DEST}/$(basename "${rel}")")"
-            [ "${sz}" -gt 1024 ] || { echo "ERROR: ${rel} 只有 ${sz} 字节，下载不完整"; exit 1; }
-            GOT="${GOT} ${rel}"
+            fn="${p}-${ver}.apk"
+            echo "GET  ${p}  ${ver}  ←  ${dir}/${fn}"
+            curl -fsSL --retry 3 --max-time 600 "${dir}/${fn}" -o "${DEST}/${fn}"
+            sz="$(stat -c '%s' "${DEST}/${fn}")"
+            [ "${sz}" -gt 1024 ] || { echo "ERROR: ${fn} 只有 ${sz} 字节，下载不完整"; exit 1; }
+            RESOLVED+=("${p} = ${ver}")
           done
 
           {
@@ -764,23 +752,26 @@ jobs:
             echo "|---|---|"
             echo "| 设备 | ${TARGET_DEVICE} |"
             echo "| 架构目录 | ${ARCH_PACKAGES} |"
-            echo "| core 目录 apk 数 | $(printf '%s\n' "${CORE_LIST}" | grep -c . || true) |"
-            echo "| luci 目录 apk 数 | $(printf '%s\n' "${LUCI_LIST}" | grep -c . || true) |"
             echo ""
+            echo "拉取到的版本："
+            echo '```'
+            printf '%s\n' "${RESOLVED[@]}"
+            echo '```'
+            echo "固件内第三方 apk："
             echo '```'
             ls -lh "${DEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ -n "${MISS}" ]; then
-            echo "ERROR: 以下包在源里没找到:${MISS}"
-            echo "--- 诊断：core 目录里含 docker 的文件名 ---"
-            printf '%s\n' "${CORE_LIST}" | grep -i docker || echo "(无)"
-            echo "--- 诊断：luci 目录里含 docker 的文件名 ---"
-            printf '%s\n' "${LUCI_LIST}" | grep -i docker || echo "(无)"
+            echo "ERROR: 以下包在索引里不存在:${MISS}"
+            echo "--- 诊断：core 索引里含 docker/containerd/runc 的键 ---"
+            jq -r 'keys[] | select(test("docker|containerd|runc"))' /tmp/idx-core.json | head -n 40 || true
+            echo "--- 诊断：luci 索引里含 dockerman 的键 ---"
+            jq -r 'keys[] | select(test("dockerman"))' /tmp/idx-luci.json | head -n 20 || true
             exit 1
           fi
-          echo ">>> Docker APK 拉取完成:${GOT}"
+          echo ">>> Docker APK 拉取完成"
 
       - name: Install Third-Party APKs into image
         shell: bash
