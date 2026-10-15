@@ -334,12 +334,24 @@ jobs:
           mkdir -p tmp
           : > tmp/injected-plugins.txt
           APK_ONLY="${APK_ONLY_PKGS:-luci-app-store luci-app-quickstart luci-i18n-quickstart-zh-cn}"
+
+          # ---- docker：设备白名单放行时加入注入清单 ----
+          #  ① 不动 CUSTOM_PACKAGES —— 它还要给 Prepare Third-Party APKs 的 apk 通道用
+          #  ② 不依赖任何配置文件，只看 configs/plugins.cfg 白名单算出的 DOCKER_ENABLED
+          INJECT_PKGS="${CUSTOM_PACKAGES}"
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then
+            INJECT_PKGS="$(printf '%s %s' "${INJECT_PKGS}" "docker docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn" | xargs)"
+            echo ">>> DOCKER_ENABLED=yes → docker 包已加入注入清单: docker docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn"
+          else
+            echo ">>> DOCKER_ENABLED=${DOCKER_ENABLED:-no} → 不加入 docker"
+          fi
+
           MISS=""
-          for p in $(printf '%s\n' "${CUSTOM_PACKAGES}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+          for p in $(printf '%s\n' "${INJECT_PKGS}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
             case " ${APK_ONLY} " in
               *" ${p} "*) echo "  SKIP ${p}（apk 交付，见 Prepare Third-Party APKs）"; continue ;;
             esac
-            # docker 走设备白名单：不在白名单的机器，即使 CUSTOM_PACKAGES 里有也不注入
+            # 双保险：万一有人手动把 docker 写进 CUSTOM_PACKAGES，不在白名单时也拦住
             if [ "${DOCKER_ENABLED:-no}" != "yes" ]; then
               case "${p}" in
                 docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)
