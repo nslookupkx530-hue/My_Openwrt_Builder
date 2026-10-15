@@ -701,6 +701,74 @@ jobs:
           APK_REPO_PREFIX="openwrt" \
           bash shell/fetch-openwrt-third-party.sh
 
+      - name: Fetch Docker APKs
+        if: env.DOCKER_ENABLED == 'yes'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+
+          DEST="${WORKSPACE}/src/files/usr/share/third-party"
+          mkdir -p "${DEST}"
+
+          # 要拉的包（名字必须与 feed 里的包名一致；不存在的会当场报错，正好逼我们确认）
+          WANT="dockerd containerd runc docker docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn"
+
+          CORE_DIR="${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/packages"
+          LUCI_DIR="${MIRROR}/${REL_DIR}/packages/${ARCH_PACKAGES}/luci"
+          echo ">>> CORE_DIR=${CORE_DIR}"
+          echo ">>> LUCI_DIR=${LUCI_DIR}"
+
+          curl -fsSL --retry 3 --max-time 120 "${CORE_DIR}/index.json" -o /tmp/idx-core.json
+          curl -fsSL --retry 3 --max-time 120 "${LUCI_DIR}/index.json" -o /tmp/idx-luci.json
+
+          # 用递归匹配找 filename —— 不依赖 index.json 的确切层级结构
+          find_fn() {
+            jq -r --arg n "$1" '.. | objects | select(.name? == $n) | .filename? // empty' "$2" 2>/dev/null | head -n1
+          }
+
+          MISS=""
+          GOT=""
+          for p in ${WANT}; do
+            fn="$(find_fn "$p" /tmp/idx-core.json)"
+            url="${CORE_DIR}/${fn}"
+            if [ -z "${fn}" ]; then
+              fn="$(find_fn "$p" /tmp/idx-luci.json)"
+              url="${LUCI_DIR}/${fn}"
+            fi
+            if [ -z "${fn}" ]; then
+              echo "MISS ${p}"
+              MISS="${MISS} ${p}"
+              continue
+            fi
+            echo "GET  ${p}  ←  ${url}"
+            curl -fsSL --retry 3 --max-time 300 "${url}" -o "${DEST}/${fn}"
+            sz="$(stat -c '%s' "${DEST}/${fn}")"
+            [ "${sz}" -gt 1024 ] || { echo "ERROR: ${fn} 只有 ${sz} 字节，下载不完整"; exit 1; }
+            GOT="${GOT} ${fn}"
+          done
+
+          {
+            echo "### Docker APKs（运行时安装）"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 设备 | ${TARGET_DEVICE} |"
+            echo "| 架构目录 | ${ARCH_PACKAGES} |"
+            echo "| 拉取清单 | ${WANT} |"
+            echo ""
+            echo '```'
+            ls -lh "${DEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "${MISS}" ]; then
+            echo "ERROR: 以下包在这个源里不存在:${MISS}"
+            echo "       核对包名，或从 plugins.cfg 的 docker 清单里去掉"
+            exit 1
+          fi
+          echo ">>> Docker APK 拉取完成:${GOT}"
+
       - name: Install Third-Party APKs into image
         shell: bash
         run: |
@@ -1176,6 +1244,32 @@ jobs:
             exit "${BUILD_RC}"
           fi
           echo ">>> 编译成功"
+
+      - name: Verify kernel vermagic
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+
+          [ -n "${KMODS_DIR:-}" ] || { echo "ERROR: KMODS_DIR 未导出，无法校验"; exit 1; }
+          OFF_HASH="${KMODS_DIR##*-}"
+          KAPK="$(ls -1 bin/targets/*/*/packages/kernel-*~*-r1.apk 2>/dev/null | head -n1 || true)"
+          [ -n "${KAPK}" ] || { echo "ERROR: 找不到 kernel apk"; exit 1; }
+          echo ">>> 镜像 kmods 目录: ${KMODS_DIR}"
+          echo ">>> 本机 kernel apk : ${KAPK}"
+
+          case "${KAPK}" in
+            *"~${OFF_HASH}-r1.apk")
+              echo ">>> OK 内核 vermagic 与镜像一致 → 官方 kmods 目录可用（首启能在线装 docker 的 kmod 依赖）" ;;
+            *)
+              echo "ERROR: 内核 vermagic 与镜像不一致"
+              echo "       镜像: ${OFF_HASH}"
+              echo "       本机: ${KAPK}"
+              echo "       说明有包把内核配置带偏了 —— 检查 .config 里是否有 docker 或其它 kmod 类包被注入"
+              echo "       后果: 首启 apk update 对官方 kmods 目录报 404，且以后装不了内核模块"
+              exit 1 ;;
+          esac
 
       - name: Diagnose build failure
         # ================================================================
