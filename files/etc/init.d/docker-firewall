@@ -47,7 +47,8 @@ docker_fix_async() {
         if uci -q get firewall.docker >/dev/null 2>&1; then
             add_forwarding lan docker         # 局域网设备 -> 容器（访问容器发布的端口）
             add_forwarding docker lan         # 容器 -> 局域网设备
-            uci commit firewall               # ← 必须提交，否则 fw4 读不到新规则
+            add_forwarding docker wan         # 容器 -> 外网（wan 区域 forward=REJECT，必须显式放行）  ← 新增
+            uci commit firewall
             fix_forward_policy
             if command -v fw4 >/dev/null 2>&1; then
                 fw4 reload >/dev/null 2>&1 && log "fw4 reload 完成" || log "fw4 reload 失败（配置已写入，可手动执行 fw4 reload）"
