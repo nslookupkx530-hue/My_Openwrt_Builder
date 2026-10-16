@@ -134,6 +134,7 @@ jobs:
           C2=000
           if [ -n "${OK_BASE}" ]; then
             KMODS="${KVER}-1-${KVG}"
+            echo "EXPECT_KVG=${KVG}" >> "$GITHUB_ENV"
             C2="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "${OK_BASE}/kmods/${KMODS}/packages.adb" || echo 000)"
             [ "${C2}" = "200" ] || FAIL=1
           else
@@ -419,6 +420,24 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      - name: 校验内核 vermagic（防 docker 带偏）
+        if: success()
+        run: |
+          set -euxo pipefail
+          VG="$(cat /mnt/ci/openwrt/.vermagic 2>/dev/null || true)"
+          [ -n "${VG}" ] || { echo "::error::读不到 /mnt/ci/openwrt/.vermagic"; exit 1; }
+          echo ">>> 本机 .vermagic = ${VG}"
+          echo ">>> 官方 vermagic  = ${EXPECT_KVG:-<未采集>}"
+          [ -n "${EXPECT_KVG:-}" ] || { echo "::warning::未采集到官方 vermagic，跳过断言"; exit 0; }
+          case "${VG}" in
+            *"${EXPECT_KVG}"*) echo ">>> OK 内核 vermagic 与官方一致"; ;;
+            *)
+              echo "::error::内核 vermagic 漂移：本机=${VG} 官方=${EXPECT_KVG}"
+              echo "::error::说明有包把内核配置带偏了（本线最可能是 docker 的 kmod 依赖：veth / br-netfilter / nf-nat）"
+              echo "::error::后果：官方 kmods 目录 ${KVER_PIN}-1-${EXPECT_KVG} 对不上，设备上装不了内核模块"
+              exit 1 ;;
+          esac
+
       - name: 打包 Amlogic 镜像
         uses: ffuqiangg/amlogic-s9xxx-openwrt@6a10e4a4a4d7ade41b87fad44e6b1be0b981743a
         with:
@@ -555,8 +574,8 @@ jobs:
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: N1-ImmortalWrt-${{ env.BUILD_DATE }}-${{ github.run_id }}
-          name: N1 ImmortalWrt ${{ env.IMM_TAG }} build ${{ github.run_number }}
+          tag_name: N1-ImmortalWrt${{ steps.switches.outputs.docker_suffix }}-${{ env.BUILD_DATE }}-${{ github.run_id }}
+          name: N1 ImmortalWrt ${{ env.IMM_TAG }} build ${{ github.run_number }}${{ steps.switches.outputs.docker_name }}
           body_path: release_body.md          # ← 新增：用我们生成的正文
           files: out/*
           fail_on_unmatched_files: false
