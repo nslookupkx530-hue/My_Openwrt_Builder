@@ -7,10 +7,16 @@
 #
 #  为什么是 init.d + START=99，而不是 uci-defaults：
 #    · docker zone（/etc/config/firewall 里的 docker）由 dockerd 包创建，
-#      只可能在 dockerd 起来之后才存在；
+#      只可能在 dockerd 起来之后才存在（实际是在 /etc/init.d/dockerd 的 boot() 段创建的）；
 #    · uci-defaults 跑在首启很早的阶段（那时 docker 还没起来/还没装），
 #      在那里加 forwarding 引用不到 zone，等于白写；
 #    · 所以必须排在 dockerd 之后（S99）。
+#
+#  ⚠ 时序注意（实测踩过）：S99docker-firewall 与 S99dockerd 同为 99，
+#    字母序 '-' < 'd' → 本脚本【先】跑，那一刻 zone 必然还不存在。
+#    且 rcS 是顺序执行的：同步阻塞等待会把 dockerd 自己挡在后面，
+#    导致永远等不到 zone（还会白拖 60s 开机）。
+#    所以 start() 必须立刻返回，由 docker_fix_async 在后台轮询补规则。
 #
 #  铁律（踩过的坑）：
 #    ✗ 不自己写 config zone 'docker'
@@ -34,21 +40,34 @@ log() {
     echo "[$LOG_TAG] $*"
 }
 
-# ---------- 等 docker zone 出现（最多 60 秒） ----------
-wait_docker_zone() {
+# ---------- 后台轮询：等 docker zone 出现后补 forwarding（不阻塞开机、不建不删 zone） ----------
+docker_fix_async() {
     i=0
-    while [ "$i" -lt 12 ]; do
-        [ -n "$(uci -q get firewall.docker.name)" ] && return 0
+    while [ "$i" -lt 60 ]; do                 # 60 × 5s = 5 分钟
+        if uci -q get firewall.docker >/dev/null 2>&1; then
+            add_forwarding lan docker         # 局域网设备 -> 容器（访问容器发布的端口）
+            add_forwarding docker lan         # 容器 -> 局域网设备
+            uci commit firewall               # ← 必须提交，否则 fw4 读不到新规则
+            fix_forward_policy
+            if command -v fw4 >/dev/null 2>&1; then
+                fw4 reload >/dev/null 2>&1 && log "fw4 reload 完成" || log "fw4 reload 失败（配置已写入，可手动执行 fw4 reload）"
+            else
+                /etc/init.d/firewall reload >/dev/null 2>&1 || log "firewall reload 失败（配置已写入）"
+            fi
+            log "docker-firewall 应用完成（docker zone 已就绪）"
+            return 0
+        fi
         sleep 5
-        i=$((i + 1))
+        i=$((i+1))
     done
-    return 1
+    log "5 分钟内仍未出现 docker zone（首启还没跑过 dockerd 的 boot 初始化？），下次开机会再试"
+    return 0
 }
 
 # ---------- forwarding 查询 / 添加 ----------
 has_forwarding() {   # $1=src $2=dest
     local idx s d
-    for idx in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.@forwarding\[\([0-9]\+\)\]=forwarding$/\1/p'); do
+    for idx in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.@forwarding\[\([0-9][0-9]*\)\]=forwarding$/\1/p'); do
         s="$(uci -q get "firewall.@forwarding[$idx].src")"
         d="$(uci -q get "firewall.@forwarding[$idx].dest")"
         if [ "$s" = "$1" ] && [ "$d" = "$2" ]; then
@@ -86,34 +105,9 @@ fix_forward_policy() {
 }
 
 start() {
-    if [ ! -x /etc/init.d/dockerd ] && [ ! -x /etc/init.d/docker ]; then
-        log "未检测到 Docker，跳过"
-        return 0
-    fi
-
-    if ! wait_docker_zone; then
-        log "docker zone 一直没出现（dockerd 可能没起来），本次跳过"
-        return 0
-    fi
-
-    # 只补我们确实需要的（缺什么补什么，已有的不动）
-    add_forwarding lan docker      # 局域网设备 -> 容器（访问容器发布的端口）
-    add_forwarding docker lan      # 容器 -> 局域网设备
-
-    uci commit firewall
-    fix_forward_policy
-
-    if command -v fw4 >/dev/null 2>&1; then
-        if fw4 reload >/dev/null 2>&1; then
-            log "fw4 reload 完成"
-        else
-            log "fw4 reload 失败（配置已写入，可手动执行 fw4 reload）"
-        fi
-    else
-        /etc/init.d/firewall reload >/dev/null 2>&1 || log "firewall reload 失败（配置已写入）"
-    fi
-
-    log "完成"
+    log "docker-firewall start：后台等待 docker zone（不阻塞开机）"
+    docker_fix_async >/dev/null 2>&1 </dev/null &
+    return 0
 }
 
 stop() { :; }
