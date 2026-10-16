@@ -1033,7 +1033,10 @@ jobs:
           cd "${WORKSPACE}/src"
 
           DATE_UTC="$(date -u +%F)"
-          TAG="${TARGET_DEVICE}-${SOURCE_TYPE}-${DATE_UTC}-${{ github.run_id }}"
+          # docker 标识：只有 DOCKER_ENABLED=yes（总开关 + 设备白名单）才加；tag 与 Release 标题同名
+          DOCKER_TAG=""
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then DOCKER_TAG="-docker"; fi
+          TAG="${TARGET_DEVICE}-${SOURCE_TYPE}${DOCKER_TAG}-${DATE_UTC}-${{ github.run_id }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo ">>> tag=${TAG}"
 
