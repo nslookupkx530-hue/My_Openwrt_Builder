@@ -532,13 +532,8 @@ jobs:
               echo ""
               echo "开关：include_docker=yes"
               echo "docker-firewall 脚本：${DOCKER_FW}"
-              echo "首启启用（99-docker-enable）：${DOCKER_EN}"
               echo ""
-              if [ -n "${DOCKER_SYMS}" ]; then
-                printf '%s\n' "${DOCKER_SYMS}" | sed 's/^/- /'
-              else
-                echo "- (未检测到 docker 符号 —— 看注入步骤的 ON/MISS 行)"
-              fi
+              if [ -n "${DOCKER_SYMS}" ]; then printf '%s\n' "${DOCKER_SYMS}" | sed 's/^/- /'; else echo "- (未检测到 docker 符号)"; fi
             fi
 
             echo ""
