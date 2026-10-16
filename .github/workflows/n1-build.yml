@@ -78,6 +78,12 @@ jobs:
             echo "WANT_STORE=${S}"
             echo "BUILD_DATE=${BD}"
           } >> "$GITHUB_ENV"
+          SUF=""; [ "${D}" = "yes" ] && SUF="-docker"
+          NAM=""; [ "${D}" = "yes" ] && NAM=" (docker)"
+          {
+            echo "docker_suffix=${SUF}"
+            echo "docker_name=${NAM}"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "### 功能开关"
             echo ""
@@ -225,14 +231,69 @@ jobs:
       - name: 应用可选插件
         run: |
           set -euxo pipefail
+          CFG=/mnt/ci/openwrt/.config
+          # docker 包集合：与 A 线 Fetch Docker APKs / DSF 注入清单保持同一份名单
+          #   immortalwrt 官方树是拆包制（dockerd=守护进程、docker=CLI）；MISS 零成本，少写会静默缺功能
+          DOCKER_PKGS="docker dockerd containerd runc docker-compose luci-app-dockerman luci-i18n-dockerman-zh-cn"
+
           if [ "${WANT_DOCKER}" = "yes" ]; then
-            d "grep -qxF 'CONFIG_PACKAGE_dockerd=y' /ci/openwrt/.config || echo 'CONFIG_PACKAGE_dockerd=y' >> /ci/openwrt/.config"
-            d "grep -qxF 'CONFIG_PACKAGE_luci-app-dockerman=y' /ci/openwrt/.config || echo 'CONFIG_PACKAGE_luci-app-dockerman=y' >> /ci/openwrt/.config"
-            echo ">>> docker 已注入"
+            for p in ${DOCKER_PKGS}; do
+              grep -qxF "CONFIG_PACKAGE_${p}=y" "${CFG}" || echo "CONFIG_PACKAGE_${p}=y" >> "${CFG}"
+            done
+            echo ">>> docker 已注入（7 包并集）"
           else
             echo ">>> WANT_DOCKER=no，跳过 docker"
           fi
           d "cd /ci/openwrt && make defconfig"
+
+          if [ "${WANT_DOCKER}" = "yes" ]; then
+            for p in ${DOCKER_PKGS}; do
+              if grep -qxF "CONFIG_PACKAGE_${p}=y" "${CFG}"; then
+                echo "  ON   CONFIG_PACKAGE_${p}"
+              else
+                echo "  MISS CONFIG_PACKAGE_${p}（本源树没有这个符号 → 正常）"
+              fi
+            done
+            DOCKER_HIT=""
+            for p in dockerd docker; do
+              if grep -qxF "CONFIG_PACKAGE_${p}=y" "${CFG}"; then DOCKER_HIT="${p}"; break; fi
+            done
+            [ -n "${DOCKER_HIT}" ] || { echo "::error::WANT_DOCKER=yes 但 CONFIG_PACKAGE_dockerd/docker 都没进 .config（看上面的 MISS）"; exit 1; }
+            echo ">>> [docker 校验] docker 已进 .config，符号来源: ${DOCKER_HIT}"
+          fi
+
+      - name: docker 防火墙 + 首启启用（可选）
+        if: env.WANT_DOCKER == 'yes'
+        run: |
+          set -euxo pipefail
+          FILES=/mnt/ci/openwrt/files
+          mkdir -p "${FILES}/etc/init.d" "${FILES}/etc/rc.d" "${FILES}/etc/uci-defaults"
+
+          # 1) docker-firewall（只补 forwarding，不建/不删 zone）
+          SRC_FW=/mnt/ci/ffos/files/etc/init.d/docker-firewall
+          [ -f "${SRC_FW}" ] || { echo "::error::仓库里找不到 ${SRC_FW}"; exit 1; }
+          install -m 0755 "${SRC_FW}" "${FILES}/etc/init.d/docker-firewall"
+          ln -sf ../init.d/docker-firewall "${FILES}/etc/rc.d/S99docker-firewall"
+          ln -sf ../init.d/docker-firewall "${FILES}/etc/rc.d/K10docker-firewall"
+
+          # 2) 首启启用：N1 的 docker 是【编进镜像】的，没有"首启安装脚本"来 enable 它 → 用 uci-defaults
+          cat > "${FILES}/etc/uci-defaults/99-docker-enable" <<'EOS'
+          #!/bin/sh
+          # 构建期生成：首启启用 docker 与 docker-firewall（仅 WANT_DOCKER=yes 的固件里有）
+          SVC=""
+          [ -x /etc/init.d/dockerd ] && SVC="/etc/init.d/dockerd"
+          [ -x /etc/init.d/docker ]  && SVC="/etc/init.d/docker"
+          [ -n "$SVC" ] || exit 0
+          "$SVC" enable >/dev/null 2>&1
+          "$SVC" start  >/dev/null 2>&1
+          [ -x /etc/init.d/docker-firewall ] && /etc/init.d/docker-firewall enable >/dev/null 2>&1
+          exit 0
+          EOS
+          chmod 0755 "${FILES}/etc/uci-defaults/99-docker-enable"
+          [ "$(head -n1 "${FILES}/etc/uci-defaults/99-docker-enable")" = "#!/bin/sh" ] \
+            || { echo "::error::99-docker-enable 首行不是 #!/bin/sh（heredoc 缩进错了）"; exit 1; }
+          sh -n "${FILES}/etc/uci-defaults/99-docker-enable"
+          ls -l "${FILES}/etc/init.d/docker-firewall" "${FILES}/etc/rc.d/S99docker-firewall" "${FILES}/etc/uci-defaults/99-docker-enable"
 
       - name: 包清单自检
         run: |
@@ -422,6 +483,11 @@ jobs:
           TPLIST="$(ls -1 /mnt/ci/openwrt/packages/*.apk 2>/dev/null | xargs -r -n1 basename | sed -E 's/\.apk$//' | sort -u)"
           FILES="$(cd out 2>/dev/null && ls -1 || true)"
 
+          # ---- 新增 1/3：docker 采集（N1 是【编译进 rootfs】、不走 apk 通道 → 只能从 .config 取）----
+          DOCKER_SYMS="$(grep -E '^CONFIG_PACKAGE_(docker|dockerd|containerd|runc|docker-compose|luci-app-dockerman|luci-i18n-dockerman-zh-cn)=y$' "${CFG}" 2>/dev/null | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' | sort -u || true)"
+          DOCKER_FW="no"; [ -f /mnt/ci/openwrt/files/etc/init.d/docker-firewall ] && DOCKER_FW="yes"
+          DOCKER_EN="no"; [ -f /mnt/ci/openwrt/files/etc/uci-defaults/99-docker-enable ] && DOCKER_EN="yes"
+
           {
             echo "ImmortalWrt automated build release (N1 官方源)"
             echo ""
@@ -458,6 +524,23 @@ jobs:
             echo "Third-Party package list"
             echo ""
             if [ -n "${TPLIST}" ]; then printf '%s\n' "${TPLIST}" | sed 's/^/- /'; else echo "- (未集成)"; fi
+
+            # ---- 新增 2/3：docker 段落（只有 WANT_DOCKER=yes 才输出）----
+            if [ "${WANT_DOCKER:-no}" = "yes" ]; then
+              echo ""
+              echo "Docker（编译进 rootfs）"
+              echo ""
+              echo "开关：include_docker=yes"
+              echo "docker-firewall 脚本：${DOCKER_FW}"
+              echo "首启启用（99-docker-enable）：${DOCKER_EN}"
+              echo ""
+              if [ -n "${DOCKER_SYMS}" ]; then
+                printf '%s\n' "${DOCKER_SYMS}" | sed 's/^/- /'
+              else
+                echo "- (未检测到 docker 符号 —— 看注入步骤的 ON/MISS 行)"
+              fi
+            fi
+
             echo ""
             echo "刷机提示："
             echo ""
@@ -466,6 +549,12 @@ jobs:
             echo "3. 核验内核：uname -r 应为 ${KVER_PIN}"
           } > release_body.md
           echo ">>> release_body.md 已生成（$(wc -l < release_body.md) 行）"
+
+          # ---- 新增 3/3：CI 侧警示（放行了 docker 却什么都没落地）----
+          if [ "${WANT_DOCKER:-no}" = "yes" ] && [ -z "${DOCKER_SYMS}" ]; then
+            echo "::warning::WANT_DOCKER=yes 但 .config 里没有任何 docker 符号（release notes 已标注）"
+          fi
+
           head -n 20 release_body.md
 
       - name: 发布 Release
