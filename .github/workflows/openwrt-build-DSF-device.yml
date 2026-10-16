@@ -635,7 +635,9 @@ jobs:
           set -euxo pipefail
           cd "${WORKSPACE}/src"
           DATE_UTC="$(date -u +%F)"
-          TAG="${TARGET_DEVICE}-DSF-${DATE_UTC}-${{ github.run_id }}"
+          DOCKER_TAG=""
+          if [ "${DOCKER_ENABLED:-no}" = "yes" ]; then DOCKER_TAG="-docker"; fi
+          TAG="${TARGET_DEVICE}-DSF${DOCKER_TAG}-${DATE_UTC}-${{ github.run_id }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo ">>> tag=${TAG}"
 
