@@ -26,9 +26,11 @@
 #        —— 删掉的是包的 zone；
 #    ✓ 只做「缺了就补」，幂等，每次开机跑一遍也无副作用。
 #
-#  容器 -> WAN 由 dockerd 包的 blocked_interfaces 控制，本脚本【不碰】：
-#      uci del_list dockerd.firewall.blocked_interfaces='wan'
-#      uci commit dockerd && /etc/init.d/dockerd restart
+#  容器 -> WAN：由本脚本补 forwarding docker->wan
+#      （wan 区域的 forward 策略是 REJECT，fw4 跨区域放行只能靠 config forwarding）
+#  WAN -> 容器：由 dockerd 包的 blocked_interfaces 控制，本脚本【不碰】；
+#      如需放开：uci del_list dockerd.firewall.blocked_interfaces='wan'
+#                uci commit dockerd && /etc/init.d/dockerd restart
 # ============================================================
 START=99
 STOP=10
@@ -47,7 +49,7 @@ docker_fix_async() {
         if uci -q get firewall.docker >/dev/null 2>&1; then
             add_forwarding lan docker         # 局域网设备 -> 容器（访问容器发布的端口）
             add_forwarding docker lan         # 容器 -> 局域网设备
-            add_forwarding docker wan         # 容器 -> 外网（wan 区域 forward=REJECT，必须显式放行）  ← 新增
+            add_forwarding docker wan         # 容器 -> 外网（wan 区域 forward=REJECT，必须显式放行）
             uci commit firewall
             fix_forward_policy
             if command -v fw4 >/dev/null 2>&1; then
