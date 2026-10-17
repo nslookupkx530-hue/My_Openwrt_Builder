@@ -183,21 +183,36 @@ else
     p "??   没有 98-drop-kmods-repo（N1 官方 kmods 不依赖它，仅提示）"
 fi
 
-# ---- docker 门控：与主 workflow 的 99-docker-firewall 逻辑一致 ----
+# ---- docker 门控：WANT_DOCKER=yes 保留 init.d 脚本；=no 从固件里删干净 ----
+#   仓库侧只提供：files/etc/init.d/docker-firewall
+#                 （可选）files/etc/rc.d/{S99,K10}docker-firewall
+#   files/etc/uci-defaults/99-docker-enable 由 workflow 在构建期生成（仓库不放，避免两份真源）
 WANT_DOCKER="${WANT_DOCKER:-no}"
-UCI_DOCKER="./files/etc/uci-defaults/99-docker-firewall"
+
+DF_NEED="./files/etc/init.d/docker-firewall"
+DF_OPT="./files/etc/rc.d/S99docker-firewall ./files/etc/rc.d/K10docker-firewall"
+
 if [ "${WANT_DOCKER}" = "yes" ]; then
-    if [ -f "${UCI_DOCKER}" ]; then
-        p "OK   WANT_DOCKER=yes → 保留 99-docker-firewall"
+    if [ -f "${DF_NEED}" ]; then
+        p "OK   WANT_DOCKER=yes → 保留 ${DF_NEED#./}"
     else
-        p "!! 仓库里找不到 files/etc/uci-defaults/99-docker-firewall"
-        FAILED="${FAILED} 99-docker-firewall"
+        p "!! 仓库里找不到 ${DF_NEED#./}"
+        FAILED="${FAILED} ${DF_NEED#./}"
     fi
+    for f in ${DF_OPT}; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            p "OK   构建期软链在位 ${f#./}"
+        else
+            p "..   无 ${f#./}（正常：首启 99-docker-enable 会 docker-firewall enable 补出来）"
+        fi
+    done
 else
-    if [ -f "${UCI_DOCKER}" ]; then
-        rm -f "${UCI_DOCKER}"
-        p "OK   未启用 docker → 已从固件中移除 99-docker-firewall"
-    fi
+    for f in ${DF_NEED} ${DF_OPT}; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            rm -f "$f"
+            p "OK   未启用 docker → 已从固件中移除 ${f#./}"
+        fi
+    done
 fi
 
 # ============ 清理 ============
