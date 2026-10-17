@@ -59,6 +59,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 解析功能开关
+        id: switches
         env:
           IN_DOCKER: ${{ inputs.include_docker }}
           IN_STORE: ${{ inputs.enable_store }}
