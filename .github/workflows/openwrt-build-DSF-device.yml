@@ -629,6 +629,46 @@ jobs:
           fi
           echo ">>> 配置校验通过"
 
+      - name: 种子包清单自检（换源后必看）
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "${WORKSPACE}/src"
+          SEED="${WORKSPACE}/${SEED_CONFIG}"
+          [ -f "${SEED}" ] || { echo "::error::种子不存在: ${SEED}"; exit 1; }
+
+          export LC_ALL=C
+          grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+.-]+=y$' "${SEED}" | sort -u > /tmp/want.txt
+          grep -E '^CONFIG_PACKAGE_[A-Za-z0-9_+.-]+=y$' .config | sort -u > /tmp/have.txt
+          comm -23 /tmp/want.txt /tmp/have.txt > /tmp/miss.txt || true
+
+          # 关键包：缺一个固件就残废 → 直接红
+          CRIT=""
+          for c in CONFIG_PACKAGE_luci CONFIG_PACKAGE_luci-base CONFIG_PACKAGE_dnsmasq-full CONFIG_PACKAGE_firewall4 CONFIG_PACKAGE_uhttpd CONFIG_PACKAGE_nginx; do
+            if grep -qxF "${c}=y" /tmp/miss.txt; then CRIT="${CRIT} ${c}"; fi
+          done
+
+          {
+            echo "### 种子包清单自检"
+            echo '```'
+            echo "want=$(wc -l < /tmp/want.txt)  have=$(wc -l < /tmp/have.txt)  miss=$(wc -l < /tmp/miss.txt)"
+            sed 's/^/MISS /' /tmp/miss.txt
+            if [ -n "${CRIT}" ]; then echo "CRITICAL:${CRIT}"; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "${CRIT}" ]; then
+            echo "::error::关键包被 defconfig 丢掉:${CRIT}（固件会残废）"
+            exit 1
+          fi
+          if [ -s /tmp/miss.txt ]; then
+            if [ "${SEED_STRICT:-0}" = "1" ]; then
+              echo "::error::种子里有 $(wc -l < /tmp/miss.txt) 个包被丢弃（SEED_STRICT=1）"
+              exit 1
+            fi
+            echo "::warning::种子里有 $(wc -l < /tmp/miss.txt) 个包被 defconfig 丢掉（新树可能没有），见 Summary"
+          fi
+
       - name: Generate release notes
         id: notes
         shell: bash
