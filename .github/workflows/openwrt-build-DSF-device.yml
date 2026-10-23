@@ -258,6 +258,25 @@ jobs:
           done
           echo ">>> feeds 阶段完成"
 
+      - name: 清理无用 feed / 有 Kconfig 环的包（video、squeezelite）
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${WORKSPACE}/src"
+
+          # 1) video feed：不用（mjpg-streamer / qt5），且 qt5base 的 Config.in 有递归依赖
+          sed -i '/^[[:space:]]*src-git[[:space:]]\+video[[:space:]]/d' feeds.conf.default
+          rm -rf feeds/video package/feeds/video
+
+          # 2) squeezelite：packages feed 的 Kconfig 环（上游 Makefile 的 +SQUEEZELITE_*: 条件依赖）
+          rm -rf feeds/packages/sound/squeezelite package/feeds/packages/squeezelite
+          find feeds package/feeds -maxdepth 5 -type d -name 'squeezelite*' -exec rm -rf {} + 2>/dev/null || true
+          rm -f package/feeds/packages/squeezelite
+
+          echo ">>> 清理结果（下面应无输出 / 只显示 video: 已清）:"
+          find feeds package/feeds -maxdepth 5 -name 'squeezelite*' 2>/dev/null || true
+          ls -d feeds/video package/feeds/video 2>/dev/null || echo "    video: 已清"
+
       - name: Seed & trim configuration (DSF)
         # 组装 .config：种子 → defconfig → 收窄单设备 → zh-cn 兜底 → 断言
         shell: bash
