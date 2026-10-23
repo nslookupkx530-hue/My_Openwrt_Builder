@@ -2,19 +2,19 @@
 # =============================================================================
 # DSF 线第三方预编译 apk 拉取（第三方源码树，不是 openwrt 官方源）
 #
-#   用途：官方 feed 里没有、但 A 线一直有的那些 app（diskman / aurora /
-#         autoreboot / ramfree / filebrowser-go / tcping …），
+#   用途：官方 feed 里没有、但 A 线一直有的那些 app（argon 主题 / diskman /
+#         autoreboot / ramfree / filebrowser-go …），
 #         以【预编译 apk】形式补齐：不进 .config、不参与编译。
 #
 #   来源仓库 : nslookupkx530-hue/apk        分支 My（回退 master）
 #   仓库布局 : openwrt/<arch目录>/luci-third-party-openwrt/*.apk
 #                x86_64/      ← ARCH_PACKAGES=x86_64
-#                arm64-a53/   ← aarch64_cortex-a53（MT5000 / AX6600 都是这个）
+#                arm64-a53/   ← aarch64_cortex-a53（MT5000 用的就是这个）
 #                arm64/       ← 其它 aarch64 兜底
-#   清单文件 : configs/third-party-openwrt.config       （与 A 线【共享】；格式：包名[=子目录]）
+#   清单文件 : configs/third-party-openwrt.config   （与 A 线【共享】；格式：包名[=子目录]）
 #   生效设备 : TP_APK_DEVICES（默认 GL-MT5000）
-#              JDC-AX6600 用老源 libwrt，这些包树里自带 → 绝不能走二进制旁路
-#              （否则 .config 里也有、apk 里也有，脚本的防呆会直接报错）
+#              JDC-AX6600 用老源 libwrt，这些包树里自带 → 不能走二进制旁路
+#              （否则 .config 里也有、apk 里也有，下面的"防呆"会直接报错）
 #   输出位置 : ${SRC_DIR}/files/usr/share/third-party
 #              → 固件内 /usr/share/third-party → 首启由
 #                /etc/third-party/install_third_party_apk.sh 安装
@@ -22,8 +22,6 @@
 #
 #   ⚠ 这批包不写进 .config，Finalize 的 MISS 检查覆盖不到 →
 #     本脚本的 exit 1 就是唯一守卫，任何缺失/校验失败都必须硬失败。
-#   ⚠ "防呆"会检查同名包是否也在 .config 里 =y —— 那样会双份覆盖。
-#     从种子里删掉的包，请只在这里交付。
 # =============================================================================
 set -euo pipefail
 
@@ -33,6 +31,7 @@ APK_REPO="${APK_REPO:-nslookupkx530-hue/apk}"
 BRANCHES="${BRANCHES:-My master}"
 DEFAULT_SUBDIR="luci-third-party-openwrt"
 APK_REPO_PREFIX="${APK_REPO_PREFIX:-openwrt}"
+TP_APK_DEVICES="${TP_APK_DEVICES:-GL-MT5000}"
 
 OUT_DIR="${OUT_DIR:-${SRC_DIR}/files/usr/share/third-party}"
 MANIFEST="${MANIFEST:-${SRC_DIR}/tmp/openwrt-third-party.txt}"
@@ -62,6 +61,10 @@ generic_arch_dir() {
 
 # ---------- 0. 前置检查 ----------
 [ "${SKIP_TP_APK:-0}" = "1" ] && { log "SKIP_TP_APK=1，跳过"; exit 0; }
+case " ${TP_APK_DEVICES} " in
+    *" ${TARGET_DEVICE:-} "*) : ;;
+    *) log "设备 ${TARGET_DEVICE:-?} 不在 TP_APK_DEVICES（${TP_APK_DEVICES}）→ 跳过"; exit 0 ;;
+esac
 [ -f "$PKG_LIST" ] || die "清单文件不存在: $PKG_LIST"
 [ -d "$SRC_DIR" ]  || die "源码目录不存在: $SRC_DIR"
 [ -f "${SRC_DIR}/.config" ] || die "${SRC_DIR}/.config 不存在（种子还没展开？本步要放在 defconfig 之后）"
@@ -144,7 +147,7 @@ if [ ! -d "$WORK/apk/${ARCH_BASE}" ]; then
     die "apk 仓库里没有 ${ARCH_BASE}（ARCH_PACKAGES=${ARCH_PACKAGES}）"
 fi
 
-# ---------- 4. 读清单 ----------
+# ---------- 4. 读清单（容忍 CRLF / 行尾空格 / 空行 / # 注释） ----------
 mapfile -t PKGS < <(grep -vE '^[[:space:]]*(#|$)' "$PKG_LIST" \
                     | tr -d '\r' | sed -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//')
 [ "${#PKGS[@]}" -gt 0 ] || die "清单里没有任何包: $PKG_LIST"
@@ -195,7 +198,7 @@ for line in "${PKGS[@]}"; do
     log "已放入: ${pkg}  <-  $(basename "$f")"
 done
 
-# ---------- 7. 写元信息 ----------
+# ---------- 7. 写元信息（Release 正文 / BUILDINFO 用） ----------
 printf 'apk_repo=%s\napk_branch=%s\napk_commit=%s\napk_arch=%s\napk_arch_dir=%s\narch_packages=%s\npkg_count=%s\ndevice=%s\n' \
     "$APK_REPO" "$USED_BRANCH" "$USED_COMMIT" "${TARGET_ARCH:-$ARCH_PACKAGES}" "$ARCH_BASE" "$ARCH_PACKAGES" "${#PKGS[@]}" "${TARGET_DEVICE:-}" > "$META"
 
