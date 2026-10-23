@@ -45,7 +45,7 @@ drop_line() {
 # 做法：确定性删除，不做网络探测（首启可能还没网，探测会把正常源也删掉）。
 # 以后每新增一个私有 feed，把名字补进下面这个用 | 分隔的列表即可。
 # 静态：私有 feed（不在任何官方下载站上，必然死链）
-PRIVATE_FEEDS="m0eakpatch|fanchmwrt"
+PRIVATE_FEEDS="fanchmwrt"
 
 # 基线特例：<宿主关键字>:<feed 名>
 #   实测 immortalwrt 25.12-SNAPSHOT 没有 video feed（downloads.immortalwrt.org 上 404），
