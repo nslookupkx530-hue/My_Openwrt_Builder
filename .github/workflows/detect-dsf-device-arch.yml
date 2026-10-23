@@ -18,7 +18,6 @@ jobs:
   # ======================================================================
   # 从 configs/DSF/device_mapping.conf 生成矩阵
   #   格式: 设备名=源URL|分支或tag|种子配置|target路径[|profile]
-  #   第 5 段（profile）可省：自动从种子里的 CONFIG_TARGET_<b>_<s>_DEVICE_<x>=y 推导
   # ======================================================================
   discover:
     runs-on: ubuntu-22.04
@@ -62,6 +61,7 @@ jobs:
             [ -n "${repo}" ] && [ -n "${branch}" ] && [ -n "${seed}" ] && [ -n "${profile}" ] \
               || { echo "ERROR: ${name} 字段不全 repo='${repo}' branch='${branch}' seed='${seed}' profile='${profile}'"; exit 1; }
 
+            echo ">>> ${name}: repo=${repo} ref=${branch} seed=${seed} target=${target} profile=${profile}"
             ITEMS="${ITEMS}${ITEMS:+,}{\"device\":\"${name}\",\"repo\":\"${repo}\",\"branch\":\"${branch}\",\"seed\":\"${seed}\",\"target\":\"${target}\",\"profile\":\"${profile}\"}"
           done < "${MAP}"
 
@@ -71,8 +71,6 @@ jobs:
 
   # ======================================================================
   # ref 扫描：所有 head/tag 的日期 + feeds.conf 内容 + 与基准 ref 的差异
-  #   · 分支在本地的名字是 origin/<名>（tag 才是裸名）→ resolve_ref 统一解析
-  #   · 同时比较 feed 名 与 feed URL（URL 被换成别的仓库也算差异）
   # ======================================================================
   scanrefs:
     needs: discover
@@ -94,10 +92,9 @@ jobs:
           BASE_BRANCH='${{ matrix.branch }}'
 
           rm -rf repo
-          # 只取 commit/tree、不取 blob（快；个别文件按需拉取）
           git clone --filter=blob:none --no-checkout "${REPO}" repo >/dev/null 2>&1
 
-          resolve_ref() {   # 裸名 → 真实可用的 ref
+          resolve_ref() {
             for c in "origin/$1" "$1" "refs/tags/$1"; do
               if git -C repo rev-parse --verify --quiet "${c}^{commit}" >/dev/null 2>&1; then
                 printf '%s' "$c"; return 0
@@ -105,14 +102,13 @@ jobs:
             done
             return 1
           }
-          feeds_file_of() { # 用 tree 判断（本地已有 tree，不联网）
+          feeds_file_of() {
             if [ -n "$(git -C repo ls-tree "$1" -- feeds.conf 2>/dev/null)" ]; then
               echo feeds.conf
             else
               echo feeds.conf.default
             fi
           }
-          # 归一化：只保留 "feed名 url（去掉 ^pin）"
           norm_feeds() {
             awk '/^[[:space:]]*src-/{u=$3; sub(/\^.*$/,"",u); print $2, u}'
           }
@@ -137,21 +133,20 @@ jobs:
             echo "|---|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          REFS="$( { git -C repo branch -r --format='%(refname:short)' | grep -v 'HEAD'; git -C repo tag; } | sort -u | head -40 )"
+          # 基准 ref 必须进列表（之前 head -40 可能把它挤掉）
+          OTHERS="$( { git -C repo branch -r --format='%(refname:short)' | grep -v 'HEAD'; git -C repo tag; } | sort -u | head -40 )"
+          REFS="$(printf '%s\n%s\n' "${BASE_REF}" "${OTHERS}" | awk 'NF && !seen[$0]++')"
+
           for r in ${REFS}; do
             D="$(git -C repo log -1 --format=%ci "${r}" 2>/dev/null || echo '?')"
             F="$(feeds_file_of "${r}")"
             git -C repo show "${r}:${F}" 2>/dev/null > /tmp/ref-feeds.raw || true
             norm_feeds < /tmp/ref-feeds.raw > /tmp/ref-feeds.norm || true
-            N="$(printf '%s\n' "$(cat /tmp/ref-feeds.norm)" | grep -c . || true)"
+            N="$(grep -c . /tmp/ref-feeds.norm || true)"
 
-            NEW="$(comm -23 <(cut -d' ' -f1 /tmp/ref-feeds.norm | sort -u) \
-                            <(cut -d' ' -f1 /tmp/base-feeds.norm | sort -u) 2>/dev/null | paste -sd, - || true)"
-            CHG="$(awk 'NR==FNR{a[$1]=$2; next} { if ($1 in a && a[$1]!=$2) printf "%s(%s→%s) ", $1, a[$1], $2 }' \
-                       /tmp/base-feeds.norm /tmp/ref-feeds.norm 2>/dev/null || true)"
-            CAND="$(git -C repo ls-tree -r --name-only "${r}" 2>/dev/null \
-                    | grep -E '^\.github/workflows/.*\.ya?ml$|^feeds\.conf$|(^|/)(build|diy|feeds|compile)[A-Za-z0-9_.-]*\.sh$' \
-                    | head -8 | paste -sd' ' - || true)"
+            NEW="$(comm -23 <(cut -d' ' -f1 /tmp/ref-feeds.norm | sort -u) <(cut -d' ' -f1 /tmp/base-feeds.norm | sort -u) 2>/dev/null | paste -sd, - || true)"
+            CHG="$(awk 'NR==FNR{a[$1]=$2; next} { if ($1 in a && a[$1]!=$2) printf "%s(%s→%s) ", $1, a[$1], $2 }' /tmp/base-feeds.norm /tmp/ref-feeds.norm 2>/dev/null || true)"
+            CAND="$(git -C repo ls-tree -r --name-only "${r}" 2>/dev/null | grep -E '^\.github/workflows/.*\.ya?ml$|^feeds\.conf$|(^|/)(build|diy|feeds|compile)[A-Za-z0-9_.-]*\.sh$' | head -8 | paste -sd' ' - || true)"
 
             echo "=============================================================="
             echo "### ${r}   (${D})   ${F}  feed=${N}   NEW=${NEW:-无}   CHANGED=${CHG:-无}"
@@ -162,7 +157,7 @@ jobs:
           rm -f /tmp/*-feeds.norm /tmp/*-feeds.raw
 
   # ======================================================================
-  # 事实收集：feeds 体检 + 种子差异 + 缺包溯源（本地优先，API 兜底）
+  # 事实收集：包体系 / 内核 / feed 体检 / 种子差异 / 缺包溯源
   # ======================================================================
   detect:
     needs: discover
@@ -202,11 +197,10 @@ jobs:
           case "${PROFILE}" in
             ""|*/*|*.config) echo "::error::profile 字段不合法: '${PROFILE}'"; exit 1 ;;
           esac
-          echo ">>> device=${DEVICE} repo=${REPO} branch=${BRANCH} seed=${SEED} profile=${PROFILE}"
+          echo ">>> device=${DEVICE} repo=${REPO} ref=${BRANCH} seed=${SEED} profile=${PROFILE}"
 
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential gcc make git perl python3 unzip file wget curl \
-            libncurses-dev zlib1g-dev libssl-dev 2>/dev/null || true
+          sudo apt-get install -y -qq build-essential gcc make perl python3 unzip file wget curl libncurses-dev zlib1g-dev libssl-dev 2>/dev/null || true
 
           rm -rf src
           if ! git clone --depth=1 -b "${BRANCH}" "${REPO}" src >/dev/null 2>&1; then
@@ -214,22 +208,28 @@ jobs:
             echo "::error::克隆失败: ${REPO} @ ${BRANCH}"; exit 1
           fi
           cd src
-          COMMIT="$(git rev-parse HEAD)"; CDATE="$(git log -1 --format=%cd --date=iso)"
+          COMMIT="$(git rev-parse HEAD)"
+          CDATE="$(git log -1 --format=%cd --date=iso)"
           echo ">>> commit=${COMMIT} date=${CDATE}"
-          if [ -f feeds.conf ]; then echo "[feeds.conf 存在]"; cat feeds.conf; else echo "[只有 feeds.conf.default]"; fi
-          echo "--- 包体系 ---"; ls -d package/system/apk package/system/opkg 2>/dev/null || echo "(都无)"
-          echo "--- 版本线索 ---"; grep -m3 -E 'RELEASE|VERSION_NUMBER|VERSION_CODE' include/version.mk 2>/dev/null || true
-          echo "--- 内核 ---"; grep -rhE '^KERNEL_PATCHVER|^LINUX_VERSION' target/linux/*/Makefile target/linux/*/*/target.mk 2>/dev/null | head -5
+
+          echo "--- feeds 文件 ---"
+          if [ -f feeds.conf ]; then cat feeds.conf; else echo "[只有 feeds.conf.default]"; fi
+          echo "--- 包体系 ---"
+          ls -d package/system/apk package/system/opkg 2>/dev/null || echo "(都无)"
+          echo "--- USE_APK 默认 ---"
+          grep -A4 'config USE_APK' config/Config-build.in 2>/dev/null || echo "(无 config/Config-build.in)"
+          echo "--- 版本线索 ---"
+          grep -m3 -E 'RELEASE|VERSION_NUMBER|VERSION_CODE' include/version.mk 2>/dev/null || true
+          echo "--- 内核 ---"
+          grep -rhE '^KERNEL_PATCHVER|^LINUX_VERSION' target/linux/*/Makefile target/linux/*/*/target.mk 2>/dev/null | head -5
 
           # ---------------- feeds ----------------
-          ./scripts/feeds update -a  > /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds update 失败"; exit 1; }
+          ./scripts/feeds update -a > /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds update 失败"; exit 1; }
           ./scripts/feeds install -a >> /tmp/feeds.log 2>&1 || { tail -40 /tmp/feeds.log; echo "!! feeds install 失败"; exit 1; }
           echo ">>> feed 目录: $(ls -d feeds/*/ 2>/dev/null | wc -l) 个"
 
           awk '/^[[:space:]]*src-git[[:space:]]+/{print $2, $3}' feeds.conf.default 2>/dev/null | tr -d '\r' > /tmp/feeds.list
 
-          # ---------------- feeds 体检：实际 HEAD 是否 == pin ----------------
-          echo "--- feeds 体检（实际 HEAD vs feeds.conf 里的 pin）---"
           {
             echo "### feeds 体检"
             echo ""
@@ -267,6 +267,7 @@ jobs:
           SUB="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           ARCH="$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
           PROF="$(sed -n 's/^CONFIG_TARGET_PROFILE="\?\([^"]*\)"\?$/\1/p' .config | head -n1)"
+          USE_APK="$(sed -n 's/^CONFIG_USE_APK=y$/y/p' .config | head -n1)"
           SYM="CONFIG_TARGET_${BOARD}_${SUB}_DEVICE_${PROFILE}"
           DEV_ALL="$(grep -cE '^CONFIG_(TARGET_DEVICE_|TARGET_).*_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)"
           SYM_OK="$(grep -c "^${SYM}=y" .config || true)"
@@ -275,44 +276,60 @@ jobs:
           SEL="$(grep -cE '^CONFIG_PACKAGE_.*=y$' .config || true)"
 
           awk '/^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' "${SEED_FILE}" | sort -u > /tmp/seed.txt
-          grep -oE '^[[:space:]]*config[[:space:]]+PACKAGE_[A-Za-z0-9_.+-]+' tmp/.config-package.in \
-            | sed -E 's/^[[:space:]]*config[[:space:]]+PACKAGE_//' | sort -u > /tmp/tree.txt
+          grep -oE '^[[:space:]]*config[[:space:]]+PACKAGE_[A-Za-z0-9_.+-]+' tmp/.config-package.in | sed -E 's/^[[:space:]]*config[[:space:]]+PACKAGE_//' | sort -u > /tmp/tree.txt
           awk '/^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$/{sub(/^CONFIG_PACKAGE_/,"");sub(/=y$/,"");print}' .config | sort -u > /tmp/now.txt
 
           echo ">>> 种子声明 $(wc -l < /tmp/seed.txt) / 本树可见 $(wc -l < /tmp/tree.txt) / defconfig 后启用 $(wc -l < /tmp/now.txt)"
-          comm -23 /tmp/seed.txt /tmp/now.txt    > /tmp/lost.txt
-          comm -23 /tmp/lost.txt  /tmp/tree.txt  > /tmp/notfound.txt
-          comm -12 /tmp/lost.txt  /tmp/tree.txt  > /tmp/dropped.txt
+          comm -23 /tmp/seed.txt /tmp/now.txt > /tmp/lost.txt
+          comm -23 /tmp/lost.txt /tmp/tree.txt > /tmp/notfound.txt
+          comm -12 /tmp/lost.txt /tmp/tree.txt > /tmp/dropped.txt
 
-          # ---------------- 本地实测：关键包落在哪个 feed ----------------
-          echo "--- 本地实测：这些包在 feeds/ 里到底有没有 ---"
-          find feeds -maxdepth 4 -type d 2>/dev/null | sort > /tmp/feeds-dirs.txt || true
+          # ---------------- 本地实测：丢掉的包在 feeds/ 里到底有没有 ----------------
+          #   不再写死旧仓库的包名，直接从 lost.txt 派生（最多 40 个）
+          find feeds -maxdepth 5 -type d 2>/dev/null | sort > /tmp/feeds-dirs.txt || true
+          awk 'NR<=40' /tmp/lost.txt > /tmp/lost-cap.txt
           : > /tmp/where-local.txt
-          for p in luci-app-passwall2 luci-app-mosdns luci-app-turboacc luci-app-diskman luci-app-autoreboot \
-                   luci-app-cpufreq luci-app-ramfree luci-app-vlmcsd luci-app-wechatpush luci-app-ddns-go \
-                   luci-theme-aurora luci-theme-shadcn luci-app-athena-led luci-app-aurora-config \
-                   easytier mosdns v2dat chinadns-ng tcping geoview v2ray-plugin amneziawg-tools \
-                   default-settings-m0eak; do
+          while IFS= read -r p; do
+            [ -n "${p}" ] || continue
             hit="$(awk -v n="${p}" -F/ '$NF==n' /tmp/feeds-dirs.txt | head -3 | paste -sd' ' - || true)"
-            printf '  %-28s %s\n' "${p}" "${hit:-<feeds 里没有>}"
+            printf '  %-40s %s\n' "${p}" "${hit:-<feeds 里没有>}"
             printf '| `%s` | %s |\n' "${p}" "${hit:-**没有**}" >> /tmp/where-local.txt
-          done
+          done < /tmp/lost-cap.txt
 
-          echo "--- default-settings-m0eak 的提供者（内容搜索）---"
-          grep -rn --include=Makefile -F 'default-settings-m0eak' feeds/ package/ 2>/dev/null | head -5 || echo "  <树里没有>"
-          echo "--- fanchmwrt feed 里都有什么（前 40 个包目录）---"
-          [ -d feeds/fanchmwrt ] && find feeds/fanchmwrt -maxdepth 3 -name Makefile 2>/dev/null | sed 's#/Makefile##' | head -40 || echo "  (无 fanchmwrt feed)"
+          # ---------------- 官方快照 feed 探活（决定 distfeeds 会不会有死链）----------------
+          DL="https://downloads.openwrt.org/snapshots"
+          {
+            echo "### 官方快照 feed 探活"
+            echo ""
+            echo "ARCH_PACKAGES=\`${ARCH}\` → 探测 \`${DL}/packages/${ARCH}/<feed>/\`"
+            echo ""
+            echo "| feed | packages.adb | index.json |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${ARCH}" ]; then
+            while read -r nm u; do
+              [ -n "${nm:-}" ] || continue
+              c1="$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "${DL}/packages/${ARCH}/${nm}/packages.adb" || echo 000)"
+              c2="$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 "${DL}/packages/${ARCH}/${nm}/index.json" || echo 000)"
+              echo "  ${nm}: packages.adb=${c1} index.json=${c2}"
+              printf '| %s | %s | %s |\n' "${nm}" "${c1}" "${c2}" >> "$GITHUB_STEP_SUMMARY"
+            done < /tmp/feeds.list
+          else
+            echo "  !! ARCH_PACKAGES 为空，跳过"
+          fi
+          PJ="$(curl -s --max-time 25 "${DL}/targets/${BOARD}/${SUB}/profiles.json" || true)"
+          KVER_DL="$(printf '%s' "${PJ}" | jq -r '.linux_kernel.version // "?"' 2>/dev/null || echo '?')"
+          KVG_DL="$(printf '%s' "${PJ}" | jq -r '.linux_kernel.vermagic // "?"' 2>/dev/null || echo '?')"
+          echo ">>> 官方快照 targets/${BOARD}/${SUB} 内核=${KVER_DL} vermagic=${KVG_DL}（仅供参考，构建以本树为准）"
 
           # ---------------- API 溯源：缺包在哪个 feed 的上游 ----------------
-          echo "--- API 溯源（本地没有的，去 pin 处查上游）---"
-          fetch_tree() {   # $1=slug $2=ref
-            curl -sSL --max-time 60 \
-                 -H "Authorization: Bearer ${GH_TOKEN}" \
-                 -H 'Accept: application/vnd.github+json' \
-                 "https://api.github.com/repos/$1/git/trees/$2?recursive=1" 2>/dev/null \
+          fetch_tree() {
+            curl -sSL --max-time 60 -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/$1/git/trees/$2?recursive=1" 2>/dev/null \
               | grep -oE '"path"[[:space:]]*:[[:space:]]*"[^"]+"' \
               | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/' || true
           }
+          rm -f /tmp/tree-*.txt
           while read -r nm u; do
             [ -n "${nm:-}" ] || continue
             url="${u%%^*}"; ref="${u##*^}"; [ "${ref}" = "${u}" ] && ref="HEAD"
@@ -332,7 +349,8 @@ jobs:
           done < /tmp/feeds.list
 
           : > /tmp/where.txt
-          while read -r p; do
+          awk 'NR<=40' /tmp/notfound.txt > /tmp/notfound-cap.txt
+          while IFS= read -r p; do
             [ -n "${p}" ] || continue
             hit=""
             for f in /tmp/tree-*.txt; do
@@ -341,51 +359,43 @@ jobs:
                 hit="${hit} $(basename "${f}" .txt | sed 's/^tree-//')"
               fi
             done
-            if [ -z "${hit}" ]; then
-              alt="${p%%-*}"
-              case "${alt}" in luci|kmod|lib|app|base|default) alt="" ;; esac   # 太通用的前缀不做模糊
-              if [ -n "${alt}" ]; then
-                for f in /tmp/tree-*.txt; do
-                  [ -f "${f}" ] || continue
-                  if grep -qF "/${alt}/" "${f}"; then hit="${hit} (疑似)${alt}@$(basename "${f}" .txt | sed 's/^tree-//')"; fi
-                done
-              fi
-            fi
             printf '  %-44s %s\n' "${p}" "${hit:-<上游也没有>}"
             printf '| `%s` | %s |\n' "${p}" "${hit:-**上游也没有**}" >> /tmp/where.txt
-          done < /tmp/notfound.txt
+          done < /tmp/notfound-cap.txt
 
           # ---------------- Job Summary ----------------
           {
             echo "## ${DEVICE}"
             echo ""
             echo "- 源: \`${REPO}@${BRANCH}\`  commit \`${COMMIT}\` (${CDATE})"
+            echo "- 包体系: USE_APK=\`${USE_APK:-no}\`（package/system: $(ls -d package/system/apk package/system/opkg 2>/dev/null | xargs -r -n1 basename | paste -sd, -)）"
             echo "- target: \`targets/${BOARD}/${SUB}\`  ARCH_PACKAGES: \`${ARCH}\`"
             echo "- profile: \`${PROFILE}\`  符号 \`${SYM}\` = $([ "${SYM_OK}" = 1 ] && echo OK || echo '**不匹配**')"
             echo "- CONFIG_TARGET_PROFILE: \`${PROF:-<无>}\`"
             echo "- 收窄前 device 选项数: **${DEV_ALL}**   已选包数: **${SEL}**   zh-cn: 种子 ${ZHCN_SEED} → **${ZHCN}**"
+            echo "- 官方快照 targets 内核（参考）: ${KVER_DL} / ${KVG_DL}"
             echo ""
             echo "### ① 本源树根本没有 —— $(wc -l < /tmp/notfound.txt) 个"
             echo '```'; sed 's/^/  /' /tmp/notfound.txt; echo '```'
             echo "### ② 存在但没启用（依赖不满足）—— $(wc -l < /tmp/dropped.txt) 个"
             echo '```'; sed 's/^/  /' /tmp/dropped.txt; echo '```'
-            echo "### ③ 关键包本地实测（feeds/ 里有没有，最准）"
+            echo "### ③ 丢掉的包在 feeds/ 里的位置（前 40 个）"
             echo ""
             echo "| 包 | feeds 里的路径 |"
             echo "|---|---|"
             cat /tmp/where-local.txt 2>/dev/null || true
             echo ""
-            echo "### ④ 缺包的上游溯源（API，仅当本地没有时参考）"
+            echo "### ④ 缺包的上游溯源（API，前 40 个）"
             echo ""
             echo "| 缺包 | 上游哪个 feed 有 |"
             echo "|---|---|"
             cat /tmp/where.txt 2>/dev/null || true
             echo ""
-            echo "### feed 清单"
+            echo "### feeds.conf.default"
             echo '```'; cat feeds.conf.default 2>/dev/null; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "===== 关键值 ====="
-          echo "device=${DEVICE} repo=${REPO} branch=${BRANCH} seed=${SEED} profile=${PROFILE}"
-          echo "target=targets/${BOARD}/${SUB} arch=${ARCH} DEV_ALL=${DEV_ALL} SYM_OK=${SYM_OK}"
+          echo "device=${DEVICE} repo=${REPO} ref=${BRANCH} seed=${SEED} profile=${PROFILE}"
+          echo "target=targets/${BOARD}/${SUB} arch=${ARCH} USE_APK=${USE_APK:-no} DEV_ALL=${DEV_ALL} SYM_OK=${SYM_OK}"
           echo "notfound=$(wc -l < /tmp/notfound.txt) dropped=$(wc -l < /tmp/dropped.txt) zhcn=${ZHCN_SEED}->${ZHCN}"
