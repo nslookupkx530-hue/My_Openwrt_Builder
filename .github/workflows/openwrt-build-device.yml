@@ -21,6 +21,7 @@ on:
           - x86
           - AXT-1800
           - GL-MT3600BE
+          - GL-MT6000
           - Cudy-TR3000-256MB
           - Tenda-BE12PRO
       source_ref:
